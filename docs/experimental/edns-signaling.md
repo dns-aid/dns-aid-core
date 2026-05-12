@@ -22,15 +22,18 @@ Consider the three discovery scenarios from `draft-mozleywilliams-dnsop-dnsaid-0
 2. **Known domain, unknown service** — query `_index._agents.{domain}`, then walk the named entries. Multiple round trips; the index tells you names but not metadata.
 3. **Unknown / wildcard** — search provider or federated registry. Most expensive.
 
-Scenarios 2 and 3 commonly produce *N* candidates of which the client only wants a handful that match its needs — capabilities, intent, transport, auth posture. Today the client filters all *N* locally after fetching, often after also fetching enrichment metadata (cap docs, agent cards) for records it will discard.
+Two pressures motivate adding a query-time signaling channel:
 
-The `agent-hint` option moves the filter description to the query itself. If any hop along the path understands the option, that hop can:
+**Filtering at the right layer.** Scenarios 2 and 3 commonly produce *N* candidates of which the client only wants a handful that match its needs. Today the client filters all *N* locally after fetching, often after dereferencing enrichment metadata (cap-docs, agent cards) for records it will discard. Some of that filtering — multi-tenant scope, transport binding, policy posture, jurisdiction — is on data the authoritative server already has at the DNS layer. Pushing those filters into the query lets a hint-aware hop narrow the result set or short-circuit with a cached pre-filtered match.
 
-- Return only the subset that matches (a hint-aware authoritative)
-- Serve a cached pre-filtered answer (a hint-aware recursive resolver or forwarder)
-- Short-circuit the query entirely (the client's own resolver wrapper, when the hint matches a recent cache entry)
+**Async fan-out / parallel agent workflows.** A client running a multi-agent job — research, draft, review, format — dispatches several discoveries in parallel against different domains. Each sibling query shares lifecycle properties: the same wait budget, the same intent class (the client is about to invoke, not browse), the same expected parallelism count. A query-time signal lets a cache anticipate the fan-out and pre-warm related lookups; lets an auth choose a faster code path when the deadline is tight; lets a forwarder rate-limit discovery probes more aggressively than imminent-invocation lookups. None of that requires changing what records get returned — it changes the lifecycle policy applied to the request.
 
-Cost decays across three states:
+These two pressures pull in different directions, which is why the design splits selectors into two axes:
+
+- **Axis 1 — substrate filters.** What records the auth/cache returns. Different values → different answer sets → participate in the cache key.
+- **Axis 2 — metering / lifecycle.** Policy applied to the request: rate limits, freshness, sibling count, deadline. Do not fragment the cache.
+
+Cost decays across three states (orthogonal to which selectors a client uses):
 
 - **Cold** — no caches anywhere. Client falls back to search/registry. Expensive.
 - **Warm** — at least one hop is hint-aware and has a fresh matching record. No expensive search, possibly no DNS round-trip at all.
@@ -67,11 +70,11 @@ The hint flows from the client toward the authoritative server. Any hop that und
                                                          └──────────────────┘
 ```
 
-**Locus 1 — in-process client cache.** The agent's own resolver wrapper reads the hint, checks a local cache keyed by `(qname, qtype, hint_signature)`. Cache hit short-circuits the query. The reference implementation, `EdnsAwareResolver`, ships with this PR. Always usable; no infrastructure required.
+**Locus 1 — in-client programmable hop.** Today this is `EdnsAwareResolver`: a thin resolver wrapper that reads the hint, checks a local cache keyed by `(qname, qtype, hint_signature)`, and short-circuits on a hit. The wire-level emission of the option is also done here. Longer-term, Locus 1 is whatever the SDK grows into — a richer in-process cache that pre-fetches cap-docs on `parallelism` hints, anticipates sibling queries on `client_intent_class=invocation`, and tracks deadlines across a fan-out. The same role might also be filled by a small DNS-like cache process co-located with the agent runtime, fetching agentic metadata out of band and serving warm answers to the agent. Either deployment shape uses the same wire semantics; only the process boundary differs. Locus 1 is always usable — no infrastructure required.
 
 **Locus 2 — hint-aware forwarder / recursive resolver.** A corporate gateway or shared resolver that understands the hint, serves cached pre-filtered responses, or rewrites the query before forwarding. Out of scope for this PR; valid future deployment.
 
-**Locus 3 — hint-aware authoritative server.** A DNS server implementation that inspects the hint on incoming queries and narrows the response set to records matching the selectors. For example: a domain publishes 50 agents, the client queries with `capabilities=chat & intent=summarize`, the authoritative returns just the 2 records that match. Out of scope for this PR's reference implementation; the wire format and advertisement schema are designed to support this hop without modification.
+**Locus 3 — hint-aware authoritative server.** A DNS server implementation that inspects the hint on incoming queries and narrows the response set to records matching the selectors. For example: a domain publishes 50 agents, the client queries with `realm=prod & transport=mcp & policy_required=1`, the authoritative returns just the records that match all three. Out of scope for this PR's reference implementation; the wire format and advertisement schema are designed to support this hop without modification.
 
 Commodity authoritative servers (stock BIND, Route53, Cloudflare) are inert to unknown options per RFC 6891. They will respond identically with or without the option. That is a valid, lowest-common-denominator deployment — the client-side cache at Locus 1 still provides value.
 
@@ -115,39 +118,97 @@ A hint-aware hop MAY include an `agent-hint` option in its response with the VER
 
 Absence of an echo on a response is meaningful — it tells the client no upstream filtering happened, and the client should fall back to local filtering against the returned record set. This mirrors RFC 8914 (Extended DNS Errors) in pattern: response-only, non-mandatory, additive context.
 
-### 4.3 Selectors v0
+### 4.3 Selectors v0 — two axes
 
-| Code | Name | Value format | Example |
-|------|------|--------------|---------|
-| 0x01 | `capabilities` | Comma-separated UTF-8 list | `"chat,code-review"` |
-| 0x02 | `intent` | Single UTF-8 tag | `"summarize"` |
-| 0x03 | `transport` | `"mcp"` \| `"a2a"` \| `"https"` | `"mcp"` |
-| 0x04 | `auth_type` | `"none"` \| `"bearer"` \| `"oauth2"` \| `"mtls"` | `"bearer"` |
+Selector codes are split into two axes by code range. The split is **structural**, not just advisory — it determines cache behaviour (see §4.5).
 
-Codes `0x05` through `0xFF` are reserved for future selectors. The taxonomy intentionally matches the existing Path A filter kwargs on `dns_aid.discover()`.
+#### Axis 1 — substrate filters (codes 0x01–0x0F)
 
-### 4.4 Worked example
+Things the auth/cache can decide on without dereferencing anything out-of-band. Different Axis-1 values mean different *answer sets*.
 
-A client looking for an MCP-transport, bearer-auth chat agent emits an option payload of:
+| Code | Name | Value format | What it asks for |
+|------|------|--------------|------------------|
+| 0x01 | `realm` | UTF-8 | Match SVCB `realm=` param (multi-tenant scope) |
+| 0x02 | `transport` | `"mcp"` \| `"a2a"` \| `"https"` | Encoded in `_{proto}._agents` owner-name and `alpn` |
+| 0x03 | `policy_required` | `"1"` (or absent) | Only records carrying a `policy=` URI |
+| 0x04 | `min_trust` | `"signed"` \| `"dnssec"` \| `"signed+dnssec"` | Gated on `sig` param + DNSSEC chain status |
+| 0x05 | `jurisdiction` | ISO region (e.g. `"eu"`, `"us-east"`) | Compliance lever; needs publisher-side metadata |
+
+`policy_required=0` is the default and is **not** emitted on the wire — absence means "don't care," not "forbid."
+
+Codes `0x06`–`0x0F` are reserved for future Axis-1 selectors.
+
+#### Axis 2 — metering / lifecycle (codes 0x10–0x1F)
+
+Things about the request itself. Drive accept/reject/rate-limit/prefetch policy but do NOT change what records get returned (see §4.5).
+
+| Code | Name | Value format | What it asks for |
+|------|------|--------------|------------------|
+| 0x10 | `client_intent_class` | `"discovery"` \| `"invocation"` | Browsing vs about-to-call; auths can rate-limit discovery harder |
+| 0x11 | `max_age` | UTF-8 decimal seconds | Cache freshness budget (analog to HTTP `Cache-Control: max-age`) |
+| 0x12 | `parallelism` | UTF-8 decimal uint | Expected sibling-query count; signals fan-out to caches |
+| 0x13 | `deadline_ms` | UTF-8 decimal uint | Client's wait budget. **Hint-only** — see honesty note below |
+
+Codes `0x14`–`0x1F` are reserved for future Axis-2 selectors.
+
+**Honesty about `deadline_ms`.** DNS has no semantic for "refuse for SLA reasons." An auth or recursive that sees a tight deadline can: (a) prefer a faster code path; (b) serve a stale cache entry to make the budget; (c) log/audit the deadline class for capacity planning. It cannot return a "won't meet deadline" error in v0 — that would require a new RCODE or a structured error in the OPT response, which is out of scope.
+
+#### Reserved for future axes (0x20+)
+
+| Code | Name | Status | Notes |
+|------|------|--------|-------|
+| 0x20 | `client_cookie` | Documented, not coded | DNS-cookie-style proof-of-work / auth token. Real value for gating high-cost zones. Skipped in v0 code by design — adds an auth dimension that should be specified separately. |
+| 0x21 | `correlation_id` | Documented, not coded | Opaque workflow ID linking sibling queries. Useful for distributed tracing, but linkability across queries has privacy cost. Deferred until taxonomy locks. |
+
+#### Explicitly NOT DNS-layer selectors
+
+`capabilities` and `intent` belong in the **Channel 1 JSON advertisement** (§5.1), not in this wire option. The reason is layering: SVCB doesn't carry capability strings — those live in cap-doc JSON that the auth would have to dereference per-query to filter on. That dereference breaks DNS latency budgets and forces async work into a synchronous handler. The publisher tells the client which selectors are meaningful via `edns_signaling.honored_selectors`; the client uses that list for **post-fetch local filtering**, not query-time signaling.
+
+### 4.4 Worked example: async fan-out
+
+A client running a multi-agent job (research → draft → review → format) dispatches four discoveries in parallel. Each sibling query carries the same metering profile:
+
+- `realm=prod` (Axis 1 — must match published realm)
+- `transport=mcp` (Axis 1)
+- `client_intent_class=invocation` (Axis 2 — about to call, not browsing)
+- `parallelism=4` (Axis 2 — three more siblings coming)
+- `deadline_ms=30000` (Axis 2 — caller will wait at most 30 s)
+
+Wire payload:
 
 ```
-version=0x00  count=0x04
-0x01 0x04 "chat"
-0x02 0x09 "summarize"
-0x03 0x03 "mcp"
-0x04 0x06 "bearer"
+version=0x00  count=0x05
+0x01 0x04 "prod"                     (realm)
+0x02 0x03 "mcp"                      (transport)
+0x10 0x0a "invocation"               (client_intent_class)
+0x12 0x01 "4"                        (parallelism)
+0x13 0x05 "30000"                    (deadline_ms)
 ```
 
-Bytes on the wire: `00 04 01 04 63 68 61 74 02 09 73 75 6d 6d 61 72 69 7a 65 03 03 6d 63 70 04 06 62 65 61 72 65 72` (32 bytes payload, well under the 512-byte cap).
+A hint-aware cache (Locus 1 or 2) that sees this on one of the four sibling queries can:
 
-A hint-aware authoritative that applied both `capabilities` and `transport` (but not `intent` or `auth_type`) would echo:
+- Pre-warm cap-doc fetches for any candidate matching `realm=prod & transport=mcp`
+- Keep the cache entry warm long enough to satisfy the other three siblings (which will share the same `signature()` because their Axis 1 values are identical)
+- Skip cache-tier policy that would otherwise rate-limit a `discovery` burst, because `client_intent_class=invocation` says these are imminent
+
+A hint-aware authoritative that honoured `realm` and `transport` (but not the metering selectors, which don't apply to it) would echo:
 
 ```
 version=0x80  count=0x02
-0x01 0x03
+0x01 0x02
 ```
 
-Bytes: `80 02 01 03` (4 bytes payload).
+Bytes on the wire: `80 02 01 02` (4 bytes payload).
+
+### 4.5 Cache-key semantics (load-bearing invariant)
+
+Axis 1 selectors participate in `AgentHint.signature()`. Axis 2 selectors do not.
+
+This is the key design invariant: two queries that differ only in Axis 2 fields — say, one with `parallelism=4` and another with `parallelism=64` — MUST hit the same cache entry. They are asking for the same *answer set*, just with different policy applied to *how the request is handled*. Fragmenting the cache on metering would defeat the warm-state amortisation the design is built around.
+
+Equivalently: a hint-aware cache keys its entries on Axis 1 selectors only; Axis 2 selectors drive lifecycle decisions (rate limit, prefetch, deadline-aware serving) without affecting what gets cached or what gets returned.
+
+The reference implementation enforces this — `AgentHint.signature()` only includes Axis 1 fields, and `EdnsAwareResolver` uses that signature as its cache key.
 
 ## 5. Publisher advertisement
 
@@ -163,11 +224,13 @@ Every publisher (hint-aware or not) MAY include an `edns_signaling` block in the
   ...
   "edns_signaling": {
     "version": 0,
-    "honored_selectors": ["capabilities", "intent", "transport"],
-    "note": "Recommends client-side pre-filtering with these selectors."
+    "honored_selectors": ["realm", "transport", "capabilities", "intent"],
+    "note": "realm/transport narrow at the DNS layer; capabilities/intent are for client-side post-fetch filtering."
   }
 }
 ```
+
+`honored_selectors` may include both DNS-layer selector names (Axis 1, e.g. `realm`, `transport`) AND JSON-only selectors the client should filter on locally after fetch (e.g. `capabilities`, `intent`). The publisher mixes them because the client uses the same list for both decisions — "what's worth populating in the EDNS option" and "what's worth filtering on locally."
 
 This tells the client which selectors are *meaningful* for this publisher's agents — i.e. the publisher has populated the matching metadata fields so filtering on them will actually narrow results. Independent of whether any hop on the DNS resolution path is hint-aware; useful even with stock authoritative software.
 
@@ -176,9 +239,9 @@ This tells the client which selectors are *meaningful* for this publisher's agen
 A hint-aware authoritative or recursive server signals its capability in one of two ways:
 
 1. **OPT response echo** (preferred) — described in §4.2. The presence of an echo on a query response is itself the advertisement: "this responder processed your hint."
-2. **SVCB advertisement parameter** (optional, static advertisement at zone-discovery time) — a new param key `key65409 = "agent-hint"` on the apex SVCB record at `_agents.{domain}`, with a value like `v=0;selectors=capabilities,intent,transport`. Tells clients before they emit their first hint that this zone's authoritative will honour it. v0 keeps this optional; the echo carries the same information reactively.
+2. **SVCB advertisement parameter** (optional, static advertisement at zone-discovery time) — a new param key `key65409 = "agent-hint"` on the apex SVCB record at `_agents.{domain}`, with a value like `v=0;selectors=realm,transport,min_trust`. Tells clients before they emit their first hint that this zone's authoritative will honour those Axis-1 selectors. v0 keeps this optional; the echo carries the same information reactively.
 
-Channels are complementary. A client uses Channel 1 to decide *which selectors to populate*, and Channel 2 to know *whether to expect upstream narrowing or rely on local filtering*.
+Channels are complementary. A client uses Channel 1 to decide *which selectors to populate* (both DNS-layer and JSON-side), and Channel 2 to know *whether to expect upstream narrowing on the DNS-layer ones or rely on local filtering*.
 
 ## 6. Reference implementation
 
@@ -223,14 +286,18 @@ EDNS padding (RFC 7830) can be used in conjunction with `agent-hint` to make pay
 - **Programmable-hop trust.** A hint-aware hop that narrows the response set is a trusted relay for filtering semantics. A malicious or compromised hop could omit matching records, return records that don't match the selectors, or fabricate records. DNSSEC continues to protect the answer-set integrity (when present) but cannot vouch for filtering semantics — only that the records returned were authentically published.
 - **Echo unauthenticated.** The response echo (§4.2) is unsigned. DNSSEC signs the answer set but not OPT records. A hop could lie about what it filtered. Clients SHOULD validate by re-applying selectors locally to the returned records; treat the echo as a hint, not a guarantee.
 - **Cache poisoning at Locus 1.** The reference `EdnsAwareResolver` caches by hint signature. An attacker who can inject a forged DNS response on a cache miss could pollute the cache for any future query with that signature. Standard DNS poisoning mitigations apply; running DNSSEC validation on the path closes the most common vector.
-- **Hint tampering on the path.** Forwarders that don't understand the option are required to propagate it per RFC 6891, but a hostile forwarder could rewrite or strip the option. The reference implementation tolerates strip gracefully (the option simply doesn't reach the upstream hop, and local filtering takes over). Rewrite is more concerning: a forwarder injecting a different `intent` or `auth_type` could cause the client to be served a different agent than it asked for. Mitigation is the same as for echo trust — the client SHOULD re-apply selectors locally.
+- **Hint tampering on the path.** Forwarders that don't understand the option are required to propagate it per RFC 6891, but a hostile forwarder could rewrite or strip the option. The reference implementation tolerates strip gracefully (the option simply doesn't reach the upstream hop, and local filtering takes over). Rewrite is more concerning: a forwarder injecting a different `realm` or `min_trust` could cause the client to be served a different agent than it asked for. Mitigation is the same as for echo trust — the client SHOULD re-apply Axis-1 selectors locally against the returned record set.
+- **Cookies / proof-of-work (future).** A `client_cookie` selector (reserved code 0x20) would let auths gate high-cost zones against query floods. Not coded in v0; documented as a future extension. When introduced, it raises its own threat model — cookie binding, replay windows, recursive-side honesty about cookie propagation — that needs separate treatment.
+- **Correlation IDs and linkability (future).** A `correlation_id` selector (reserved code 0x21) would let caches and observability tooling group sibling queries from an async fan-out. The cost is that every hop sees the same opaque ID across the fan-out, which makes per-query traffic analysis substantially easier. Defer until the privacy trade-off is explicit.
 
 ## 9. Open questions
 
 1. **Middlebox transparency.** Novel 65xxx options may be stripped by forwarders that don't pass unknown options through, despite the RFC 6891 requirement. The reference implementation is designed to remain useful even when the option never leaves the client (Locus 1). Operators relying on Locus 2 or 3 should test their path with `tcpdump`.
-2. **Selector taxonomy lock-in.** Once selector codes `0x01`–`0x04` ship, changing them is painful — hint-aware implementations will index and cache on those codes. Worth a separate taxonomy review pass before any IANA action.
-3. **Echo authentication.** Is unauthenticated echo enough? A signed echo would require a different transport (the OPT record can't be DNSSEC-signed). Alternative: include a hash of the applied-selector set in the answer-section TXT, signed alongside the SVCB. Deferred to future work.
-4. **Draft alignment.** Likely a separate `draft-XXX-dnsaid-edns-signaling` rather than an appendix to `draft-mozleywilliams-dnsop-dnsaid-01`, because the wire-format addition and authoritative-side semantics are substantial.
+2. **Selector taxonomy lock-in.** Once selector codes ship, changing them is painful — hint-aware implementations will index and cache on those codes. The two-axis split (0x01–0x0F substrate, 0x10–0x1F metering, 0x20+ reserved) buys some headroom, but the specific codes within each axis (REALM=0x01, TRANSPORT=0x02, …) are still a commitment. Worth a separate taxonomy review pass before any IANA action.
+3. **Axis-encoded code ranges vs flat numbering.** v0 encodes the axis into the selector-code range. The benefit is that an on-the-wire inspector can tell at a glance which selectors are answer-shaping (Axis 1) and which are policy-shaping (Axis 2). The cost is a hard ceiling of 15 selectors per axis — enough for the foreseeable future, but a future v1 might want flat numbering with axis declared in a separate registry. Documented so the trade-off is explicit.
+4. **Echo authentication.** Is unauthenticated echo enough? A signed echo would require a different transport (the OPT record can't be DNSSEC-signed). Alternative: include a hash of the applied-selector set in the answer-section TXT, signed alongside the SVCB. Deferred to future work.
+5. **`deadline_ms` enforcement.** v0 makes it a hint-only signal — auth can prefer a faster path or serve stale to make the budget, but cannot return "won't meet deadline." A future revision could add a structured error in the OPT response (RFC 8914-style INFO-CODE) for explicit SLA refusal. Out of scope for v0.
+6. **Draft alignment.** Likely a separate `draft-XXX-dnsaid-edns-signaling` rather than an appendix to `draft-mozleywilliams-dnsop-dnsaid-01`, because the wire-format addition and authoritative-side semantics are substantial.
 
 ## 10. Future work
 

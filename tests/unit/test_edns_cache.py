@@ -54,7 +54,7 @@ async def test_first_call_misses_then_caches():
     upstream = _make_upstream()
     resolver = EdnsAwareResolver(upstream=upstream)
 
-    hint = AgentHint(capabilities=["chat"])
+    hint = AgentHint(realm="prod")
     result = await resolver.resolve("_chat._mcp._agents.example.com", "SVCB", agent_hint=hint)
 
     assert result.answer is upstream.resolve.return_value
@@ -65,7 +65,7 @@ async def test_second_call_hits_cache_when_signature_matches():
     upstream = _make_upstream()
     resolver = EdnsAwareResolver(upstream=upstream)
 
-    hint = AgentHint(capabilities=["chat"], intent="summarize")
+    hint = AgentHint(realm="prod", transport="mcp")
     await resolver.resolve("_chat._mcp._agents.example.com", "SVCB", agent_hint=hint)
     await resolver.resolve("_chat._mcp._agents.example.com", "SVCB", agent_hint=hint)
 
@@ -73,16 +73,35 @@ async def test_second_call_hits_cache_when_signature_matches():
     upstream.resolve.assert_awaited_once()
 
 
-async def test_different_hint_signature_misses_cache():
+async def test_axis2_only_differences_still_hit_cache():
+    """Two queries differing only in Axis 2 fields must share a cache entry.
+
+    Locks in the design invariant: metering selectors (parallelism, deadline_ms,
+    etc.) do not fragment the cache because they describe the request, not the
+    answer set.
+    """
     upstream = _make_upstream()
     resolver = EdnsAwareResolver(upstream=upstream)
 
-    h1 = AgentHint(capabilities=["chat"])
-    h2 = AgentHint(capabilities=["code"])
+    h1 = AgentHint(realm="prod", parallelism=4, deadline_ms=5000)
+    h2 = AgentHint(realm="prod", parallelism=64, deadline_ms=1)
+    await resolver.resolve("example.com", "SVCB", agent_hint=h1)
+    await resolver.resolve("example.com", "SVCB", agent_hint=h2)
+
+    # One upstream call — second was a cache hit even with very different metering.
+    upstream.resolve.assert_awaited_once()
+
+
+async def test_different_axis1_signature_misses_cache():
+    upstream = _make_upstream()
+    resolver = EdnsAwareResolver(upstream=upstream)
+
+    h1 = AgentHint(realm="prod")
+    h2 = AgentHint(realm="staging")
     await resolver.resolve("_x._mcp._agents.example.com", "SVCB", agent_hint=h1)
     await resolver.resolve("_x._mcp._agents.example.com", "SVCB", agent_hint=h2)
 
-    # Different hint signatures → both miss.
+    # Different Axis 1 values → different signatures → both miss.
     assert upstream.resolve.await_count == 2
 
 
@@ -92,7 +111,7 @@ async def test_no_hint_caches_separately_from_hinted():
     resolver = EdnsAwareResolver(upstream=upstream)
 
     await resolver.resolve("example.com", "SVCB", agent_hint=None)
-    await resolver.resolve("example.com", "SVCB", agent_hint=AgentHint(capabilities=["chat"]))
+    await resolver.resolve("example.com", "SVCB", agent_hint=AgentHint(realm="prod"))
     await resolver.resolve("example.com", "SVCB", agent_hint=None)
 
     # Bare-first, hinted, bare-third → first and third should share a key (one upstream call
@@ -104,7 +123,7 @@ async def test_ttl_expiry_triggers_re_resolution():
     upstream = _make_upstream()
     resolver = EdnsAwareResolver(upstream=upstream, ttl_seconds=0.05)
 
-    hint = AgentHint(capabilities=["chat"])
+    hint = AgentHint(realm="prod")
     await resolver.resolve("example.com", "SVCB", agent_hint=hint)
     time.sleep(0.1)  # wait past TTL (sync sleep is fine — test doesn't depend on the loop)
     await resolver.resolve("example.com", "SVCB", agent_hint=hint)
@@ -116,7 +135,7 @@ async def test_invalidate_drops_cache():
     upstream = _make_upstream()
     resolver = EdnsAwareResolver(upstream=upstream)
 
-    hint = AgentHint(capabilities=["chat"])
+    hint = AgentHint(realm="prod")
     await resolver.resolve("example.com", "SVCB", agent_hint=hint)
     resolver.invalidate()
     await resolver.resolve("example.com", "SVCB", agent_hint=hint)
@@ -134,7 +153,7 @@ async def test_hint_passed_to_upstream_via_use_edns():
     upstream = _make_upstream()
     resolver = EdnsAwareResolver(upstream=upstream)
 
-    hint = AgentHint(capabilities=["chat"])
+    hint = AgentHint(realm="prod")
     await resolver.resolve("example.com", "SVCB", agent_hint=hint)
 
     upstream.use_edns.assert_called()
@@ -151,7 +170,7 @@ async def test_no_hint_clears_previous_options():
     upstream = _make_upstream()
     resolver = EdnsAwareResolver(upstream=upstream)
 
-    await resolver.resolve("a.example.com", "SVCB", agent_hint=AgentHint(capabilities=["chat"]))
+    await resolver.resolve("a.example.com", "SVCB", agent_hint=AgentHint(realm="prod"))
     await resolver.resolve("b.example.com", "SVCB", agent_hint=None)
 
     # Last use_edns call (for the bare resolve) must have empty options.
@@ -166,25 +185,21 @@ async def test_no_hint_clears_previous_options():
 
 
 async def test_upstream_echo_surfaced_on_cached_answer():
-    echo = AgentHintEcho(applied_selectors=[HintSelector.CAPABILITIES.value])
+    echo = AgentHintEcho(applied_selectors=[HintSelector.REALM.value])
     upstream = _make_upstream(echo=echo)
     resolver = EdnsAwareResolver(upstream=upstream)
 
-    result = await resolver.resolve(
-        "example.com", "SVCB", agent_hint=AgentHint(capabilities=["chat"])
-    )
+    result = await resolver.resolve("example.com", "SVCB", agent_hint=AgentHint(realm="prod"))
 
     assert result.echo is not None
-    assert result.echo.applied_selectors == [HintSelector.CAPABILITIES.value]
+    assert result.echo.applied_selectors == [HintSelector.REALM.value]
 
 
 async def test_absent_echo_means_no_upstream_filtering():
     upstream = _make_upstream(echo=None)
     resolver = EdnsAwareResolver(upstream=upstream)
 
-    result = await resolver.resolve(
-        "example.com", "SVCB", agent_hint=AgentHint(capabilities=["chat"])
-    )
+    result = await resolver.resolve("example.com", "SVCB", agent_hint=AgentHint(realm="prod"))
     assert result.echo is None
 
 
@@ -201,7 +216,5 @@ async def test_malformed_echo_in_response_returns_none():
     upstream.resolve = AsyncMock(return_value=mock_answer)
 
     resolver = EdnsAwareResolver(upstream=upstream)
-    result = await resolver.resolve(
-        "example.com", "SVCB", agent_hint=AgentHint(capabilities=["chat"])
-    )
+    result = await resolver.resolve("example.com", "SVCB", agent_hint=AgentHint(realm="prod"))
     assert result.echo is None

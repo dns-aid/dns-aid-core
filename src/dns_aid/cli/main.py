@@ -2712,18 +2712,60 @@ def dcv_revoke(
 @app.command("edns-probe")
 def edns_probe(
     domain: Annotated[str, typer.Argument(help="Domain to discover agents at")],
-    capabilities: Annotated[
-        str | None,
-        typer.Option("--capabilities", help="Comma-separated capabilities filter"),
+    # Axis 1 — substrate filters
+    realm: Annotated[
+        str | None, typer.Option("--realm", help="[Axis 1] Multi-tenant scope identifier.")
     ] = None,
-    intent: Annotated[str | None, typer.Option("--intent", help="Single intent tag filter")] = None,
     transport: Annotated[
         str | None,
-        typer.Option("--transport", help="Transport: mcp | a2a | https"),
+        typer.Option("--transport", help="[Axis 1] Transport: mcp | a2a | https."),
     ] = None,
-    auth_type: Annotated[
+    policy_required: Annotated[
+        bool,
+        typer.Option(
+            "--policy-required",
+            help="[Axis 1] Only return records carrying a policy= URI.",
+        ),
+    ] = False,
+    min_trust: Annotated[
         str | None,
-        typer.Option("--auth-type", help="Auth type: none | bearer | oauth2 | mtls"),
+        typer.Option(
+            "--min-trust",
+            help="[Axis 1] Trust posture: signed | dnssec | signed+dnssec.",
+        ),
+    ] = None,
+    jurisdiction: Annotated[
+        str | None,
+        typer.Option("--jurisdiction", help="[Axis 1] ISO region tag (e.g. eu, us-east)."),
+    ] = None,
+    # Axis 2 — metering / lifecycle
+    intent_class: Annotated[
+        str | None,
+        typer.Option(
+            "--intent-class",
+            help="[Axis 2] Client intent: discovery | invocation.",
+        ),
+    ] = None,
+    max_age: Annotated[
+        int | None,
+        typer.Option(
+            "--max-age",
+            help="[Axis 2] Don't return cache entries older than this many seconds.",
+        ),
+    ] = None,
+    parallelism: Annotated[
+        int | None,
+        typer.Option(
+            "--parallelism",
+            help="[Axis 2] Expected sibling-query count (signals fan-out to caches).",
+        ),
+    ] = None,
+    deadline_ms: Annotated[
+        int | None,
+        typer.Option(
+            "--deadline-ms",
+            help="[Axis 2] Wait budget in milliseconds. Hint-only — auth cannot refuse for SLA in v0.",
+        ),
     ] = None,
     show_wire: Annotated[
         bool,
@@ -2763,12 +2805,18 @@ def edns_probe(
     from dns_aid import discover
     from dns_aid.experimental import AgentHint
 
-    caps_list = [c.strip() for c in capabilities.split(",") if c.strip()] if capabilities else None
     hint = AgentHint(
-        capabilities=caps_list,
-        intent=intent,
+        # Axis 1
+        realm=realm,
         transport=transport,
-        auth_type=auth_type,
+        policy_required=policy_required,
+        min_trust=min_trust,
+        jurisdiction=jurisdiction,
+        # Axis 2
+        client_intent_class=intent_class,
+        max_age=max_age,
+        parallelism=parallelism,
+        deadline_ms=deadline_ms,
     )
 
     console.print(
