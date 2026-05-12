@@ -5,11 +5,8 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "automated"
     groups:
-      patch-security:
+      patches:
         update-types:
           - "patch"
 
@@ -17,9 +14,7 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-    labels:
-      - "dependencies"
-      - "automated"
+    open-pull-requests-limit: 5
     groups:
       # github/codeql-action's sub-actions (init/autobuild/analyze/upload-sarif)
       # are one repo pinned by one SHA and REQUIRE lockstep versions: init writes
