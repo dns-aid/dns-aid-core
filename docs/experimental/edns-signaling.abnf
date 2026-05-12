@@ -1,0 +1,108 @@
+; DNS-AID experimental EDNS(0) agent-hint option — wire format
+; Reference: docs/experimental/edns-signaling.md
+;
+; ⚠ EXPERIMENTAL. This wire format is unstable. Option-code 65430 sits in the
+; RFC 6891 private-use range (65001–65534) and is subject to change before any
+; IANA coordination.
+;
+; This file extends the core DNS-AID ABNF (docs/rfc/wire-format.abnf) with the
+; experimental agent-hint option. ABNF rules from RFC 5234.
+
+; ==================================================================
+; Core ABNF rules referenced (from RFC 5234)
+; ==================================================================
+
+DIGIT          = %x30-39                        ; 0-9
+ALPHA          = %x41-5A / %x61-7A              ; A-Z / a-z
+OCTET          = %x00-FF
+BIT            = "0" / "1"
+
+; ==================================================================
+; EDNS(0) framing context (from RFC 6891 §6.1.2)
+; ==================================================================
+;
+; agent-hint is carried as a single OPTION entry inside the RDATA of the
+; OPT pseudo-RR:
+;
+;     OPT.RDATA = *agent-hint-option / *(other-option) / *agent-hint-option
+;
+; Where each EDNS option entry is:
+;
+;     option         = option-code option-length option-data
+;     option-code    = 2OCTET   ; big-endian; 65430 = 0xFF96 for agent-hint
+;     option-length  = 2OCTET   ; big-endian length of option-data, in octets
+;     option-data    = *OCTET   ; opaque to the EDNS framing; defined per option-code
+
+; ==================================================================
+; agent-hint option (option-code = 65430)
+; ==================================================================
+
+; option-data when option-code = 65430.  Either a request payload or an echo.
+agent-hint-data    = agent-hint-request / agent-hint-echo
+
+; -- Request -------------------------------------------------------
+
+agent-hint-request = version-request selector-count *selector
+                     ; total length: 2 + sum(selector lengths)
+                     ; SHOULD NOT exceed 512 octets in any single option
+
+version-request    = %x00
+                     ; v0; high bit clear distinguishes a request from an echo
+
+selector-count     = OCTET
+                     ; number of selectors that follow (0–255)
+
+selector           = selector-code selector-length selector-value
+
+selector-code      = OCTET
+                     ; 0x01 = capabilities (UTF-8 comma list)
+                     ; 0x02 = intent       (UTF-8 single tag)
+                     ; 0x03 = transport    (UTF-8: "mcp" | "a2a" | "https")
+                     ; 0x04 = auth_type    (UTF-8: "none" | "bearer" | "oauth2" | "mtls")
+                     ; 0x05–0xFF reserved.  Consumers MUST silently ignore
+                     ; unknown selector codes (forward-compat).
+
+selector-length    = OCTET                       ; length of selector-value in bytes
+selector-value     = *OCTET                      ; UTF-8 encoded, length-prefixed
+
+; -- Response echo (RFC 8914-style additive context) ---------------
+
+agent-hint-echo    = version-echo applied-count *applied-selector
+                     ; emitted by a hint-aware hop in the response.  Absence is
+                     ; meaningful — it means no upstream filtering happened.
+
+version-echo       = %x80
+                     ; v0; high bit set distinguishes an echo from a request.
+                     ; Lower 7 bits carry the version number; 0x80 == version 0 echo.
+
+applied-count      = OCTET                       ; number of selector codes that follow
+
+applied-selector   = OCTET                       ; selector-code that the hop honoured.
+                     ; Selector codes appearing here MUST also have appeared in
+                     ; the corresponding request.
+
+; ==================================================================
+; Publisher advertisement (JSON, not on the wire) — Channel 1
+; ==================================================================
+;
+; Embedded inside cap-doc, agent-card, or http-index JSON. Not part of any DNS
+; wire format; included here for completeness so implementers see the whole
+; signaling surface in one place.
+;
+;     "edns_signaling": {
+;       "version":           <integer>,
+;       "honored_selectors": [<selector-name>, ...],
+;       "note":              <string?>          // optional
+;     }
+;
+; Where <selector-name> ∈ {"capabilities", "intent", "transport", "auth_type"} for v0.
+
+; ==================================================================
+; SVCB advertisement parameter (optional) — Channel 2 static
+; ==================================================================
+;
+; Optional SVCB SvcParam at the zone apex (_agents.{domain}). v0 reserves the
+; following key for forward use; not emitted by the v0 reference implementation.
+;
+;     key65409 = "agent-hint"
+;     value    = "v=0;selectors=<selector-name>(,<selector-name>)*"

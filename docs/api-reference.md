@@ -1853,6 +1853,109 @@ Disabled by default (`http_push_url=None`). Configure via `SDKConfig` or the `DN
 
 ---
 
+## Experimental: EDNS(0) signaling
+
+> ⚠ **Unstable.** APIs in this section live in `dns_aid.experimental` and may change or be removed in any release. They are not covered by semver guarantees. Full design rationale: [docs/experimental/edns-signaling.md](experimental/edns-signaling.md).
+
+Lets a client attach selector filters to outgoing DNS queries via an EDNS(0) option (code 65430, private use). Hint-aware DNS hops — including hint-aware authoritative servers — can narrow the response or short-circuit with a cached match. Stock authoritative servers treat the option as inert per RFC 6891.
+
+Activate by setting `DNS_AID_EXPERIMENTAL_EDNS_HINTS=1` in the environment. Without the flag the code paths are dormant even when the symbols are imported.
+
+### AgentHint
+
+```python
+from dns_aid.experimental import AgentHint
+
+hint = AgentHint(
+    capabilities=["chat", "code-review"],
+    intent="summarize",
+    transport="mcp",
+    auth_type="bearer",
+)
+```
+
+Fields (all optional, all default `None`):
+
+| Field | Type | Selector code | Notes |
+|-------|------|---------------|-------|
+| `capabilities` | `list[str] \| None` | 0x01 | Comma-joined on the wire. Empty / whitespace-only strings are stripped. |
+| `intent` | `str \| None` | 0x02 | Single tag. |
+| `transport` | `str \| None` | 0x03 | One of `"mcp"`, `"a2a"`, `"https"`. |
+| `auth_type` | `str \| None` | 0x04 | One of `"none"`, `"bearer"`, `"oauth2"`, `"mtls"`. |
+
+Methods:
+- `encode() -> bytes` — produce the EDNS(0) option payload (raises `ValueError` if any selector value exceeds 255 UTF-8 bytes or the total payload exceeds 512).
+- `signature() -> str` — stable cache-key string. Order-independent (`capabilities` sorted).
+
+### AgentHintEcho
+
+Response-side echo from a hint-aware hop, listing the selector codes the responder actually applied. Absence means no upstream filtering happened — fall back to local filtering.
+
+```python
+from dns_aid.experimental import AgentHintEcho
+
+echo = AgentHintEcho(applied_selectors=[0x01, 0x02])
+```
+
+### EdnsSignalingAdvertisement
+
+Publisher advertisement carried in `cap-doc`, `agent-card`, or `agents-index.json`:
+
+```json
+{
+  "edns_signaling": {
+    "version": 0,
+    "honored_selectors": ["capabilities", "intent", "transport"],
+    "note": "Recommends client-side pre-filtering."
+  }
+}
+```
+
+Lifted automatically onto `CapabilityDocument.edns_signaling`, `A2AAgentCard.edns_signaling`, and `HttpIndexAgent.edns_signaling`. Stored as `dict | None` (forward-compat on unknown shapes).
+
+### EdnsAwareResolver
+
+In-process programmable hop (Locus 1 in the design doc). Wraps `dns.asyncresolver.Resolver`, attaches the hint as an EDNS option on outgoing queries (when the env flag is set), and caches answers keyed by `(qname, qtype, hint_signature)`.
+
+```python
+from dns_aid.experimental import AgentHint, EdnsAwareResolver
+
+resolver = EdnsAwareResolver(ttl_seconds=60)
+result = await resolver.resolve(
+    "_chat._mcp._agents.example.com", "SVCB",
+    agent_hint=AgentHint(capabilities=["chat"]),
+)
+# result.answer — dnspython Answer
+# result.echo   — AgentHintEcho | None (presence == upstream is hint-aware)
+```
+
+### Integration with discover()
+
+```python
+from dns_aid import discover
+from dns_aid.experimental import AgentHint
+
+result = await discover(
+    "example.com",
+    agent_hint=AgentHint(capabilities=["chat"], transport="mcp"),
+)
+```
+
+The `agent_hint=` kwarg is accepted unconditionally for forward-compat. The option is only emitted on the wire when `DNS_AID_EXPERIMENTAL_EDNS_HINTS=1` is set.
+
+### CLI: `dns-aid edns-probe`
+
+```bash
+DNS_AID_EXPERIMENTAL_EDNS_HINTS=1 \
+  dns-aid edns-probe example.com \
+  --capabilities=chat,code --intent=summarize --transport=mcp \
+  --show-wire
+```
+
+Prints an `[experimental]` banner on stderr, performs a cache-miss → cache-hit demonstration with `EdnsAwareResolver`, and reports any `AgentHintEcho` received.
+
+---
+
 ## Version
 
 ```python

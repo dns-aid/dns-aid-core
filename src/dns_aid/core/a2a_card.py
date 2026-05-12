@@ -112,6 +112,9 @@ class A2AAgentCard:
     default_input_modes: list[str] = field(default_factory=lambda: ["text"])
     default_output_modes: list[str] = field(default_factory=lambda: ["text"])
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Experimental: publisher's EDNS(0) agent-hint advertisement. Stored as the
+    # raw dict from JSON. See docs/experimental/edns-signaling.md.
+    edns_signaling: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> A2AAgentCard:
@@ -134,6 +137,11 @@ class A2AAgentCard:
         if "authentication" in data and isinstance(data["authentication"], dict):
             auth = A2AAuthentication.from_dict(data["authentication"])
 
+        # Experimental: lift edns_signaling advertisement if present
+        edns_signaling = data.get("edns_signaling")
+        if not isinstance(edns_signaling, dict):
+            edns_signaling = None
+
         # Collect unknown fields as metadata
         known_keys = {
             "name",
@@ -145,6 +153,7 @@ class A2AAgentCard:
             "authentication",
             "defaultInputModes",
             "defaultOutputModes",
+            "edns_signaling",
         }
         metadata = {k: v for k, v in data.items() if k not in known_keys}
 
@@ -159,6 +168,7 @@ class A2AAgentCard:
             default_input_modes=data.get("defaultInputModes", ["text"]),
             default_output_modes=data.get("defaultOutputModes", ["text"]),
             metadata=metadata,
+            edns_signaling=edns_signaling,
         )
 
     @classmethod
