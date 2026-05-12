@@ -26,33 +26,37 @@ docker compose ps --status running | grep -q bind-orga || docker compose up -d b
 
 echo
 echo "--- [2] Start tcpdump on agent-a (background) ---"
-# 0xff96 in hex == 65430 decimal == AGENT_HINT_OPTION_CODE
-# Capturing for 5 seconds is plenty to see two probe calls.
+# 0xff96 in hex == 65430 decimal == AGENT_HINT_OPTION_CODE.
+# Capturing 20 packets is plenty to see one probe call's worth of queries.
+# tcpdump is pre-installed by the agent Dockerfile.
 docker exec -d agent-a bash -c \
-  'apt-get install -y -q tcpdump 2>/dev/null || true; tcpdump -i any -nn -X -c 20 host 172.28.0.10 and port 53 > /tmp/edns_capture.txt 2>&1 &'
+  'tcpdump -i any -nn -X -c 20 host 172.28.0.10 and port 53 > /tmp/edns_capture.txt 2>&1'
 sleep 1
 
 echo
 echo "--- [3] Run edns-probe with experimental flag on ---"
 docker exec -e DNS_AID_EXPERIMENTAL_EDNS_HINTS=1 agent-a \
   dns-aid edns-probe orga.test \
-  --capabilities=chat,code \
-  --intent=summarize \
-  --transport=mcp \
-  --auth-type=bearer \
+  --realm prod \
+  --transport mcp \
+  --min-trust signed \
+  --intent-class invocation \
+  --parallelism 4 \
+  --deadline-ms 30000 \
   --show-wire
 
 echo
 echo "--- [4] Capture results ---"
 sleep 2
-docker exec agent-a cat /tmp/edns_capture.txt 2>/dev/null | head -80 || \
-  echo "  (tcpdump may not have been installed; install it inside the agent-a container manually)"
+docker exec agent-a cat /tmp/edns_capture.txt 2>/dev/null | head -80 || true
 
 echo
 echo "--- [5] Look for the agent-hint option code (0xff96) in the capture ---"
-docker exec agent-a grep -i "ff96\|ff 96" /tmp/edns_capture.txt 2>/dev/null && \
-  echo "  ✓ agent-hint option code 0xff96 (=65430) appeared on the wire" || \
+if docker exec agent-a grep -qi "ff96\|ff 96" /tmp/edns_capture.txt; then
+  echo "  ✓ agent-hint option code 0xff96 (=65430) appeared on the wire"
+else
   echo "  ✗ option code not found in capture — feature flag set? tcpdump captured the right packets?"
+fi
 
 echo
 echo "=== smoke_edns.sh complete ==="
