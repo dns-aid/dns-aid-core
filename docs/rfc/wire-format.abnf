@@ -271,6 +271,11 @@ txt-value      = 1*255(VCHAR / SP)
 ; The leading "v=1" discriminator distinguishes this endpoint TXT
 ; from the capabilities/metadata TXT defined above; both may
 ; coexist as distinct TXT RRs on the same FQDN.
+;
+; Acknowledgment: the TXT-based agent identification approach this
+; rule encodes was surfaced by the Agent Community
+; (https://agentcommunity.org/, maintainer Balazs Nemethi). The wire
+; format here mirrors SVCB SvcParam names for parser symmetry.
 
 dns-aid-txt-fallback = version-marker SP target-kv *(SP fallback-kv)
 
