@@ -5,6 +5,12 @@
 DNS-AID implements the IETF draft-mozleywilliams-dnsop-dnsaid-01 protocol for
 DNS-based agent discovery. This document covers the key architectural decisions.
 
+## Relationship to IETF
+
+This document describes the architecture and behavior of the reference implementation.
+
+The authoritative DNS-AID specification is defined in the IETF draft: https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/.
+
 ---
 
 ## Metadata Resolution Strategy
@@ -22,7 +28,7 @@ explains why certain fields (description, use_cases, category) may appear as
 | **HTTP Index** (`/.well-known/agent-index.json`) | JSON document | Full | Authoritative |
 | **TXT Record** (`capabilities=...`) | Key-value strings | Minimal (capabilities + version only) | Fallback |
 
-### Resolution Priority
+### Implementation Resolution Strategy
 
 ```
 Agent discovered via SVCB record
@@ -187,7 +193,8 @@ that round-trip the same inputs through every surface.
 ```
 
 ### Future Enhancement: HTTP Index Fallback in DNS Mode
-
+These are implementation proposals and are not part of the current IETF draft.
+Items in this section may inform future versions of the specification but should not be treated as authoritative.
 Currently the two discovery modes are independent — pure DNS never consults the
 HTTP index and vice versa. Per the DNS-AID draft, the HTTP well-known endpoint
 is a complementary discovery mechanism. A future enhancement should add an

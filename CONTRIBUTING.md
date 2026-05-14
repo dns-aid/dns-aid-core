@@ -1,6 +1,6 @@
 # Contributing to DNS-AID
 
-Thank you for your interest in contributing to DNS-AID! This project aims to be contributed to the Linux Foundation Agent AI Foundation.
+Thank you for your interest in contributing to DNS-AID! This project supports an implementation ecosystem, with planned hosting in the Linux Foundation. The DNS-AID specification is developed in the IETF.
 
 ## Quick Start
 
@@ -24,6 +24,22 @@ uv run pytest tests/unit/ -q
 > python -m venv .venv && source .venv/bin/activate
 > pip install -e ".[all]"
 > ```
+
+## Specification Alignment
+
+This repository implements the DNS-AID IETF draft (https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
+
+Protocol changes should be discussed in the IETF before implementation.
+
+Implementation insights, deployment experience, and interoperability findings are encouraged here and may be fed back into the IETF process.
+
+## Experimental / Prototype Work
+
+This repository may include experimental features intended to inform the IETF draft.
+
+Experimental features are non-normative, are not part of the DNS-AID specification, and may change or be removed at any time.
+
+Experimental features should be clearly labeled in code comments, documentation, and CLI/SDK help text.
 
 ## Project Structure
 

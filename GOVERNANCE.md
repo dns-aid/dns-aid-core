@@ -1,6 +1,12 @@
 # DNS-AID Governance
 
-This document describes the governance model for DNS-AID. The project is intended for contribution to the Linux Foundation and follows open governance principles.
+This project governs the DNS-AID reference implementation and supports an ecosystem with planned hosting in the Linux Foundation. The DNS-AID specification itself is defined in the IETF.
+
+## Scope
+
+This project governs the reference implementation and ecosystem activities, including tooling, examples, integrations, documentation, and operational guidance.
+
+The DNS-AID protocol specification is defined in the IETF. Protocol-level changes are out of scope for this project's governance.
 
 ## Roles
 

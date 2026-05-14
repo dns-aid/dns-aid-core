@@ -11,9 +11,15 @@
 
 **DNS-based Agent Identification and Discovery**
 
-Reference implementation for [IETF draft-mozleywilliams-dnsop-dnsaid-01](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
+Reference implementation of the DNS-AID specification, developed at the IETF: [IETF draft-mozleywilliams-dnsop-dnsaid-01](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
 
 DNS-AID enables AI agents to discover each other via DNS, using the internet's existing naming infrastructure instead of centralized registries or hardcoded URLs.
+
+## Scope of this Repository
+
+This project focuses on implementation, tooling, and ecosystem activities.
+
+Changes to protocol behavior should be discussed within the IETF.
 
 > **New to DNS-AID?** Start with the [Getting Started Guide](docs/getting-started.md) for install, first agent publication, and backend setup.
 
@@ -1009,7 +1015,7 @@ Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to it
 - **Simple API**: Well-documented REST API v4
 - **Full DNS-AID compliance**: Supports ServiceMode SVCB with all parameters
 
-## Why DNS-AID?
+## Background: Why DNS-AID?
 
 ### vs Competing Proposals
 
@@ -1132,6 +1138,6 @@ Apache 2.0
 
 ## Contributing
 
-Contributions welcome! This project is intended for contribution to the Linux Foundation Agent AI Foundation.
+Contributions welcome! This project supports an implementation ecosystem with planned hosting in the Linux Foundation. The DNS-AID specification is developed in the IETF.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

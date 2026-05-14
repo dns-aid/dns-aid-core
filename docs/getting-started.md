@@ -4,6 +4,12 @@ This guide will walk you through installing, configuring, and testing DNS-AID.
 
 > **Version 0.17.0** - Adds policy-to-RPZ compiler, Infoblox Threat Defense integration (`dns-aid enforce`), CEL-to-DNS compilation, bind-aid zone writer, and 4 new MCP tools for policy enforcement.
 
+## Relationship to IETF
+
+This guide describes usage of the reference implementation.
+
+The DNS-AID specification is defined in the IETF draft: https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/.
+
 ## Prerequisites
 
 - Python 3.11 or higher
