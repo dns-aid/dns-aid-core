@@ -224,6 +224,57 @@ async def test_txt_fallback_with_metadata_alongside() -> None:
 
 
 @pytest.mark.asyncio
+async def test_txt_fallback_alpn_mismatch_warns_and_proceeds() -> None:
+    """Parsed alpn= disagrees with the FQDN-derived protocol → warn but proceed.
+
+    Closes the alpn round-trip asymmetry: the parser captures alpn and the
+    discoverer now uses it to cross-validate against the protocol the caller
+    derived from the FQDN. FQDN remains authoritative; mismatch is a
+    publisher-side bug worth surfacing.
+    """
+    txt = _make_txt_answer(
+        [
+            [b"v=1 target=mcp.example.com alpn=a2a"],  # alpn says a2a, FQDN says mcp
+        ]
+    )
+    resolver = _dispatching_resolver(txt=txt)
+
+    with (
+        patch("dns_aid.core.discoverer.dns.asyncresolver.Resolver", return_value=resolver),
+        patch("dns_aid.core.discoverer.logger") as mock_logger,
+    ):
+        result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+    assert result is not None
+    assert result.target_host == "mcp.example.com"
+    assert result.protocol == Protocol.MCP  # FQDN protocol wins
+    # Warning fired with the mismatch event
+    warning_events = [c.args[0] for c in mock_logger.warning.call_args_list if c.args]
+    assert "txt_fallback.alpn_mismatch" in warning_events
+
+
+@pytest.mark.asyncio
+async def test_txt_fallback_alpn_matches_no_warning() -> None:
+    """Round-trip happy path: parsed alpn= matches FQDN-derived protocol, no warning."""
+    txt = _make_txt_answer(
+        [
+            [b"v=1 target=mcp.example.com alpn=mcp"],
+        ]
+    )
+    resolver = _dispatching_resolver(txt=txt)
+
+    with (
+        patch("dns_aid.core.discoverer.dns.asyncresolver.Resolver", return_value=resolver),
+        patch("dns_aid.core.discoverer.logger") as mock_logger,
+    ):
+        result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+    assert result is not None
+    warning_events = [c.args[0] for c in mock_logger.warning.call_args_list if c.args]
+    assert "txt_fallback.alpn_mismatch" not in warning_events
+
+
+@pytest.mark.asyncio
 async def test_txt_fallback_nxdomain_returns_none() -> None:
     """TXT NXDOMAIN (no records at all) returns None gracefully — no crash."""
     resolver = _dispatching_resolver(txt=dns.resolver.NXDOMAIN())

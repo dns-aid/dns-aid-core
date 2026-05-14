@@ -975,6 +975,23 @@ async def _try_txt_fallback(
         )
     fallback = matches[0]
 
+    # Cross-validate the parsed ``alpn=`` against the protocol the caller
+    # derived from the FQDN. They should match — the publisher wrote the
+    # record at ``_{name}._{protocol}._agents.{domain}`` AND emitted
+    # ``alpn={protocol}`` in the TXT body. A mismatch indicates a publisher
+    # error (record published at the wrong FQDN, or hand-edited alpn that
+    # diverged). The FQDN-derived protocol is authoritative — the record
+    # location is what the SDK dispatched on — but the discrepancy is
+    # worth surfacing so the deployment can fix it.
+    if fallback.alpn is not None and fallback.alpn != protocol.value:
+        logger.warning(
+            "txt_fallback.alpn_mismatch",
+            fqdn=fqdn,
+            fqdn_protocol=protocol.value,
+            txt_alpn=fallback.alpn,
+            note="using FQDN protocol; publisher should align alpn= with the record's _{protocol} label",
+        )
+
     # Tier 1: cap URI (mirrors the SVCB-success path's tier 1)
     capabilities: list[str] = []
     capability_source: Literal["cap_uri", "agent_card", "http_index", "txt_fallback", "none"] = (
