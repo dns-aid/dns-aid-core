@@ -46,6 +46,10 @@ class CapabilityDocument:
     use_cases: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     raw_data: dict[str, Any] = field(default_factory=dict)
+    # Experimental: publisher's EDNS(0) agent-hint advertisement. Stored as the
+    # raw dict from the JSON to avoid coupling core to the experimental package.
+    # See docs/experimental/edns-signaling.md.
+    edns_signaling: dict[str, Any] | None = None
 
 
 def _verify_cap_digest(content: bytes, expected_sha256: str, cap_uri: str) -> bool:
@@ -178,7 +182,13 @@ async def fetch_cap_document(
         capabilities = _extract_capabilities_multi_format(data)
         use_cases = _extract_string_list(data, "use_cases")
 
-        known_keys = {"capabilities", "version", "description", "use_cases"}
+        # Experimental: lift the publisher's edns_signaling advertisement if present.
+        # Stored as a dict; forward-compat on unknown versions / shapes.
+        edns_signaling = data.get("edns_signaling")
+        if not isinstance(edns_signaling, dict):
+            edns_signaling = None
+
+        known_keys = {"capabilities", "version", "description", "use_cases", "edns_signaling"}
         metadata = {k: v for k, v in data.items() if k not in known_keys}
 
         doc = CapabilityDocument(
@@ -188,6 +198,7 @@ async def fetch_cap_document(
             use_cases=use_cases,
             metadata=metadata,
             raw_data=data,
+            edns_signaling=edns_signaling,
         )
 
         logger.debug(

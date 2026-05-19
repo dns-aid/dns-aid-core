@@ -171,6 +171,9 @@ async def read_index_via_dns(domain: str) -> list[IndexEntry]:
 
     try:
         resolver = dns.asyncresolver.Resolver()
+        from dns_aid.core._edns_hint_ctx import apply_agent_hint_to_resolver
+
+        apply_agent_hint_to_resolver(resolver)
         answers = await resolver.resolve(fqdn, "TXT")
 
         for rdata in answers:

@@ -1771,6 +1771,130 @@ Disabled by default (`http_push_url=None`). Configure via `SDKConfig` or the `DN
 
 ---
 
+## Experimental: EDNS(0) signaling
+
+> ⚠ **Unstable.** APIs in this section live in `dns_aid.experimental` and may change or be removed in any release. They are not covered by semver guarantees. Full design rationale: [docs/experimental/edns-signaling.md](experimental/edns-signaling.md).
+
+Lets a client attach selector filters to outgoing DNS queries via an EDNS(0) option (code 65430, private use). Hint-aware DNS hops — including hint-aware authoritative servers — can narrow the response or short-circuit with a cached match. Stock authoritative servers treat the option as inert per RFC 6891.
+
+Activate by setting `DNS_AID_EXPERIMENTAL_EDNS_HINTS=1` in the environment. Without the flag the code paths are dormant even when the symbols are imported.
+
+### AgentHint
+
+Two-axis selector taxonomy (see [design doc §4.3](experimental/edns-signaling.md) for the full rationale).
+
+```python
+from dns_aid.experimental import AgentHint
+
+# Axis 1: shape the answer set; participate in the cache key
+# Axis 2: shape the request lifecycle; do NOT fragment the cache
+hint = AgentHint(
+    realm="prod",
+    transport="mcp",
+    min_trust="signed+dnssec",
+    client_intent_class="invocation",
+    parallelism=4,
+    deadline_ms=30000,
+)
+```
+
+**Axis 1 — substrate filters** (codes 0x01–0x0F). Different values mean different answer sets.
+
+| Field | Type | Code | Notes |
+|-------|------|------|-------|
+| `realm` | `str \| None` | 0x01 | Multi-tenant scope; matches SVCB `realm=` param. |
+| `transport` | `str \| None` | 0x02 | `"mcp"` \| `"a2a"` \| `"https"`. |
+| `policy_required` | `bool` | 0x03 | When `True`, only records carrying `policy=` URI. Default `False`; not emitted on wire when False (absence = "don't care"). |
+| `min_trust` | `str \| None` | 0x04 | `"signed"` \| `"dnssec"` \| `"signed+dnssec"`. Gated on `sig` param + DNSSEC chain. |
+| `jurisdiction` | `str \| None` | 0x05 | ISO region tag (e.g. `"eu"`, `"us-east"`). |
+
+**Axis 2 — metering / lifecycle** (codes 0x10–0x1F). Drive request policy; do not change the answer set.
+
+| Field | Type | Code | Notes |
+|-------|------|------|-------|
+| `client_intent_class` | `str \| None` | 0x10 | `"discovery"` (browsing) \| `"invocation"` (about to call). |
+| `max_age` | `int \| None` | 0x11 | Seconds; don't return cache entries older than this. |
+| `parallelism` | `int \| None` | 0x12 | Expected sibling-query count. Signals fan-out to caches. |
+| `deadline_ms` | `int \| None` | 0x13 | Wait budget in ms. **Hint-only** — auth cannot refuse for SLA in v0; may prefer faster path / serve stale to meet it. |
+
+Methods:
+- `encode() -> bytes` — produce the EDNS(0) option payload (raises `ValueError` if any selector value exceeds 255 UTF-8 bytes or the total payload exceeds 512).
+- `signature() -> str` — stable cache-key string. **Axis 1 only** — two hints differing only in Axis 2 share a signature, so they hit the same cache entry. This is a load-bearing invariant of the design.
+
+**Not DNS-layer selectors.** `capabilities` and `intent` are intentionally NOT fields on `AgentHint`. They live in the publisher's well-known JSON (see [`EdnsSignalingAdvertisement.honored_selectors`](#ednssignalingadvertisement)) and clients use them for *post-fetch local filtering*, not query-time signaling. The reason is layering: SVCB doesn't carry capability strings, so an auth would have to dereference cap-doc URIs per-query to filter on them, which breaks DNS latency budgets.
+
+### AgentHintEcho
+
+Response-side echo from a hint-aware hop, listing the selector codes the responder actually applied. Absence means no upstream filtering happened — fall back to local filtering.
+
+```python
+from dns_aid.experimental import AgentHintEcho
+
+echo = AgentHintEcho(applied_selectors=[0x01, 0x02])
+```
+
+### EdnsSignalingAdvertisement
+
+Publisher advertisement carried in `cap-doc`, `agent-card`, or `agents-index.json`:
+
+```json
+{
+  "edns_signaling": {
+    "version": 0,
+    "honored_selectors": ["capabilities", "intent", "transport"],
+    "note": "Recommends client-side pre-filtering."
+  }
+}
+```
+
+Lifted automatically onto `CapabilityDocument.edns_signaling`, `A2AAgentCard.edns_signaling`, and `HttpIndexAgent.edns_signaling`. Stored as `dict | None` (forward-compat on unknown shapes).
+
+### EdnsAwareResolver
+
+In-process programmable hop (Locus 1 in the design doc). Wraps `dns.asyncresolver.Resolver`, attaches the hint as an EDNS option on outgoing queries (when the env flag is set), and caches answers keyed by `(qname, qtype, hint_signature)`.
+
+```python
+from dns_aid.experimental import AgentHint, EdnsAwareResolver
+
+resolver = EdnsAwareResolver(ttl_seconds=60)
+result = await resolver.resolve(
+    "_chat._mcp._agents.example.com", "SVCB",
+    agent_hint=AgentHint(realm="prod", transport="mcp"),
+)
+# result.answer — dnspython Answer
+# result.echo   — AgentHintEcho | None (presence == upstream is hint-aware)
+```
+
+### Integration with discover()
+
+```python
+from dns_aid import discover
+from dns_aid.experimental import AgentHint
+
+result = await discover(
+    "example.com",
+    agent_hint=AgentHint(realm="prod", transport="mcp", parallelism=4, deadline_ms=30000),
+)
+```
+
+The `agent_hint=` kwarg is accepted unconditionally for forward-compat. The option is only emitted on the wire when `DNS_AID_EXPERIMENTAL_EDNS_HINTS=1` is set.
+
+### CLI: `dns-aid edns-probe`
+
+```bash
+DNS_AID_EXPERIMENTAL_EDNS_HINTS=1 \
+  dns-aid edns-probe example.com \
+  --realm prod --transport mcp \
+  --intent-class invocation --parallelism 4 --deadline-ms 30000 \
+  --show-wire
+```
+
+Flags are grouped by axis: `--realm`, `--transport`, `--policy-required`, `--min-trust`, `--jurisdiction` (Axis 1); `--intent-class`, `--max-age`, `--parallelism`, `--deadline-ms` (Axis 2).
+
+Prints an `[experimental]` banner on stderr, performs a cache-miss → cache-hit demonstration with `EdnsAwareResolver`, and reports any `AgentHintEcho` received.
+
+---
+
 ## Version
 
 ```python

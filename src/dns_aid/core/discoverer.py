@@ -15,7 +15,7 @@ import base64
 import json
 import shlex
 import time
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
 import dns.asyncresolver
@@ -23,11 +23,23 @@ import dns.rdatatype
 import dns.resolver
 import structlog
 
+from dns_aid.core._edns_hint_ctx import (
+    apply_agent_hint_to_resolver as _apply_agent_hint_to_resolver,
+)
+from dns_aid.core._edns_hint_ctx import (
+    reset_agent_hint as _reset_agent_hint,
+)
+from dns_aid.core._edns_hint_ctx import (
+    set_agent_hint as _set_agent_hint,
+)
 from dns_aid.core.a2a_card import A2AAgentCard, fetch_agent_card
 from dns_aid.core.cap_fetcher import fetch_cap_document
 from dns_aid.core.filters import apply_filters
 from dns_aid.core.http_index import HttpIndexAgent, fetch_http_index_or_empty
 from dns_aid.core.models import AgentRecord, DiscoveryResult, DNSSECError, Protocol
+
+if TYPE_CHECKING:
+    from dns_aid.experimental.edns_hint import AgentHint
 
 logger = structlog.get_logger(__name__)
 
@@ -122,6 +134,10 @@ async def discover(
     text_match: str | None = None,
     require_signed: bool = False,
     require_signature_algorithm: list[str] | None = None,
+    # Experimental: EDNS(0) agent-hint signaling. See docs/experimental/edns-signaling.md.
+    # Accepted unconditionally for forward-compat; only injected on the wire when
+    # DNS_AID_EXPERIMENTAL_EDNS_HINTS=1 is set in the environment.
+    agent_hint: AgentHint | None = None,
 ) -> DiscoveryResult:
     """
     Discover AI agents at a domain using DNS-AID protocol.
@@ -179,6 +195,59 @@ async def discover(
         logger.debug("sdk.discover_implicit_verify_signatures", reason="require_signed=True")
 
     start_time = time.perf_counter()
+
+    # Experimental: stash agent_hint on the contextvar so DNS helpers below can
+    # attach it as an EDNS option without threading through every signature.
+    # try/finally guarantees the reset even on exception so the contextvar
+    # doesn't carry stale state across calls within the same async task.
+    _hint_token = _set_agent_hint(agent_hint)
+    try:
+        return await _discover_body(
+            domain,
+            protocol,
+            name,
+            require_dnssec,
+            use_http_index,
+            enrich_endpoints,
+            verify_signatures,
+            capabilities,
+            capabilities_any,
+            auth_type,
+            intent,
+            transport,
+            realm,
+            min_dnssec,
+            text_match,
+            require_signed,
+            require_signature_algorithm,
+            start_time,
+        )
+    finally:
+        _reset_agent_hint(_hint_token)
+
+
+async def _discover_body(
+    domain: str,
+    protocol: str | Protocol | None,
+    name: str | None,
+    require_dnssec: bool,
+    use_http_index: bool,
+    enrich_endpoints: bool,
+    verify_signatures: bool,
+    capabilities: list[str] | None,
+    capabilities_any: list[str] | None,
+    auth_type: str | None,
+    intent: str | None,
+    transport: str | None,
+    realm: str | None,
+    min_dnssec: bool,
+    text_match: str | None,
+    require_signed: bool,
+    require_signature_algorithm: list[str] | None,
+    start_time: float,
+) -> DiscoveryResult:
+    """Body of discover(), extracted so the public surface can wrap it in a
+    contextvar try/finally for the experimental agent_hint plumbing."""
 
     protocol = _normalize_protocol(protocol)
 
@@ -298,6 +367,7 @@ async def _query_single_agent(
 
     try:
         resolver = dns.asyncresolver.Resolver()
+        _apply_agent_hint_to_resolver(resolver)
 
         # Query SVCB record
         # Note: dnspython uses type 64 for SVCB
@@ -526,6 +596,7 @@ async def _query_capabilities(fqdn: str) -> list[str]:
 
     try:
         resolver = dns.asyncresolver.Resolver()
+        _apply_agent_hint_to_resolver(resolver)
         answers = await resolver.resolve(fqdn, "TXT")
 
         for rdata in answers:

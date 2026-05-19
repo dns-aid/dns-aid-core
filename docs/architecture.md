@@ -687,3 +687,33 @@ async def get_record(
 
 This enables reliable reconciliation state-checking without depending on
 public DNS resolver support for SVCB records.
+
+## Experimental namespace (`src/dns_aid/experimental/`)
+
+A fourth subpackage sits alongside `core/`, `sdk/`, and `backends/`: `experimental/`.
+It is a stability-marked staging area for forward-looking features that need
+real code and a public design doc but are not yet stable enough to commit to
+across semver releases.
+
+Rules:
+
+- APIs in `experimental` are **not** subject to semver. They may change shape or
+  disappear in any release, including patch versions.
+- Symbols are **never** re-exported from `dns_aid/__init__.py`. Callers must
+  import explicitly: `from dns_aid.experimental import AgentHint`. This makes
+  accidental adoption visible at the import line.
+- Each feature has a **per-feature environment flag** (e.g.
+  `DNS_AID_EXPERIMENTAL_EDNS_HINTS=1`). When the flag is unset, related runtime
+  code paths stay dormant even if the symbols are imported.
+- Each feature has a **design doc** under `docs/experimental/`, written with
+  section headers that map to future IETF-draft sections (Overview, Motivation,
+  Wire Format, Privacy, Security, Open Questions, Future Work).
+- When a feature graduates to stable, it moves out of `experimental/` into the
+  appropriate tier, gets re-exported from the top-level package, and its design
+  doc relocates from `docs/experimental/` to `docs/rfc/`.
+
+Currently shipped:
+
+| Feature | Module | Env flag | Doc |
+|---|---|---|---|
+| EDNS(0) `agent-hint` signaling | `experimental/edns_hint.py`, `experimental/edns_cache.py` | `DNS_AID_EXPERIMENTAL_EDNS_HINTS` | [edns-signaling.md](experimental/edns-signaling.md) |

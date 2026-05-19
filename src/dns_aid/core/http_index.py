@@ -116,6 +116,9 @@ class HttpIndexAgent:
     model_card: ModelCard | None = None
     capability: Capability | None = None
     cost: str | None = None
+    # Experimental: publisher's EDNS(0) agent-hint advertisement. Stored as the
+    # raw dict from JSON. See docs/experimental/edns-signaling.md.
+    edns_signaling: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, name: str, data: dict[str, Any]) -> HttpIndexAgent:
@@ -138,6 +141,11 @@ class HttpIndexAgent:
         model_card = ModelCard.from_dict(model_card_data)
         capability = Capability.from_dict(capability_data)
 
+        # Experimental: lift edns_signaling advertisement if present
+        edns_signaling = data.get("edns_signaling")
+        if not isinstance(edns_signaling, dict):
+            edns_signaling = None
+
         return cls(
             name=name,
             fqdn=location.get("fqdn", ""),
@@ -148,6 +156,7 @@ class HttpIndexAgent:
             model_card=model_card,
             capability=capability,
             cost=capability.cost,
+            edns_signaling=edns_signaling,
         )
 
     @property

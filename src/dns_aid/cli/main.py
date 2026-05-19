@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Annotated
 
 import typer
@@ -2480,6 +2481,167 @@ def dcv_revoke(
         else:
             error_console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1) from e
+
+
+# ============================================================================
+# EXPERIMENTAL: edns-probe — demonstrate EDNS(0) agent-hint signaling
+# ============================================================================
+
+
+@app.command("edns-probe")
+def edns_probe(
+    domain: Annotated[str, typer.Argument(help="Domain to discover agents at")],
+    # Axis 1 — substrate filters
+    realm: Annotated[
+        str | None, typer.Option("--realm", help="[Axis 1] Multi-tenant scope identifier.")
+    ] = None,
+    transport: Annotated[
+        str | None,
+        typer.Option("--transport", help="[Axis 1] Transport: mcp | a2a | https."),
+    ] = None,
+    policy_required: Annotated[
+        bool,
+        typer.Option(
+            "--policy-required",
+            help="[Axis 1] Only return records carrying a policy= URI.",
+        ),
+    ] = False,
+    min_trust: Annotated[
+        str | None,
+        typer.Option(
+            "--min-trust",
+            help="[Axis 1] Trust posture: signed | dnssec | signed+dnssec.",
+        ),
+    ] = None,
+    jurisdiction: Annotated[
+        str | None,
+        typer.Option("--jurisdiction", help="[Axis 1] ISO region tag (e.g. eu, us-east)."),
+    ] = None,
+    # Axis 2 — metering / lifecycle
+    intent_class: Annotated[
+        str | None,
+        typer.Option(
+            "--intent-class",
+            help="[Axis 2] Client intent: discovery | invocation.",
+        ),
+    ] = None,
+    max_age: Annotated[
+        int | None,
+        typer.Option(
+            "--max-age",
+            help="[Axis 2] Don't return cache entries older than this many seconds.",
+        ),
+    ] = None,
+    parallelism: Annotated[
+        int | None,
+        typer.Option(
+            "--parallelism",
+            help="[Axis 2] Expected sibling-query count (signals fan-out to caches).",
+        ),
+    ] = None,
+    deadline_ms: Annotated[
+        int | None,
+        typer.Option(
+            "--deadline-ms",
+            help="[Axis 2] Wait budget in milliseconds. Hint-only — auth cannot refuse for SLA in v0.",
+        ),
+    ] = None,
+    show_wire: Annotated[
+        bool,
+        typer.Option(
+            "--show-wire",
+            help="Print the EDNS option payload bytes (hex) for manual wire correlation.",
+        ),
+    ] = False,
+) -> None:
+    """[experimental] Demonstrate EDNS(0) agent-hint signaling end-to-end.
+
+    Constructs an AgentHint from the CLI flags, wraps the discovery resolver
+    with EdnsAwareResolver, performs two discover() calls back-to-back, and
+    reports the cache miss/hit behavior plus any AgentHintEcho the upstream
+    returned.
+
+    Requires DNS_AID_EXPERIMENTAL_EDNS_HINTS=1 in the environment. Without the
+    flag, the command prints how to enable and exits non-zero.
+    """
+    import os
+    import sys
+
+    if os.environ.get("DNS_AID_EXPERIMENTAL_EDNS_HINTS", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        error_console.print(
+            "[yellow]Set DNS_AID_EXPERIMENTAL_EDNS_HINTS=1 to enable this command.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    print(
+        "[experimental] EDNS(0) agent-hint signaling is unstable; APIs may change.", file=sys.stderr
+    )
+
+    from dns_aid import discover
+    from dns_aid.experimental import AgentHint
+
+    hint = AgentHint(
+        # Axis 1
+        realm=realm,
+        transport=transport,
+        policy_required=policy_required,
+        min_trust=min_trust,
+        jurisdiction=jurisdiction,
+        # Axis 2
+        client_intent_class=intent_class,
+        max_age=max_age,
+        parallelism=parallelism,
+        deadline_ms=deadline_ms,
+    )
+
+    console.print(
+        f"[bold]Probing {domain}[/bold] with hint signature: [cyan]{hint.signature() or '(empty)'}[/cyan]"
+    )
+    if show_wire:
+        payload = hint.encode()
+        console.print(f"  Wire payload ({len(payload)} bytes): [dim]{payload.hex()}[/dim]")
+
+    # First call — cold
+    console.print("\n[bold]Call 1[/bold] (expect upstream DNS query)")
+    t0 = time.perf_counter()
+    result1 = run_async(discover(domain, agent_hint=hint))
+    elapsed1_ms = (time.perf_counter() - t0) * 1000
+    console.print(
+        f"  agents={len(result1.agents)} dnssec={result1.dnssec_validated} "
+        f"elapsed={elapsed1_ms:.1f}ms"
+    )
+
+    # Second call — same hint, demonstrates that without an EdnsAwareResolver wrapping,
+    # the second call still hits DNS. The cache lives in EdnsAwareResolver itself;
+    # the standard discover() path doesn't share it. We demonstrate the cache
+    # separately below.
+    console.print("\n[bold]Call 2[/bold] via EdnsAwareResolver (in-process cache, Locus 1)")
+    from dns_aid.experimental import EdnsAwareResolver
+
+    resolver = EdnsAwareResolver()
+    fqdn_hint = f"_index._agents.{domain}"
+    t0 = time.perf_counter()
+    cached1 = run_async(resolver.resolve(fqdn_hint, "TXT", agent_hint=hint))
+    miss_ms = (time.perf_counter() - t0) * 1000
+    t0 = time.perf_counter()
+    cached2 = run_async(resolver.resolve(fqdn_hint, "TXT", agent_hint=hint))
+    hit_ms = (time.perf_counter() - t0) * 1000
+    console.print(f"  Cache miss: {miss_ms:.2f}ms — upstream resolve happened")
+    console.print(f"  Cache hit:  {hit_ms:.2f}ms — no upstream call")
+    if cached1.echo is not None:
+        applied = ",".join(str(c) for c in cached1.echo.applied_selectors)
+        console.print(f"  Upstream echoed applied selectors: [green]{applied}[/green]")
+    else:
+        console.print(
+            "  No echo from upstream — stock authoritative or stripped en route. "
+            "Local filtering is the only narrowing that happened."
+        )
+    # Reference cached2 so linters know it's intentional
+    _ = cached2
 
 
 # ============================================================================
