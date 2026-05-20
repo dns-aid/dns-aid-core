@@ -16,7 +16,7 @@ Contributors who have earned the ability to merge pull requests. Committers are 
 
 | Name | GitHub | Role |
 |------|--------|------|
-| Ivan Racic | [@iracic82](https://github.com/iracic82) | Project Lead |
+| Igor Racic | [@iracic82](https://github.com/iracic82) | Project Lead |
 
 ### Project Lead
 
