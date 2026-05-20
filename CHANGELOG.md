@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-05-20
+
+### Fixed
+
+- **DDNS backend `list_records()` yield shape ([#137](https://github.com/infobloxopen/dns-aid-core/issues/137))**:
+  `DDNSBackend.list_records()` previously yielded one dict per rdata with a
+  singular `data: str(rdata)` key, diverging from every other backend
+  (Route53, Cloudflare, NS1, Cloud DNS, BloxOne, NIOS, Mock) which yield
+  one dict per RRset with a `values: list[str]` key per the documented
+  contract. `core.indexer.read_index()` reads `values` per the contract,
+  so the divergent shape made existing index entries invisible to
+  DDNS-backed zones — each `publish_agent()` call overwrote the index TXT
+  record with only its own entry instead of merging.
+
+  Discovered and diagnosed by external contributor
+  [@yiyuandao](https://github.com/yiyuandao). The DDNS multi-agent +
+  `read_index()` scenario was never exercised by the existing BIND9
+  integration test, which only published single agents.
+
+  Fix: DDNS now groups all rdata at a `(name, type)` tuple into a single
+  yielded dict with `values: list[str]`, matching the contract.
+
+### Tests
+
+- Two new unit tests in
+  `tests/unit/test_ddns_backend.py::TestDDNSBackendListRecords`:
+  `test_list_records_yields_values_list_not_data_string` (pins the
+  yield-shape contract) and `test_list_records_groups_multiple_rdata_into_one_dict`
+  (pins the grouping behavior — N rdata at one (name, type) → 1 yielded
+  dict, not N).
+- New live integration test
+  `tests/integration/test_ddns.py::TestDDNSBackend::test_multi_agent_index_merging`
+  publishes two agents through DDNS and asserts the merged index TXT
+  record contains both. Closes the test-matrix hole that allowed #137 to
+  ship in the first commit (2026-01-16) and survive every release since.
+
 ## [0.21.0] - 2026-05-19
 
 > Lazy credential resolution via `credential_provider` callback — enables RFC 8693

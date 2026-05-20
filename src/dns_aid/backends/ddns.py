@@ -354,13 +354,22 @@ class DDNSBackend(DNSBackend):
             for rtype in types_to_query:
                 try:
                     answers = dns.resolver.resolve(fqdn, rtype)
-                    for rdata in answers:
+                    # Group all rdata at this (name, type) into the documented
+                    # ``values`` list — one dict per RRset, NOT one dict per
+                    # rdata. Matches the contract used by every other backend
+                    # (Route53, Cloudflare, NS1, CloudDNS, BloxOne, NIOS, Mock).
+                    # The previous shape (``data``: singular string, one dict
+                    # per rdata) caused ``read_index()`` to skip existing
+                    # entries, overwriting the index on each subsequent
+                    # publish (issue #137).
+                    values = [str(rdata) for rdata in answers]
+                    if values:
                         yield {
                             "name": name_pattern,
                             "fqdn": fqdn,
                             "type": rtype,
                             "ttl": answers.rrset.ttl,
-                            "data": str(rdata),
+                            "values": values,
                         }
                 except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
                     pass

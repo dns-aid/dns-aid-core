@@ -13,8 +13,8 @@ authors:
     given-names: Ingmar
     affiliation: Infoblox
 
-version: "0.21.0"
-date-released: "2026-05-19"
+version: "0.21.1"
+date-released: "2026-05-20"
 
 keywords:
   - dns

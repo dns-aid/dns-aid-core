@@ -253,3 +253,101 @@ class TestDDNSBackend:
 
         finally:
             await ddns_backend.delete_record(DDNS_ZONE, name, "SVCB")
+
+    @pytest.mark.asyncio
+    async def test_multi_agent_index_merging(self, ddns_backend):
+        """Regression for #137: calling ``update_index()`` for two agents in
+        sequence must result in an index TXT record listing BOTH, not just
+        the most recent.
+
+        The bug: ``DDNSBackend.list_records()`` yielded a singular ``data``
+        string per rdata, but ``read_index()`` reads the documented
+        ``values`` list. So ``read_index()`` returned empty for any DDNS
+        zone, and the second ``update_index()`` call's read-modify-write
+        sequence saw no existing entries — overwriting the index with
+        only the latest agent.
+
+        This is the CLI flow the reporter used (``dns-aid publish``):
+        each publish triggers ``update_index()`` which does read → merge
+        → write. With the bug, "read" returned empty; without the bug,
+        "read" returns the previously-published agent so the merge
+        preserves it.
+        """
+        from dns_aid.core.indexer import IndexEntry, read_index, update_index
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        agent_a = AgentRecord(
+            name="multi-a",
+            domain=DDNS_ZONE,
+            protocol=Protocol.A2A,
+            target_host="a.test.dns-aid.local",
+            port=443,
+            capabilities=["multi-test"],
+            ttl=300,
+        )
+        agent_b = AgentRecord(
+            name="multi-b",
+            domain=DDNS_ZONE,
+            protocol=Protocol.A2A,
+            target_host="b.test.dns-aid.local",
+            port=443,
+            capabilities=["multi-test"],
+            ttl=300,
+        )
+
+        # DDNSBackend.list_records() uses the default dns.resolver, which
+        # consults the host's resolver config. Pin it to the test BIND for
+        # the duration of this test so reads hit the container directly.
+        import dns.resolver as _dnsresolver
+
+        original_nameservers = _dnsresolver.get_default_resolver().nameservers[:]
+        original_port = _dnsresolver.get_default_resolver().port
+        _dnsresolver.get_default_resolver().nameservers = [DDNS_SERVER]
+        _dnsresolver.get_default_resolver().port = DDNS_PORT
+
+        try:
+            # Publish agent A + write it into the index.
+            await ddns_backend.publish_agent(agent_a)
+            await update_index(
+                DDNS_ZONE,
+                ddns_backend,
+                add=[IndexEntry(name="multi-a", protocol="a2a")],
+                ttl=300,
+            )
+            await asyncio.sleep(1)
+
+            # Publish agent B + merge it into the index. With the bug,
+            # update_index's read step returns empty (because DDNS yields
+            # the wrong shape), so B's write overwrites A. With the fix,
+            # the read sees A and the write merges both.
+            await ddns_backend.publish_agent(agent_b)
+            await update_index(
+                DDNS_ZONE,
+                ddns_backend,
+                add=[IndexEntry(name="multi-b", protocol="a2a")],
+                ttl=300,
+            )
+            await asyncio.sleep(1)
+
+            # Read the merged index and assert BOTH agents survived.
+            entries = await read_index(DDNS_ZONE, ddns_backend)
+            names = sorted(e.name for e in entries)
+
+            assert "multi-a" in names, (
+                f"Agent A missing from merged index — read_index() returned "
+                f"empty during agent B's update_index() call, causing B to "
+                f"overwrite A. This is the original #137 bug. "
+                f"Got entries: {names!r}"
+            )
+            assert "multi-b" in names, f"Agent B missing from merged index. Got entries: {names!r}"
+
+        finally:
+            _dnsresolver.get_default_resolver().nameservers = original_nameservers
+            _dnsresolver.get_default_resolver().port = original_port
+            # Cleanup
+            for agent_name in ("multi-a", "multi-b"):
+                name = f"_{agent_name}._a2a._agents"
+                await ddns_backend.delete_record(DDNS_ZONE, name, "SVCB")
+                await ddns_backend.delete_record(DDNS_ZONE, name, "TXT")
+            # Reset the index TXT record so re-runs start clean.
+            await ddns_backend.delete_record(DDNS_ZONE, "_index._agents", "TXT")

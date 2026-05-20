@@ -367,6 +367,73 @@ class TestDDNSBackendListRecords:
         # DDNS can't list without specific name pattern
         assert len(records) == 0
 
+    @pytest.mark.asyncio
+    async def test_list_records_yields_values_list_not_data_string(self, backend):
+        """Regression for #137: ``list_records`` MUST yield ``values`` as a
+        list (matching every other backend's documented contract), NOT a
+        singular ``data`` string. ``read_index()`` reads ``values`` per the
+        contract; the previous shape made it invisible to DDNS records,
+        causing the index to be overwritten on multi-agent publish."""
+        mock_answer = MagicMock()
+        mock_answer.rrset.ttl = 3600
+        mock_rdata = MagicMock()
+        mock_rdata.__str__ = lambda self: '"agents=alpha:mcp,beta:a2a"'
+        mock_answer.__iter__ = lambda self: iter([mock_rdata])
+
+        with patch("dns.resolver.resolve", return_value=mock_answer):
+            records = []
+            async for record in backend.list_records(
+                zone="example.com",
+                name_pattern="_index._agents",
+                record_type="TXT",
+            ):
+                records.append(record)
+
+        assert len(records) == 1
+        record = records[0]
+        # The contract: ``values`` is a list of strings.
+        assert "values" in record, (
+            f"DDNS must yield 'values' key per the documented contract; got {record!r}"
+        )
+        assert isinstance(record["values"], list), (
+            f"'values' must be a list, got {type(record['values']).__name__}"
+        )
+        assert record["values"] == ['"agents=alpha:mcp,beta:a2a"']
+        # And NOT the legacy ``data`` singular string key.
+        assert "data" not in record, (
+            f"'data' key from the broken pre-fix shape must not appear; got {record!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_records_groups_multiple_rdata_into_one_dict(self, backend):
+        """Multiple rdata at the same (name, type) MUST be grouped into one
+        yielded dict with a multi-element ``values`` list — NOT yielded as
+        separate dicts. Matches Route53/Cloudflare/NS1 grouping behavior."""
+        mock_answer = MagicMock()
+        mock_answer.rrset.ttl = 3600
+        r1 = MagicMock()
+        r1.__str__ = lambda self: "value-one"
+        r2 = MagicMock()
+        r2.__str__ = lambda self: "value-two"
+        r3 = MagicMock()
+        r3.__str__ = lambda self: "value-three"
+        mock_answer.__iter__ = lambda self: iter([r1, r2, r3])
+
+        with patch("dns.resolver.resolve", return_value=mock_answer):
+            records = []
+            async for record in backend.list_records(
+                zone="example.com",
+                name_pattern="_some._agents",
+                record_type="TXT",
+            ):
+                records.append(record)
+
+        # One dict, three values — NOT three dicts.
+        assert len(records) == 1, (
+            f"3 rdata must group into 1 dict, got {len(records)} dicts: {records!r}"
+        )
+        assert records[0]["values"] == ["value-one", "value-two", "value-three"]
+
 
 class TestDDNSBackendZoneExists:
     """Tests for zone existence check."""
