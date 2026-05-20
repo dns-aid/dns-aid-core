@@ -97,7 +97,8 @@ jobs:
             --ignore-vuln CVE-2026-1703 \
             --ignore-vuln CVE-2026-34073 \
             --ignore-vuln CVE-2026-25645 \
-            --ignore-vuln CVE-2026-3219
+            --ignore-vuln CVE-2026-3219 \
+            --ignore-vuln CVE-2025-45768
         # CVE-2026-4539  pygments 2.19.2   — ReDoS in AdlLexer, local-only, no fix released
         # CVE-2025-8869  pip 25.2          — tar symlink traversal, mitigated by Python >=3.12 PEP 706
         # CVE-2026-1703  pip 25.2          — wheel path traversal, limited to install dir prefixes
@@ -106,3 +107,10 @@ jobs:
         # CVE-2026-3219  pip 26.0.1        — runner-image pip; affects the package manager only,
         #                                    not the dns-aid runtime; no user-supplied input flows
         #                                    through pip in CI; awaiting upstream pip fix
+        # CVE-2025-45768 pyjwt 2.12.1      — DISPUTED by maintainer (NVD: "Analyzed", note
+        #                                    that "key length is chosen by the application").
+        #                                    Snyk does not list this CVE; pyjwt's own GHSA
+        #                                    advisories do not list it. Third-party-filed
+        #                                    "weak encryption" claim; actually a usage concern.
+        #                                    DNS-AID does not generate JWTs in the SDK path.
+        #                                    See SECURITY.md + tracking issue #141.

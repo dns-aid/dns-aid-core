@@ -1441,10 +1441,50 @@ async with AgentClient(config=config) as client:
 
 | Method | Description |
 |--------|-------------|
-| `invoke(agent, method, arguments, timeout)` | Invoke agent, return `InvocationResult` |
+| `invoke(agent, method, arguments, timeout, credentials, credential_provider, auth_handler)` | Invoke agent, return `InvocationResult` |
 | `rank(strategy)` | Rank all invoked agents by composite score |
 | `fetch_rankings(fqdns, limit)` | Fetch community-wide rankings from telemetry API |
 | `signals` | Property: list of all collected `InvocationSignal` objects |
+
+#### invoke() — credential resolution (v0.21.0+)
+
+`AgentClient.invoke()` resolves authentication credentials in this precedence
+order (the first non-empty source wins; subsequent sources are not consulted):
+
+1. **`auth_handler`** — explicit `AuthHandler` instance for full caller control
+2. **`credentials`** — pre-fetched credentials dict (existing behavior)
+3. **`credential_provider`** — async callback awaited lazily at invoke time (v0.21.0+)
+4. No-auth fallback when all three are absent
+
+The `credential_provider` parameter accepts an async callable that takes the
+target `AgentRecord` and returns a credentials dict. It enables short-lived
+delegation tokens (RFC 8693 token exchange), per-target credential scoping,
+AWS STS assume-role per invocation, and dynamic secret stores (Vault, KMS).
+
+```python
+from dns_aid.core.models import AgentRecord
+
+async def per_target_provider(agent: AgentRecord) -> dict[str, str]:
+    # Provider receives the AgentRecord — can derive credentials from
+    # agent.fqdn, agent.realm, agent.connect_meta, etc.
+    return {"token": await mint_jwt_for(agent.fqdn)}
+
+async with AgentClient(config=config) as client:
+    resp = await client.invoke(
+        agent,
+        method="tools/list",
+        credential_provider=per_target_provider,
+    )
+```
+
+`SDKConfig.credential_provider_timeout` (default 30s, env var
+`DNS_AID_CREDENTIAL_PROVIDER_TIMEOUT`) bounds the await. Hanging providers
+surface as `CredentialProviderError` with the underlying `TimeoutError`
+preserved as `__cause__`. Provider exceptions never leak credential values
+into logs or the wrapped error's serialised surface.
+
+See [security-credentials.md](security-credentials.md) for the per-handler
+security matrix and the full credential-handling posture.
 
 #### fetch_rankings()
 
@@ -1491,16 +1531,17 @@ async with AgentClient(config) as client:
 from dns_aid.sdk import SDKConfig
 
 config = SDKConfig(
-    timeout_seconds=30.0,        # Default request timeout
-    caller_id="my-app",          # Caller identifier for signals
-    persist_signals=False,       # Auto-save signals to PostgreSQL
-    database_url=None,           # DB URL (falls back to DATABASE_URL env)
-    otel_enabled=False,          # Enable OpenTelemetry export
-    otel_endpoint=None,          # OTLP endpoint URL
-    otel_export_format="otlp",   # "otlp" or "console"
-    http_push_url=None,          # POST signals to remote telemetry API
-    directory_api_url=None,      # Base URL for AgentClient.search() and fetch_rankings()
-    telemetry_api_url=None,      # Deprecated alias for directory_api_url
+    timeout_seconds=30.0,            # Default request timeout
+    caller_id="my-app",              # Caller identifier for signals
+    persist_signals=False,           # Auto-save signals to PostgreSQL
+    database_url=None,               # DB URL (falls back to DATABASE_URL env)
+    otel_enabled=False,              # Enable OpenTelemetry export
+    otel_endpoint=None,              # OTLP endpoint URL
+    otel_export_format="otlp",       # "otlp" or "console"
+    http_push_url=None,              # POST signals to remote telemetry API
+    directory_api_url=None,          # Base URL for AgentClient.search() and fetch_rankings()
+    telemetry_api_url=None,          # Deprecated alias for directory_api_url
+    credential_provider_timeout=30.0,  # Max seconds to wait for credential_provider callback (v0.21.0+)
 )
 
 # Or from environment variables:

@@ -1,0 +1,57 @@
+# Docker Compose fixture for Keycloak with RFC 8693 token-exchange enabled.
+#
+# Used by tests/integration/test_credential_provider_oauth_keycloak.py to
+# exercise the credential_provider callback against a real RFC 8693-compliant
+# IdP — without requiring a paid SaaS tenant. The realm at startup is
+# bootstrapped from keycloak-realm.json, which pre-configures the two clients
+# and the test user needed for token-exchange flows.
+#
+# Bring up:
+#     docker compose -f tests/integration/fixtures/keycloak-compose.yml up -d
+#
+# Tear down:
+#     docker compose -f tests/integration/fixtures/keycloak-compose.yml down -v
+#
+# Port 18080 is used (not 8080) to avoid clashing with anything else on the
+# developer's machine. Adjust here AND in the test's env-var defaults if you
+# change it.
+
+services:
+  keycloak:
+    # Pin to a known major version with stable token-exchange behavior. Updates
+    # to the major are deliberate — verify token-exchange still behaves as
+    # expected before bumping.
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: dns-aid-keycloak-integration
+    command:
+      - start-dev
+      # Token exchange is a preview feature — must be opt-in.
+      # admin-fine-grained-authz is required for management-permissions API,
+      # which the test bootstrap uses to grant the actor client permission
+      # to exchange tokens for the target client.
+      - --features=token-exchange,admin-fine-grained-authz
+      # Import the pre-configured realm on first startup.
+      - --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin-test-only-do-not-use-in-prod
+      # Reduce log verbosity so test output stays readable.
+      KC_LOG_LEVEL: warn
+    ports:
+      # 18080 host → 8080 container. Test default env var:
+      # DNS_AID_KEYCLOAK_BASE_URL=http://localhost:18080
+      - "18080:8080"
+    volumes:
+      - ./keycloak-realm.json:/opt/keycloak/data/import/realm.json:ro
+    healthcheck:
+      # Keycloak 26+ exposes /health/ready on the management port (9000 inside
+      # the container). The dev start command keeps it on 9000; for the test
+      # harness we poll the public admin endpoint instead, which works on the
+      # dev profile.
+      test:
+        - "CMD-SHELL"
+        - "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /realms/dns-aid-test/.well-known/openid-configuration HTTP/1.1\\nHost: localhost\\nConnection: close\\n\\n' >&3 && head -1 <&3 | grep -q '200 OK'"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s

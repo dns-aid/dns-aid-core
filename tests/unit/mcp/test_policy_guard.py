@@ -13,7 +13,6 @@ from dns_aid.sdk.policy.guard import check_target_policy
 from dns_aid.sdk.policy.models import PolicyResult, PolicyViolation
 from dns_aid.sdk.policy.schema import PolicyDocument, PolicyRules
 
-
 # =============================================================================
 # check_target_policy tests
 # =============================================================================
@@ -74,7 +73,8 @@ class TestCheckTargetPolicy:
         mock_eval = AsyncMock()
         mock_eval.fetch = AsyncMock(return_value=doc)
         mock_eval.evaluate = lambda doc, ctx, **kw: PolicyResult(
-            allowed=False, violations=violations,
+            allowed=False,
+            violations=violations,
         )
 
         with (
@@ -130,10 +130,13 @@ class TestCheckTargetPolicy:
 
         with (
             patch("dns_aid.sdk.policy.guard._get_evaluator", return_value=mock_eval),
-            patch.dict("os.environ", {
-                "DNS_AID_POLICY_MODE": "strict",
-                "DNS_AID_CALLER_DOMAIN": "api.infoblox.com",
-            }),
+            patch.dict(
+                "os.environ",
+                {
+                    "DNS_AID_POLICY_MODE": "strict",
+                    "DNS_AID_CALLER_DOMAIN": "api.infoblox.com",
+                },
+            ),
         ):
             result = await check_target_policy(
                 "https://example.com/policy.json",

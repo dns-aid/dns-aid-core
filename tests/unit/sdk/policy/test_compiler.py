@@ -5,17 +5,14 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from dns_aid.sdk.policy.compiler import (
     BindAidAction,
-    CompilationResult,
     PolicyCompiler,
     RPZAction,
-    SkippedRule,
 )
 from dns_aid.sdk.policy.schema import CELRule, PolicyDocument, PolicyRules
 

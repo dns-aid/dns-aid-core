@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -22,14 +21,13 @@ from dns_aid.sdk.policy.middleware import (
 )
 from dns_aid.sdk.policy.models import PolicyResult, PolicyViolation
 from dns_aid.sdk.policy.schema import (
-    AvailabilityConfig,
     PolicyDocument,
     PolicyRules,
     RateLimitConfig,
 )
 
-
 # -- Helpers ------------------------------------------------------------------
+
 
 def _make_app(
     policy_uri: str = "https://example.com/policy.json",
@@ -68,6 +66,7 @@ def _policy_doc(**rule_kwargs: object) -> PolicyDocument:
 
 
 # -- Mock the evaluator -------------------------------------------------------
+
 
 def _mock_evaluator_class(allowed: bool = True, violations: list | None = None):
     """Return a mock PolicyEvaluator class that creates mock instances."""

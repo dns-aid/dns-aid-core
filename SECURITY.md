@@ -124,6 +124,45 @@ When using DNS-AID in production:
 - DANE/TLSA defaults to advisory mode (existence check); full certificate matching requires `verify_dane_cert=True`
 - SVCB custom keys use private-use numbers pending IANA registration
 
+## Accepted dependency vulnerabilities
+
+We publish accepted (documented, risk-assessed) dependency CVEs here so reviewers and downstream users can verify the rationale. Each entry is also suppressed in `.github/workflows/security.yml` with a per-CVE comment and tracked via a GitHub issue.
+
+### CVE-2025-45768 — pyjwt (disputed; "weak encryption" claim)
+
+- **Package**: `pyjwt 2.12.1` (transitive via the `mcp` extra; also in `all`).
+- **Status — DISPUTED**: This CVE is **disputed by the pyjwt maintainer**.
+  Per the [NVD entry](https://nvd.nist.gov/vuln/detail/CVE-2025-45768)
+  (status: Analyzed), the maintainer's published note states:
+  *"this is disputed by the Supplier because the key length is chosen
+  by the application that uses the library."* The maintainer's own
+  [pyjwt Security Advisories](https://github.com/jpadilla/pyjwt/security/advisories)
+  list does NOT include CVE-2025-45768 — only three substantive,
+  fixed CVEs are listed there (CVE-2026-32597, CVE-2024-53861,
+  CVE-2022-29217). The [Snyk vulnerability database](https://security.snyk.io/package/pip/PyJWT/2.12.1)
+  does not list this CVE either ("No direct vulnerabilities have been
+  found for this package in Snyk's vulnerability database"). The CVE
+  was filed by a third party with a gist as the supporting evidence
+  and no fix commit. CVSS 3.1 `AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:H`
+  per NVD, but the underlying claim is contested.
+- **Why we suppress in CI rather than re-prioritise as resolved**:
+  `pip-audit` mirrors OSV/PYSEC entries which retain the CVE without
+  the dispute annotation. The `--ignore-vuln` suppression keeps CI
+  green; this document carries the substantive context.
+- **DNS-AID exposure**: **Definitionally zero**. The disputed claim is
+  about applications that pick short keys; DNS-AID does not generate
+  JWTs in the SDK path. The `credential_provider` callback returns
+  tokens for transport (the application's IdP client generates them);
+  decoding is the receiving server's responsibility. The `mcp` extra
+  includes pyjwt for OAuth-protected MCP servers, which use
+  operator-issued tokens with operator-chosen key lengths.
+- **Mitigation**: None required at the SDK layer.
+- **Re-evaluation criteria**: Close [tracking issue #141](https://github.com/infobloxopen/dns-aid-core/issues/141)
+  when ANY of the following changes:
+  - NVD status changes away from "Analyzed / Disputed".
+  - Snyk adds this CVE to their database.
+  - The pyjwt maintainer accepts the report and ships a fix.
+
 ## Security Updates
 
 Security updates will be released as patch versions. Subscribe to releases to stay informed.

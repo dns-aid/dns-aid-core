@@ -8,16 +8,15 @@ from __future__ import annotations
 import pytest
 
 from dns_aid.sdk.mesh import (
+    _MESH_TRANSPORTS,
     DirectMeshConnection,
     DirectMeshTransport,
     MeshConnection,
     MeshNotAvailableError,
     MeshTransport,
-    _MESH_TRANSPORTS,
     get_default_mesh,
     register_default_mesh,
 )
-
 
 # ── Concrete test doubles ───────────────────────────────────────
 
@@ -30,9 +29,7 @@ class StubMeshConnection(MeshConnection):
         self.closed = False
         self._buffer = b""
 
-    async def open(
-        self, *, target: str, port: int = 443, mesh_meta: str | None = None
-    ) -> None:
+    async def open(self, *, target: str, port: int = 443, mesh_meta: str | None = None) -> None:
         self.opened = True
         self.target = target
         self.port = port

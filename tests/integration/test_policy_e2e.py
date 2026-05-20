@@ -18,12 +18,10 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 from urllib.parse import urlparse
 
-import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -112,13 +110,17 @@ class PolicyServer:
         doc_json = self.doc.model_dump_json()
 
         class Handler(BaseHTTPRequestHandler):
-            def do_GET(inner_self) -> None:
+            # `inner_self` deliberately disambiguates the nested-class instance
+            # from the enclosing test-server `self`; the outer `self` is closed
+            # over by `doc_json` above. Ruff's N805 is suppressed via `noqa`;
+            # CodeQL's `py/not-named-self` is suppressed via `lgtm`.
+            def do_GET(inner_self) -> None:  # noqa: N805  # lgtm[py/not-named-self]
                 inner_self.send_response(200)
                 inner_self.send_header("Content-Type", "application/json")
                 inner_self.end_headers()
                 inner_self.wfile.write(doc_json.encode())
 
-            def log_message(inner_self, format, *args) -> None:
+            def log_message(inner_self, format, *args) -> None:  # noqa: N805  # lgtm[py/not-named-self]
                 pass  # Suppress request logging
 
         self._server = HTTPServer(("127.0.0.1", self.port), Handler)
@@ -139,15 +141,16 @@ def _make_target_app(policy_uri: str, mode: str = "strict") -> Starlette:
         """Simulated MCP tools/list endpoint."""
         body = await request.body()
         data = json.loads(body) if body else {}
-        method = data.get("method", "unknown")
 
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "id": data.get("id", 1),
-            "result": {
-                "tools": [{"name": "test-tool", "description": "A test tool"}],
-            },
-        })
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": data.get("id", 1),
+                "result": {
+                    "tools": [{"name": "test-tool", "description": "A test tool"}],
+                },
+            }
+        )
 
     app = Starlette(
         routes=[Route("/mcp", mcp_endpoint, methods=["POST"])],
@@ -352,13 +355,19 @@ class TestE2ERateLimiting:
             }
 
             # First 2 requests pass
-            r1 = client.post("/mcp", json={"jsonrpc": "2.0", "method": "test", "id": 1}, headers=headers)
-            r2 = client.post("/mcp", json={"jsonrpc": "2.0", "method": "test", "id": 2}, headers=headers)
+            r1 = client.post(
+                "/mcp", json={"jsonrpc": "2.0", "method": "test", "id": 1}, headers=headers
+            )
+            r2 = client.post(
+                "/mcp", json={"jsonrpc": "2.0", "method": "test", "id": 2}, headers=headers
+            )
             assert r1.status_code == 200
             assert r2.status_code == 200
 
             # Third request hits rate limit
-            r3 = client.post("/mcp", json={"jsonrpc": "2.0", "method": "test", "id": 3}, headers=headers)
+            r3 = client.post(
+                "/mcp", json={"jsonrpc": "2.0", "method": "test", "id": 3}, headers=headers
+            )
             assert r3.status_code == 429
             assert r3.json()["error"] == "rate_limited"
         finally:
@@ -426,7 +435,7 @@ class TestE2ELayer1CallerSide:
                 # Should NOT raise — permissive mode logs warning
                 # It will fail at the network level (unreachable), not policy
                 try:
-                    result = await client.invoke(agent, method="tools/list")
+                    await client.invoke(agent, method="tools/list")
                 except Exception as e:
                     # Expected: network error, NOT PolicyViolationError
                     assert not isinstance(e, PolicyViolationError)
@@ -490,14 +499,13 @@ class TestE2EPolicyGuard:
         policy_uri = policy_server.start()
 
         try:
-            import os
-
             with pytest.MonkeyPatch.context() as mp:
                 mp.setenv("DNS_AID_POLICY_MODE", "strict")
                 mp.setenv("DNS_AID_CALLER_DOMAIN", "api.infoblox.com")
 
                 # Reset module-level evaluator to pick up fresh env
                 import dns_aid.sdk.policy.guard as guard_mod
+
                 guard_mod._evaluator = None
 
                 result = await check_target_policy(

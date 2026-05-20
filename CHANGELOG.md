@@ -5,6 +5,195 @@ All notable changes to DNS-AID will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.21.0] - 2026-05-19
+
+> Lazy credential resolution via `credential_provider` callback — enables RFC 8693
+> token exchange, AWS STS assume-role, and other per-invoke credential minting
+> patterns through a single opt-in callback. Extends `SigV4AuthHandler` with
+> explicit AWS credentials so the same SDK contract works uniformly across all
+> six authentication handlers. Strictly additive — every existing call site
+> continues to function unchanged.
+
+### Added
+
+- **`credential_provider` keyword parameter** on `AgentClient.invoke()` — an
+  opt-in async callable that takes the target `AgentRecord` and returns a
+  credentials dict, awaited lazily at invoke time. Suited for short-lived
+  delegation tokens (RFC 8693 token exchange against Keycloak, Okta, Auth0,
+  Ping Identity, and any other RFC 8693-compliant IdP), AWS STS assume-role
+  per invocation, HashiCorp Vault dynamic secrets, and HSM/KMS-backed
+  signing keys. Precedence:
+  `auth_handler > credentials > credential_provider > no_auth`.
+- **`CredentialProviderError` exception class** in `dns_aid.sdk.exceptions` —
+  wraps provider-side failures with the original exception preserved via
+  `__cause__` for debugging. The wrapper's serialised surface (`str`,
+  `repr`, `args`) contains no credential values from the provider's return
+  dict, guaranteed by sentinel-based regression tests.
+- **`SigV4AuthHandler` explicit-credentials extension** — three new optional
+  keyword arguments (`access_key`, `secret_key`, `session_token`) on the
+  constructor enable per-invoke STS credentials supplied directly by the
+  application instead of the boto3 default credential chain. The existing
+  boto3 chain remains the fallback when explicit credentials are not
+  supplied (backward-compatible default behavior preserved).
+- **`SDKConfig.credential_provider_timeout`** — bounds the await on the
+  `credential_provider` callback. Default 30 seconds; configurable via env
+  var `DNS_AID_CREDENTIAL_PROVIDER_TIMEOUT`. Hanging providers surface as
+  `CredentialProviderError` with the underlying `TimeoutError` preserved as
+  `__cause__`.
+- **`docs/security-credentials.md`** — first-class security posture
+  document with a per-handler security matrix covering all six auth
+  handlers. Reviewers can answer the eight standard credential-handling
+  questions (logging, caching, exception sanitisation, concurrency, opt-in
+  compatibility, audit trail, air-gapped operation, FIPS / FedRAMP
+  alignment) in under one hour of code inspection.
+- **`docs/architecture.md` — "Caller-side credential application" section**
+  documenting the three resolution paths and the SDK's credential-handling
+  boundary.
+
+### Changed
+
+- `AgentClient._resolve_auth()` is now async and accepts the new
+  `credential_provider` parameter. Backward-compatible: existing callers
+  going through `AgentClient.invoke()` are unaffected.
+- `SigV4AuthHandler` constructor accepts three new optional keyword
+  arguments (`access_key`, `secret_key`, `session_token`) — additive.
+  Every pre-existing constructor call pattern continues to work without
+  source change. Verified by `tests/unit/sdk/test_sigv4_backward_compat.py`.
+
+### Security
+
+- **botocore.auth DEBUG-level session-token leak suppressed** during SigV4
+  signing. botocore's `SigV4Auth.add_auth()` logs the canonical request at
+  DEBUG level, which includes the `x-amz-security-token` header value (the
+  STS session token). Any application running with botocore at DEBUG level
+  would otherwise leak session tokens. The SDK temporarily disables the
+  `botocore.auth` logger for the duration of the signing call, using a
+  reference-counted thread-safe suppression so concurrent SigV4 signings
+  cannot corrupt the logger state. Verified by sentinel-based regression
+  tests.
+- **Provider exception sanitisation**: when the `credential_provider`
+  callback raises, the SDK wraps the exception in `CredentialProviderError`
+  with the original exception preserved as `__cause__`. The wrapper's
+  serialised surface contains no credential values from the provider's
+  return dict.
+- **Provider return-shape validation**: a `credential_provider` that
+  returns a non-dict value (raw string, list, etc.) surfaces a clear
+  `CredentialProviderError` naming the wrong type — instead of a cryptic
+  downstream failure in the auth registry.
+- **Cancellation passthrough**: `asyncio.CancelledError` from the provider
+  is propagated cleanly without being wrapped in
+  `CredentialProviderError`, preserving cooperative cancellation patterns
+  at the caller.
+- **`SigV4AuthHandler` validation messages credential-clean**: partial
+  credential supply (e.g., `access_key` without `secret_key`) raises
+  `ValueError` with a static message; supplied credential values never
+  appear in the error.
+- **`SigV4AuthHandler` empty / whitespace credentials rejected at
+  construction**: supplying `access_key=""`, `secret_key=""`, or
+  `session_token=""` (or whitespace-only equivalents) raises `ValueError`
+  with a credential-clean message instead of producing a confusing
+  botocore canonical-request error at signing time. Field name is named
+  in the error; supplied value never appears.
+- **Generic provider-failure observability log**: when the
+  `credential_provider` callback raises a non-timeout exception, the SDK
+  now emits a `sdk.credential_provider_failed` debug log carrying the
+  exception **type name only** (never the message or args, which a buggy
+  provider could populate with credential material). Symmetric with the
+  existing `sdk.credential_provider_timeout` log so operators get
+  per-handler debug traces for any provider failure mode.
+- **Documented disputed CVE-2025-45768** (`pyjwt 2.12.1`). This CVE is
+  disputed by the pyjwt maintainer per the
+  [NVD entry](https://nvd.nist.gov/vuln/detail/CVE-2025-45768) ("Analyzed"
+  status, with the supplier's note that the key length is chosen by the
+  application, not the library). The maintainer's own pyjwt Security
+  Advisories list does not include CVE-2025-45768; Snyk's vulnerability
+  database does not list it either. DNS-AID does not generate JWTs in
+  the SDK path. Suppressed in `pip-audit` per the established repo
+  pattern with a per-CVE rationale comment; publicly acknowledged in
+  `SECURITY.md` "Accepted dependency vulnerabilities" section with the
+  full dispute context. Re-evaluation tracked at
+  [#141](https://github.com/infobloxopen/dns-aid-core/issues/141).
+
+### Tests
+
+- 70 new unit tests across `tests/unit/sdk/` covering precedence,
+  per-handler security regressions, error sanitisation, concurrency,
+  hardening invariants, SigV4 explicit-credentials behavior selection
+  table, and backward-compatibility locks.
+- Live integration tests:
+  - **Keycloak Docker**
+    (`tests/integration/test_credential_provider_oauth_keycloak.py`):
+    end-to-end RFC 8693 token exchange against a locally-spun-up
+    Keycloak. Bundled `docker-compose.yml` makes the test reproducible
+    without a paid SaaS tenant.
+  - **Okta tenant**
+    (`tests/integration/test_credential_provider_oauth_okta.py`): RFC 8693
+    token exchange against a real Okta Custom Authorization Server.
+    Documented tenant-licensing requirement (Workforce Identity Cloud
+    Cross-App Access).
+  - **AWS STS**
+    (`tests/integration/test_credential_provider_aws_sts.py`): live
+    validation against real AWS API Gateway with IAM auth. Three passing
+    tests verify explicit-credentials signing, per-invoke freshness, and
+    log-suppression non-interference with real signing.
+  - **Per-target scoping**
+    (`tests/integration/test_credential_provider_per_target_scoping.py`):
+    live multi-tenant test that constructs two `AgentRecord`s with
+    distinct `realm` values and asserts the provider is invoked exactly
+    once per target with the corresponding agent context. Proves the
+    multi-tenant invariant against real AWS.
+- 3 new unit tests in
+  `tests/unit/sdk/test_credential_provider_per_target.py` covering
+  provider receives the correct `AgentRecord`, per-target derivation
+  from agent attributes, and sequencing across multiple targets without
+  state contamination.
+- 6 new unit tests in `tests/unit/sdk/test_sigv4_explicit_credentials.py`
+  covering empty / whitespace credential rejection (access_key,
+  secret_key, session_token) plus a sentinel-based credential-clean
+  invariant for the ValueError messages.
+- 1 new unit test in `tests/unit/sdk/test_credential_provider_hardening.py`
+  covering the `sdk.credential_provider_failed` debug log: asserts the
+  exception type name is logged but the exception's args (which the test
+  populates with a sentinel) never appear in any captured log event.
+
+### Chore
+
+- Lint sweep across `tests/` and `examples/` — resolved 52 pre-existing
+  ruff findings (35 auto-fixed; 17 manual: 10 `E741` `l → line` renames
+  in policy zone tests, 4 `F841` unused-locals, 2 `N805` deliberate
+  `inner_self` nested-handler exceptions with `noqa`, 1 `B017` narrowed
+  to `pydantic.ValidationError`). Mandatory CI gate (`ruff check src/`)
+  was already clean.
+
+### Documentation
+
+- New: `docs/security-credentials.md` (centrepiece security posture
+  document). Includes a Mermaid sequence diagram of the RFC 8693
+  token-exchange flow, a decoded delegation-JWT payload showing the
+  actor / subject claim chain (`sub` / `act` / `azp` / `aud`), and a
+  "Known limitations" subsection naming proof-of-possession bindings
+  (RFC 9449 DPoP, mTLS, FAPI PAR) that require a custom `auth_handler`
+  override today.
+- New: `examples/integration_oauth2_token_exchange.py` and its
+  companion `.README.md` — canonical RFC 8693 token-exchange pattern
+  with audit-trail explanation and per-IdP notes (Keycloak / Okta /
+  Auth0 / Microsoft Entra ID).
+- New: `examples/integration_aws_sts_assume_role.py` and its companion
+  `.README.md` — canonical per-invoke STS assume-role pattern with SigV4
+  signing, multi-tenant role derivation, and production-hardening
+  guidance.
+- New: `tests/integration/fixtures/keycloak-compose.yml`,
+  `keycloak-realm.json`, and `README.md` documenting bring-up flow and
+  per-IdP setup requirements.
+- Updated: `docs/architecture.md` adds a "Caller-side credential
+  application" section.
+- New: `scripts/audit_credential_handling.py` — static analysis sweep
+  for credential-shaped attribute names in `structlog` calls. Zero
+  findings against the SDK source; suitable for use as a CI safety
+  gate.
+
 ## [0.20.0] - 2026-05-09
 
 ### Security

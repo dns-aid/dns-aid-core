@@ -22,7 +22,6 @@ from dns_aid import DNSSECError
 from dns_aid.backends.mock import MockBackend
 from tests.integration.conftest import MockDNSBridge
 
-
 # ── Scenario A: Full Lifecycle ─────────────────────────────────────────
 
 

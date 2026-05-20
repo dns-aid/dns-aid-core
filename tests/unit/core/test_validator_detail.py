@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import dns.flags
 import dns.resolver
-import pytest
 
 from dns_aid.core.models import DNSSECDetail, TLSDetail, VerifyResult
 from dns_aid.core.validator import (
@@ -18,7 +17,6 @@ from dns_aid.core.validator import (
     _check_dnssec_detail,
     _check_tls,
 )
-
 
 # =============================================================================
 # DNSSECDetail model tests
@@ -271,9 +269,7 @@ class TestCheckDnssecDetail:
         with patch("dns_aid.core.validator.dns.asyncresolver.Resolver") as MockResolver:
             resolver_instance = MockResolver.return_value
             resolver_instance.use_edns = MagicMock()
-            resolver_instance.resolve = AsyncMock(
-                side_effect=Exception("resolver error")
-            )
+            resolver_instance.resolve = AsyncMock(side_effect=Exception("resolver error"))
 
             detail = await _check_dnssec_detail("_test._mcp._agents.example.com")
             assert detail.validated is False
@@ -344,11 +340,10 @@ class TestCheckTls:
 
     async def test_timeout_returns_empty(self) -> None:
         """On timeout, return default empty detail."""
-        import asyncio as _asyncio
 
         with patch(
             "dns_aid.core.validator.asyncio.wait_for",
-            side_effect=_asyncio.TimeoutError(),
+            side_effect=TimeoutError(),
         ):
             detail = await _check_tls("example.com", 443)
             assert detail.connected is False

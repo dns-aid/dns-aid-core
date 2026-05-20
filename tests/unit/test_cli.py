@@ -4,8 +4,7 @@
 """Unit tests for CLI commands."""
 
 import re
-from dataclasses import dataclass
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 

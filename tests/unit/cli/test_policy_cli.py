@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from dns_aid.cli.main import app
@@ -61,7 +60,17 @@ class TestPolicyCompile:
 
     def test_compile_missing_input(self, tmp_path: Path) -> None:
         result = runner.invoke(
-            app, ["policy", "compile", "-i", "/nonexistent.json", "-o", str(tmp_path / "out"), "-f", "rpz"]
+            app,
+            [
+                "policy",
+                "compile",
+                "-i",
+                "/nonexistent.json",
+                "-o",
+                str(tmp_path / "out"),
+                "-f",
+                "rpz",
+            ],
         )
         assert result.exit_code == 1
 
@@ -82,10 +91,14 @@ class TestEnforce:
             app,
             [
                 "enforce",
-                "-d", "example.com",
-                "-p", str(SAMPLE_POLICY),
-                "--mode", "shadow",
-                "-o", str(tmp_path),
+                "-d",
+                "example.com",
+                "-p",
+                str(SAMPLE_POLICY),
+                "--mode",
+                "shadow",
+                "-o",
+                str(tmp_path),
             ],
         )
         assert result.exit_code == 0, result.output

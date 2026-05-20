@@ -381,6 +381,62 @@ installations without the `[sdk]` extra.
 
 ---
 
+## Caller-side credential application
+
+Credentials supplied to `AgentClient.invoke()` flow through a small,
+auditable resolution layer before being applied to the outbound HTTP
+request. The SDK separates credential **sourcing** (application-owned)
+from credential **application** (SDK-owned). This boundary keeps the
+SDK agnostic to which secret store the application uses while
+guaranteeing uniform credential-handling semantics across every
+supported auth handler.
+
+### Three resolution paths
+
+| Order | Source | When to use |
+|---|---|---|
+| 1 | `auth_handler=<instance>` | Pre-constructed handler override — useful for tests, custom handlers, or static long-lived credentials |
+| 2 | `credentials={"token": ..., ...}` | Pre-fetched credentials supplied at call time — simplest pattern; suitable for env-var-backed bearer tokens, API keys |
+| 3 | `credential_provider=<async callable>` | Lazy callback invoked at call time — suitable for RFC 8693 token exchange, AWS STS assume-role, HashiCorp Vault dynamic secrets, or any per-invoke credential minting |
+
+The first non-empty source wins; the others are not consulted. When
+`credentials` and `credential_provider` are both supplied, the SDK emits
+a `sdk.credential_provider_bypassed` debug log naming both sources so
+developers can detect misconfiguration in test output without behavior
+surprise.
+
+### Why the credential_provider callback exists
+
+Short-lived delegation tokens (RFC 8693 token exchange, AWS STS
+assume-role, Microsoft Entra On-Behalf-Of) are the canonical Zero Trust
+pattern for inter-agent calls in production. Pre-fetching such tokens
+means the application has to manage their expiry and refresh; the
+provider callback shifts that responsibility to where it naturally lives
+(inside the application's identity layer) while keeping the SDK's
+invocation API unchanged.
+
+The provider receives the target `AgentRecord` on each invocation, so it
+can derive per-target credentials (different audience claim per agent,
+different STS role ARN per AWS account, etc.).
+
+### Security boundary
+
+The SDK never logs, caches, or persists credentials supplied by the
+application. Two known exceptions are scoped, bounded, and lock-protected:
+
+- The `OAuth2AuthHandler` caches its own acquired access token
+  per-instance (industry-standard pattern; respects token expiry).
+- The `SigV4AuthHandler` falls back to the boto3 default credential
+  chain when explicit credentials are not supplied (backward
+  compatibility with existing AWS deployments).
+
+The complete per-handler security posture matrix lives in
+[`security-credentials.md`](security-credentials.md). The detailed
+contracts for the public API surface live in
+[`specs/003-credential-provider-callback/contracts/`](../specs/003-credential-provider-callback/contracts/).
+
+---
+
 ## Community Rankings (Optional)
 
 The SDK can fetch community-wide telemetry rankings when a telemetry API is configured:

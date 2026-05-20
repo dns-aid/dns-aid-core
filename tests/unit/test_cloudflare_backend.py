@@ -691,11 +691,11 @@ class TestCloudflarePublishAgentParamDemotion:
 
         async def _mock_create_svcb(**kwargs):
             svcb_calls.append(kwargs)
-            return f"SVCB _lf-test._mcp._agents.example.com"
+            return "SVCB _lf-test._mcp._agents.example.com"
 
         async def _mock_create_txt(**kwargs):
             txt_calls.append(kwargs)
-            return f"TXT _lf-test._mcp._agents.example.com"
+            return "TXT _lf-test._mcp._agents.example.com"
 
         with (
             patch.object(backend, "create_svcb_record", side_effect=_mock_create_svcb),
@@ -756,7 +756,7 @@ class TestCloudflarePublishAgentParamDemotion:
             patch.object(backend, "create_svcb_record", side_effect=_mock_create_svcb),
             patch.object(backend, "create_txt_record", side_effect=_mock_create_txt),
         ):
-            records = await backend.publish_agent(agent)
+            await backend.publish_agent(agent)
 
         # No dnsaid_ entries in TXT
         if txt_calls:

@@ -465,9 +465,7 @@ class TestAdversarialAuthType:
         """A malicious agent.json with auth_type='evil_handler' is rejected."""
         agent = _agent(PUBLIC_HOST, "evil-agent")
 
-        _apply_auth_from_metadata(
-            agent, {"auth": {"type": "evil_handler", "location": "header"}}
-        )
+        _apply_auth_from_metadata(agent, {"auth": {"type": "evil_handler", "location": "header"}})
 
         # Must NOT be set — unknown type rejected at discovery time
         assert agent.auth_type is None
@@ -477,9 +475,7 @@ class TestAdversarialAuthType:
         """SQL injection attempt in auth_type is rejected."""
         agent = _agent(PUBLIC_HOST, "sqli-agent")
 
-        _apply_auth_from_metadata(
-            agent, {"auth": {"type": "'; DROP TABLE agents; --"}}
-        )
+        _apply_auth_from_metadata(agent, {"auth": {"type": "'; DROP TABLE agents; --"}})
 
         assert agent.auth_type is None
 
@@ -564,7 +560,6 @@ class TestAdversarialSignature:
     async def test_signing_missing_header_raises(self) -> None:
         """Signing a covered component that's not on the request must raise."""
         from dns_aid.sdk.auth.http_msg_sig import HttpMsgSigAuthHandler
-
         from tests.unit.sdk.auth.test_http_msg_sig import _generate_ed25519_keypair
 
         pem, _ = _generate_ed25519_keypair()
@@ -585,7 +580,6 @@ class TestAdversarialSignature:
     async def test_signing_with_present_header_succeeds(self) -> None:
         """Signing a header that IS present should work normally."""
         from dns_aid.sdk.auth.http_msg_sig import HttpMsgSigAuthHandler
-
         from tests.unit.sdk.auth.test_http_msg_sig import _generate_ed25519_keypair
 
         pem, _ = _generate_ed25519_keypair()
@@ -671,7 +665,9 @@ class TestHandlerRepr:
 
         test_creds = Credentials("AKID", "secret")
         with patch("boto3.Session") as mock:
-            mock.return_value.get_credentials.return_value.get_frozen_credentials.return_value = test_creds
+            mock.return_value.get_credentials.return_value.get_frozen_credentials.return_value = (
+                test_creds
+            )
             from dns_aid.sdk.auth.sigv4 import SigV4AuthHandler
 
             handler = SigV4AuthHandler(region="us-east-1")

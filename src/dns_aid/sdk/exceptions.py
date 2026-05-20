@@ -101,3 +101,45 @@ class DirectoryAuthError(DirectoryError):
     * ``auth_handler_class`` — class name of the resolved AuthHandler subclass, or ``None``
       if no auth handler was configured.
     """
+
+
+class CredentialProviderError(Exception):
+    """
+    Raised when a ``credential_provider`` callable supplied to ``AgentClient.invoke()``
+    fails during credential resolution.
+
+    The original provider exception is preserved as ``__cause__`` for debugging via Python's
+    standard exception-chaining mechanism (set automatically when the SDK raises this with
+    ``raise CredentialProviderError(...) from provider_exc``). Credential values from the
+    provider's return dict NEVER appear in this exception's ``args``, ``str()``, ``repr()``,
+    or any serialized form. Callers wishing to inspect the underlying failure must do so
+    deliberately through ``__cause__``.
+
+    This class extends :class:`Exception` directly rather than the directory-scoped
+    :class:`DirectoryError` because credential resolution is conceptually distinct from
+    directory operations. See ``specs/003-credential-provider-callback/contracts/
+    credential_provider_error_contract.md`` for the full contract, including the per-handler
+    sanitization invariants verified by automated regression tests.
+
+    Sanitization invariants (verified by ``tests/unit/sdk/test_credential_provider_errors.py``):
+
+    * ``str(error)`` contains only the static message template and ``agent_fqdn``.
+    * ``repr(error)`` contains only the class name plus the safe ``args`` tuple.
+    * ``error.args`` is a tuple of safe values only — never the credential dict, never the
+      provider callable, never any partial return material.
+    * Standard exception marshalling round-trips without leaking credentials.
+    * ``error.__cause__`` is the original provider exception, available for deliberate
+      inspection but never logged or formatted by the SDK.
+
+    Args:
+        agent_fqdn: The target agent's FQDN at the time the provider was invoked. Used for
+            log correlation and incident triage. Never contains credential values.
+    """
+
+    def __init__(self, agent_fqdn: str) -> None:
+        message = f"credential_provider failed for agent {agent_fqdn!r}"
+        super().__init__(message)
+        self.agent_fqdn: str = agent_fqdn
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(agent_fqdn={self.agent_fqdn!r})"

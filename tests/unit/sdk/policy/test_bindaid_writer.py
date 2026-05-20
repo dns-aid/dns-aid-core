@@ -80,11 +80,11 @@ class TestActionDirectives:
     def test_nxdomain_txt(self, result_with_directives: CompilationResult) -> None:
         zone = write_bindaid_zone(result_with_directives, "policy.example.com", serial=1)
         assert "evil.com" in zone
-        assert 'ACTION:nxdomain' in zone
+        assert "ACTION:nxdomain" in zone
 
     def test_passthru_txt(self, result_with_directives: CompilationResult) -> None:
         zone = write_bindaid_zone(result_with_directives, "policy.example.com", serial=1)
-        assert 'ACTION:passthru' in zone
+        assert "ACTION:passthru" in zone
 
 
 class TestParamOps:
@@ -110,7 +110,7 @@ class TestParamOps:
         )
         zone = write_bindaid_zone(result, "policy.example.com", serial=1)
         lines = zone.splitlines()
-        txt_lines = [l for l in lines if "TXT" in l]
+        txt_lines = [line for line in lines if "TXT" in line]
         # 1 ACTION + 3 param ops = 4 TXT records
         assert len(txt_lines) == 4
 
@@ -132,10 +132,10 @@ class TestFullIntegration:
             ttl=300,
         )
         lines = zone.splitlines()
-        assert any("$TTL 300" in l for l in lines)
-        assert any("$ORIGIN rdata-policy.example.com." in l for l in lines)
-        assert any("SOA" in l for l in lines)
-        assert any("NS" in l for l in lines)
-        txt_lines = [l for l in lines if "TXT" in l]
+        assert any("$TTL 300" in line for line in lines)
+        assert any("$ORIGIN rdata-policy.example.com." in line for line in lines)
+        assert any("SOA" in line for line in lines)
+        assert any("NS" in line for line in lines)
+        txt_lines = [line for line in lines if "TXT" in line]
         # 2 simple ACTIONs + 2 ACTIONs with param_ops (2+2 TXT each) = 6 TXT
         assert len(txt_lines) == 6

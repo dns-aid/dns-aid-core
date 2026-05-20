@@ -439,8 +439,10 @@ class TestVerify:
                 "valid": True,
             }
             mock_dnssec_detail.return_value = DNSSECDetail(
-                validated=True, algorithm="ECDSAP256SHA256",
-                algorithm_strength="strong", ad_flag=True,
+                validated=True,
+                algorithm="ECDSAP256SHA256",
+                algorithm_strength="strong",
+                ad_flag=True,
             )
             mock_dane.return_value = True
             mock_endpoint.return_value = {"reachable": True, "latency_ms": 50.0}
@@ -464,7 +466,7 @@ class TestVerify:
         with (
             patch("dns_aid.core.validator._check_svcb_record") as mock_svcb,
             patch("dns_aid.core.validator._check_dnssec_detail") as mock_dnssec_detail,
-            patch("dns_aid.core.validator._check_tls") as mock_tls,
+            patch("dns_aid.core.validator._check_tls"),
         ):
             mock_svcb.return_value = None
             mock_dnssec_detail.return_value = DNSSECDetail(validated=False)

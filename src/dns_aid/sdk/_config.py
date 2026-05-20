@@ -112,6 +112,17 @@ class SDKConfig(BaseModel):
         ge=1.0,
         description="Seconds before an open circuit transitions to half-open.",
     )
+    credential_provider_timeout: float = Field(
+        default=30.0,
+        gt=0.0,
+        description=(
+            "Maximum seconds the SDK will wait for a ``credential_provider`` callback "
+            "to complete before raising ``CredentialProviderError``. Separate from "
+            "``timeout_seconds`` (the HTTP transport timeout) because credential "
+            "resolution and the HTTP call are independent operations. Set via env: "
+            "``DNS_AID_CREDENTIAL_PROVIDER_TIMEOUT``."
+        ),
+    )
 
     @property
     def resolved_directory_url(self) -> str | None:
@@ -152,6 +163,9 @@ class SDKConfig(BaseModel):
             circuit_breaker_enabled=os.getenv("DNS_AID_CIRCUIT_BREAKER", "").lower() == "true",
             circuit_breaker_threshold=int(os.getenv("DNS_AID_CIRCUIT_BREAKER_THRESHOLD", "5")),
             circuit_breaker_cooldown=float(os.getenv("DNS_AID_CIRCUIT_BREAKER_COOLDOWN", "60")),
+            credential_provider_timeout=float(
+                os.getenv("DNS_AID_CREDENTIAL_PROVIDER_TIMEOUT", "30")
+            ),
         )
 
 

@@ -115,6 +115,20 @@ def _build_http_msg_sig(config: dict, credentials: dict) -> AuthHandler:
 
 
 def _build_sigv4(config: dict, credentials: dict) -> AuthHandler:
+    """Build a SigV4AuthHandler from auth_config + credentials.
+
+    The credentials dict may contain three additional SigV4-specific keys
+    that enable the explicit-credentials path (see feature 003 — the
+    ``credential_provider`` callback returns these from ``sts.assume_role()``):
+
+    * ``access_key`` — AWS Access Key ID
+    * ``secret_key`` — AWS Secret Access Key
+    * ``session_token`` — Optional STS session token
+
+    When the credentials dict omits these keys, the handler falls back to
+    the boto3 default credential chain (env vars → ``~/.aws/credentials`` →
+    IAM role). This is the existing backward-compatible behavior.
+    """
     from dns_aid.sdk.auth.sigv4 import SigV4AuthHandler
 
     region = config.get("region") or credentials.get("region")
@@ -124,6 +138,9 @@ def _build_sigv4(config: dict, credentials: dict) -> AuthHandler:
         region=region,
         service=config.get("service", "vpc-lattice-svcs"),
         profile_name=credentials.get("profile_name"),
+        access_key=credentials.get("access_key"),
+        secret_key=credentials.get("secret_key"),
+        session_token=credentials.get("session_token"),
     )
 
 

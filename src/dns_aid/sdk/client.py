@@ -10,8 +10,10 @@ signals, and exports them according to configuration.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time as _time
+from collections.abc import Awaitable, Callable
 from types import TracebackType
 from typing import Any, Literal
 
@@ -24,6 +26,7 @@ from dns_aid.sdk._config import SDKConfig
 from dns_aid.sdk.auth import resolve_auth_handler
 from dns_aid.sdk.auth.base import AuthHandler
 from dns_aid.sdk.exceptions import (
+    CredentialProviderError,
     DirectoryAuthError,
     DirectoryConfigError,
     DirectoryRateLimitedError,
@@ -42,6 +45,12 @@ from dns_aid.sdk.signals.collector import SignalCollector
 from dns_aid.utils.url_safety import UnsafeURLError, redact_url_for_log, validate_fetch_url
 
 logger = structlog.get_logger(__name__)
+
+# Type alias for the credential_provider callback. Application supplies an
+# async callable that takes the target AgentRecord and returns a credentials
+# dict whose shape matches the agent's declared auth_type. The SDK awaits the
+# callable lazily at invoke time (FR-001).
+CredentialProvider = Callable[[AgentRecord], Awaitable[dict[str, Any] | None]]
 
 # Protocol handler registry
 _HANDLERS: dict[str, type[ProtocolHandler]] = {
@@ -108,27 +117,158 @@ class AgentClient:
             self._handlers[protocol] = handler_cls()
         return self._handlers[protocol]
 
-    def _resolve_auth(
+    async def _resolve_auth(
         self,
         agent: AgentRecord,
         credentials: dict | None,
+        credential_provider: CredentialProvider | None = None,
     ) -> AuthHandler | None:
-        """Resolve an auth handler from agent metadata and credentials.
+        """Resolve an auth handler from agent metadata, credentials, or provider.
 
-        Returns *None* when the agent requires no auth or credentials
-        are not supplied.
+        Precedence (FR-002): the first non-empty source wins; subsequent
+        sources are not consulted.
+
+            1. ``credentials`` dict (explicit pre-fetched credentials)
+            2. ``credential_provider`` callback (awaited lazily at invoke time)
+            3. No-auth fallback (when both are absent or empty)
+
+        The ``auth_handler`` explicit override is handled by the caller of this
+        method (see ``invoke()``); when set, this method is not called.
+
+        Returns *None* when the agent requires no auth, when no credentials
+        are supplied, or when the provider returns ``None`` / empty dict.
+
+        Raises:
+            CredentialProviderError: When the provider callable itself raises.
+                The original exception is preserved as ``__cause__`` for
+                debugging. The wrapper's serialized surface does not contain
+                credential values (FR-004).
+            ValueError: When the resolved credentials dict lacks required keys
+                for the declared ``auth_type``. The provider's return value is
+                NOT included in the error message (FR-005).
         """
         auth_type = getattr(agent, "auth_type", None)
+        # FR-008: short-circuit before the provider is awaited when the target
+        # declares no authentication.
         if not auth_type or auth_type == "none":
             return None
-        if not credentials:
+
+        # FR-013: conflict-detection debug log when both sources supplied.
+        # Emitted before the precedence check so developers can observe the
+        # bypass without source-changing.
+        if credentials and credential_provider is not None:
             logger.debug(
-                "sdk.auth_skipped",
+                "sdk.credential_provider_bypassed",
                 agent_fqdn=agent.fqdn,
                 auth_type=auth_type,
-                reason="no credentials provided",
+                winner="credentials",
+                bypassed="credential_provider",
+                reason="explicit credentials dict supplied alongside credential_provider",
             )
-            return None
+
+        # Precedence step 1: explicit credentials dict (existing behavior).
+        if credentials:
+            return self._build_handler_from_credentials(agent, auth_type, credentials)
+
+        # Precedence step 2: lazy credential_provider callback.
+        if credential_provider is not None:
+            # Hardening: bound the provider call with a timeout so a hanging
+            # provider (network stall, blocked socket, slow IdP) does not
+            # block invoke indefinitely. The credential_provider_timeout
+            # default is 30 seconds; configurable via SDKConfig or the env
+            # var DNS_AID_CREDENTIAL_PROVIDER_TIMEOUT.
+            provider_timeout = self._config.credential_provider_timeout
+            try:
+                provider_credentials = await asyncio.wait_for(
+                    credential_provider(agent),
+                    timeout=provider_timeout,
+                )
+            except TimeoutError as exc:
+                # Wrap with sanitization. The wrapper carries the agent FQDN
+                # and the timeout duration as safe context; the original
+                # TimeoutError is preserved via __cause__ but does not contain
+                # credential material (TimeoutError carries no credentials).
+                # Python 3.11+ unified ``asyncio.TimeoutError`` with the
+                # builtin ``TimeoutError`` (PEP 678 / 657 era cleanup).
+                logger.debug(
+                    "sdk.credential_provider_timeout",
+                    agent_fqdn=agent.fqdn,
+                    auth_type=auth_type,
+                    timeout_seconds=provider_timeout,
+                )
+                raise CredentialProviderError(agent_fqdn=agent.fqdn) from exc
+            except asyncio.CancelledError:
+                # Propagate cancellation cleanly — do NOT wrap. asyncio.CancelledError
+                # is a BaseException in Python 3.11+; this except clause is defensive
+                # in case a provider raises it from inside (it should not).
+                raise
+            except Exception as exc:
+                # FR-004: wrap with sanitization. The original exception is
+                # preserved as __cause__ via `raise ... from exc`. The wrapper's
+                # serialized form does not contain credential values.
+                #
+                # Hardening: log the exception TYPE NAME (never the value or
+                # args) so operators get a per-handler debug trace symmetric
+                # with the timeout case above. The exception's message and
+                # args may contain credential material from a buggy provider,
+                # so we deliberately omit them.
+                logger.debug(
+                    "sdk.credential_provider_failed",
+                    agent_fqdn=agent.fqdn,
+                    auth_type=auth_type,
+                    exception_type=type(exc).__name__,
+                )
+                raise CredentialProviderError(agent_fqdn=agent.fqdn) from exc
+
+            # FR-003: None or empty dict from provider == no credentials.
+            if provider_credentials is None or provider_credentials == {}:
+                logger.debug(
+                    "sdk.auth_skipped",
+                    agent_fqdn=agent.fqdn,
+                    auth_type=auth_type,
+                    reason="credential_provider returned None or empty dict",
+                )
+                return None
+
+            # Hardening: validate return shape. A misbehaving provider that
+            # returns a non-dict (string, list, int, etc.) would otherwise
+            # surface a cryptic error from deep in the registry. Catching it
+            # here gives the caller a clear actionable message.
+            if not isinstance(provider_credentials, dict):
+                # Note: we deliberately include only the TYPE NAME of the
+                # return value in the error, never the value itself — the
+                # offending value could contain credential material from a
+                # buggy provider implementation.
+                raise CredentialProviderError(agent_fqdn=agent.fqdn) from TypeError(
+                    f"credential_provider must return dict or None, "
+                    f"got {type(provider_credentials).__name__}"
+                )
+
+            return self._build_handler_from_credentials(agent, auth_type, provider_credentials)
+
+        # Precedence step 3: no source supplied — skip auth (existing behavior).
+        logger.debug(
+            "sdk.auth_skipped",
+            agent_fqdn=agent.fqdn,
+            auth_type=auth_type,
+            reason="no credentials provided",
+        )
+        return None
+
+    def _build_handler_from_credentials(
+        self,
+        agent: AgentRecord,
+        auth_type: str,
+        credentials: dict,
+    ) -> AuthHandler:
+        """Build the auth handler for the agent's declared auth_type from the
+        supplied credentials dict.
+
+        Raises ``ValueError`` if the registry factory rejects the dict shape
+        (e.g., missing required keys for the declared auth_type). The error
+        message includes ``auth_type`` and the underlying factory's error
+        message — never the credentials dict's values.
+        """
         auth_config = getattr(agent, "auth_config", None) or {}
         try:
             return resolve_auth_handler(
@@ -149,6 +289,7 @@ class AgentClient:
         arguments: dict | None = None,
         timeout: float | None = None,
         credentials: dict | None = None,
+        credential_provider: CredentialProvider | None = None,
         auth_handler: AuthHandler | None = None,
     ) -> InvocationResult:
         """
@@ -161,11 +302,34 @@ class AgentClient:
             timeout: Override timeout for this call (seconds).
             credentials: Caller-supplied secrets (tokens, client_id/secret)
                 for automatic auth resolution from agent metadata.
+            credential_provider: Optional async callable taking the target
+                ``AgentRecord`` and returning a credentials dict. The SDK
+                awaits it lazily at invoke time when no explicit
+                ``credentials`` dict is supplied. Suited for short-lived
+                delegation tokens (RFC 8693 token exchange), per-target
+                credential scoping, and dynamic secret stores (Vault, KMS,
+                AWS STS). See
+                ``specs/003-credential-provider-callback/contracts/
+                credential_provider_contract.md`` for the full contract.
             auth_handler: Explicit auth handler override. When provided,
-                *credentials* and agent metadata are ignored.
+                ``credentials``, ``credential_provider``, and agent metadata
+                are ignored.
 
         Returns:
             InvocationResult with the response data and attached signal.
+
+        Raises:
+            CredentialProviderError: When ``credential_provider`` was used and
+                the callable itself raised. The original exception is
+                preserved via ``__cause__``; the wrapper's serialized surface
+                does NOT contain credential values.
+
+        Precedence (FR-002): ``auth_handler`` > ``credentials`` >
+        ``credential_provider`` > no_auth. The first non-empty source wins;
+        subsequent sources are not consulted. When both ``credentials`` and
+        ``credential_provider`` are supplied, the explicit dict wins, the
+        provider is NOT awaited, and a debug-level log notes the bypass
+        (FR-013).
         """
         if self._http_client is None:
             raise RuntimeError(
@@ -177,8 +341,32 @@ class AgentClient:
         handler = self._get_handler(protocol)
         effective_timeout = timeout or self._config.timeout_seconds
 
-        # Resolve auth handler from agent metadata or explicit override
-        resolved_auth = auth_handler or self._resolve_auth(agent, credentials)
+        # Resolve auth handler from agent metadata or explicit override.
+        # Precedence (FR-002): auth_handler explicit override is the highest
+        # priority; otherwise delegate to _resolve_auth, which handles the
+        # credentials > credential_provider > no_auth order.
+        if auth_handler is not None:
+            # FR-013 (extended): when auth_handler is the winning source AND
+            # the caller also supplied a credential_provider, log the bypass
+            # so developers can detect misconfiguration without behavior
+            # surprise. We log only metadata about the bypass — never the
+            # provider's identity or any other reference that could be
+            # captured in closures over credential material.
+            if credential_provider is not None:
+                logger.debug(
+                    "sdk.credential_provider_bypassed",
+                    agent_fqdn=agent.fqdn,
+                    winner="auth_handler",
+                    bypassed="credential_provider",
+                    reason="explicit auth_handler supplied alongside credential_provider",
+                )
+            resolved_auth: AuthHandler | None = auth_handler
+        else:
+            resolved_auth = await self._resolve_auth(
+                agent,
+                credentials,
+                credential_provider=credential_provider,
+            )
 
         logger.debug(
             "sdk.invoke",

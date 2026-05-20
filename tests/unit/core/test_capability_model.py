@@ -63,8 +63,9 @@ class TestAction:
 
     def test_name_validation_empty(self):
         import pytest
+        from pydantic import ValidationError
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             Action(name="")
 
     def test_serialization(self):

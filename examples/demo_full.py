@@ -54,9 +54,9 @@ def print_step(step: int, description: str):
 
 async def main(zone: str):
     """Run the full DNS-AID demo."""
-    from dns_aid import publish, discover
-    from dns_aid.core.validator import verify
+    from dns_aid import discover, publish
     from dns_aid.backends.route53 import Route53Backend
+    from dns_aid.core.validator import verify
 
     print_section("DNS-AID FULL DEMONSTRATION")
     print(f"""
@@ -89,7 +89,7 @@ Publishing agent with DNS-AID:
   Protocol:     {agent_protocol}
   Domain:       {zone}
   Endpoint:     {agent_endpoint}
-  Capabilities: {', '.join(agent_capabilities)}
+  Capabilities: {", ".join(agent_capabilities)}
 """)
 
     result = await publish(
@@ -108,7 +108,7 @@ Publishing agent with DNS-AID:
         print("✓ Agent published successfully!")
         print(f"\n  FQDN: {result.agent.fqdn}")
         print(f"  Endpoint URL: {result.agent.endpoint_url}")
-        print(f"\n  DNS records created:")
+        print("\n  DNS records created:")
         for record in result.records_created:
             print(f"    • {record}")
     else:
@@ -152,7 +152,9 @@ Checks:
     if verify_result.endpoint_latency_ms:
         print(f"    (Latency: {verify_result.endpoint_latency_ms:.0f}ms)")
 
-    print(f"\n  Security Score: {verify_result.security_score}/100 ({verify_result.security_rating})")
+    print(
+        f"\n  Security Score: {verify_result.security_score}/100 ({verify_result.security_rating})"
+    )
 
     # =========================================================================
     # STEP 3: DISCOVER AGENT VIA DNS
@@ -263,7 +265,7 @@ DNS records created during this demo:
     # =========================================================================
     print_section("DEMO COMPLETE")
 
-    print(f"""
+    print("""
 What we demonstrated:
 
   1. PUBLISH - Created DNS-AID records (SVCB + TXT) for an AI agent
@@ -303,6 +305,7 @@ if __name__ == "__main__":
 
         async def list_zones():
             from dns_aid.backends.route53 import Route53Backend
+
             backend = Route53Backend()
             zones = await backend.list_zones()
             for z in zones:

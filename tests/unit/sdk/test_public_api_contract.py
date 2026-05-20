@@ -138,6 +138,19 @@ def test_list_mcp_tools_signature_unchanged() -> None:
 
 
 def test_agent_client_invoke_signature_unchanged() -> None:
+    """Locks the public surface of ``AgentClient.invoke``.
+
+    Guards against accidental signature changes. When a feature deliberately
+    adds a new keyword-only parameter (a backward-compatible additive change),
+    update the ``expected`` list to include the new name. Removing or renaming
+    an existing parameter requires a major version bump.
+
+    History:
+        Feature 003 (credential_provider callback) added ``credential_provider``
+        between ``credentials`` and ``auth_handler``. The parameter is
+        keyword-only with default ``None``, so every existing call site
+        continues to function unchanged (FR-009 backward-compatibility lock).
+    """
     from dns_aid.sdk.client import AgentClient
 
     expected = [
@@ -147,6 +160,7 @@ def test_agent_client_invoke_signature_unchanged() -> None:
         "arguments",
         "timeout",
         "credentials",
+        "credential_provider",
         "auth_handler",
     ]
     assert _signature_param_names(AgentClient.invoke) == expected

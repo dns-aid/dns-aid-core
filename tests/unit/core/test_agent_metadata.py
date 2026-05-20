@@ -3,7 +3,7 @@
 
 """Tests for the Agent Metadata Contract (Phase 5.5)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from dns_aid.core.agent_metadata import (
     AgentIdentity,
@@ -60,7 +60,7 @@ class TestAgentIdentity:
         assert identity.successor is None
 
     def test_full(self):
-        sunset = datetime(2025, 12, 31, tzinfo=timezone.utc)
+        sunset = datetime(2025, 12, 31, tzinfo=UTC)
         identity = AgentIdentity(
             agent_id="abc-123",
             name="legacy-agent",

@@ -121,8 +121,8 @@ class TestFullIntegration:
         )
         lines = zone.splitlines()
         # Has header, SOA, NS, and 3 directives
-        assert any("$TTL 300" in l for l in lines)
-        assert any("SOA" in l for l in lines)
-        assert any("NS" in l for l in lines)
-        cname_lines = [l for l in lines if "CNAME" in l]
+        assert any("$TTL 300" in line for line in lines)
+        assert any("SOA" in line for line in lines)
+        assert any("NS" in line for line in lines)
+        cname_lines = [line for line in lines if "CNAME" in line]
         assert len(cname_lines) == 3

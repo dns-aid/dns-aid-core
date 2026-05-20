@@ -38,7 +38,7 @@ load_dotenv()
 
 async def main(zone: str):
     """Run the DNS-AID DDNS demo."""
-    from dns_aid import publish, discover
+    from dns_aid import discover, publish
     from dns_aid.backends.ddns import DDNSBackend
 
     print("=" * 60)
@@ -92,7 +92,7 @@ async def main(zone: str):
         print("✓ Agent published successfully!")
         print(f"\n   FQDN: {result.agent.fqdn}")
         print(f"   Endpoint: {result.agent.endpoint_url}")
-        print(f"\n   Records created:")
+        print("\n   Records created:")
         for record in result.records_created:
             print(f"   - {record}")
     else:
@@ -100,8 +100,8 @@ async def main(zone: str):
         return
 
     # Verify with dig
-    server = os.environ.get('DDNS_SERVER')
-    port = os.environ.get('DDNS_PORT', '53')
+    server = os.environ.get("DDNS_SERVER")
+    port = os.environ.get("DDNS_PORT", "53")
     port_flag = f" -p {port}" if port != "53" else ""
     print("\n[3] Verify with dig:")
     print(f"   dig @{server}{port_flag} {result.agent.fqdn} SVCB")

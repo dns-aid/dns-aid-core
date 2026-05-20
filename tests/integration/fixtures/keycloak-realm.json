@@ -1,0 +1,85 @@
+{
+  "realm": "dns-aid-test",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "accessTokenLifespan": 300,
+  "accessTokenLifespanForImplicitFlow": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "offlineSessionIdleTimeout": 2592000,
+  "users": [
+    {
+      "username": "dns-aid-test-user",
+      "enabled": true,
+      "email": "test-user@dns-aid.example.com",
+      "firstName": "DNS-AID",
+      "lastName": "TestUser",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "test-user-password-not-for-prod",
+          "temporary": false
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "dns-aid-test-agent",
+      "name": "DNS-AID Test Agent (Subject Token Issuer)",
+      "description": "OAuth client representing the calling user's session. Used to obtain the subject_token that is then exchanged into a delegation token via RFC 8693.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "agent-client-secret-not-for-prod",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:*"],
+      "webOrigins": ["+"],
+      "protocol": "openid-connect",
+      "attributes": {
+        "access.token.lifespan": "300"
+      }
+    },
+    {
+      "clientId": "dns-aid-test-actor",
+      "name": "DNS-AID Test Actor (Token-Exchange Initiator)",
+      "description": "OAuth client representing the calling agent. Initiates RFC 8693 token exchange to mint a delegation token with sub=user, act=agent.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "actor-client-secret-not-for-prod",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "redirectUris": [],
+      "webOrigins": [],
+      "protocol": "openid-connect",
+      "attributes": {
+        "access.token.lifespan": "300"
+      }
+    },
+    {
+      "clientId": "dns-aid-test-target",
+      "name": "DNS-AID Test Target (Audience for Token Exchange)",
+      "description": "OAuth client representing the downstream agent/service that the delegation token is scoped to. Used as the audience parameter in the RFC 8693 token-exchange call; Keycloak requires the audience to resolve to a registered client.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "target-client-secret-not-for-prod",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [],
+      "webOrigins": [],
+      "protocol": "openid-connect",
+      "attributes": {
+        "access.token.lifespan": "300"
+      }
+    }
+  ]
+}

@@ -80,10 +80,10 @@ async def main(zone: str):
     )
 
     if result.success:
-        print(f"✓ Agent published successfully!")
+        print("✓ Agent published successfully!")
         print(f"\n   FQDN: {result.agent.fqdn}")
         print(f"   Endpoint: {result.agent.endpoint_url}")
-        print(f"\n   Records created:")
+        print("\n   Records created:")
         for record in result.records_created:
             print(f"   - {record}")
     else:
@@ -126,6 +126,7 @@ if __name__ == "__main__":
 
         async def list_zones():
             from dns_aid.backends.route53 import Route53Backend
+
             backend = Route53Backend()
             zones = await backend.list_zones()
             for z in zones:

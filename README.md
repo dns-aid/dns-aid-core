@@ -169,6 +169,36 @@ async with AgentClient(config=config) as client:
     ranked = client.rank(fqdns)  # Rank by local telemetry signals
 ```
 
+### SDK: Per-Invoke Credential Provider Callback (v0.21.0+)
+
+For short-lived credentials (RFC 8693 token exchange, AWS STS assume-role,
+HashiCorp Vault dynamic secrets, HSM/KMS-backed signing keys), pass an opt-in
+async `credential_provider` callback to `invoke()`. The SDK awaits the callback
+lazily at invoke time with the target `AgentRecord` and uses the returned dict
+for auth resolution. Strictly additive — every existing call site continues to
+work without source change.
+
+```python
+async def token_exchange_provider(agent: AgentRecord) -> dict[str, str]:
+    # Mint a fresh delegation token per call — e.g., RFC 8693 token exchange
+    # against Keycloak / Okta / Auth0 / Microsoft Entra ID.
+    return {"token": await my_idp.exchange_token(subject_token, agent.fqdn)}
+
+async with AgentClient(config=config) as client:
+    resp = await client.invoke(
+        agent,
+        method="tools/list",
+        credential_provider=token_exchange_provider,
+    )
+```
+
+Precedence: `auth_handler > credentials > credential_provider > no_auth`.
+See [docs/security-credentials.md](docs/security-credentials.md) for the
+per-handler security matrix, audit-trail flow, and the
+[`examples/integration_oauth2_token_exchange.py`](examples/integration_oauth2_token_exchange.py)
+and [`examples/integration_aws_sts_assume_role.py`](examples/integration_aws_sts_assume_role.py)
+canonical patterns.
+
 ## CLI Usage
 
 ```bash
