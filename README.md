@@ -26,13 +26,11 @@ DNS-AID enables AI agents to discover each other via DNS, using the internet's e
 - [Demo Guide](docs/demo-guide.md) — end-to-end walkthrough for talks and presentations
 - [Privacy Policy](PRIVACY.md) | [Security Policy](SECURITY.md) | [Trademarks](TRADEMARKS.md)
 
-## Companion services
+## Ecosystem and Integrations
 
-The DNS-AID protocol is implementation-agnostic — it works against any DNS provider and any directory implementation. The library in this repository is sufficient on its own; the items below are independent, community-operated services that demonstrate what can be built on top of DNS-AID.
+DNS-AID is a **substrate**. The library in this repository is sufficient on its own — it publishes and resolves agent records against any DNS provider, with no dependency on a particular directory, indexer, or telemetry backend.
 
-🌐 **Hosted Agent Directory** (operated by Infoblox): [directory.example.com](https://directory.example.com) — indexes DNS-AID agents discovered across public DNS, with full-text search, capability filtering, trust scoring, lifecycle/sunset tracking, and copy-paste configs for Claude Desktop / Cursor / the SDK. API docs at [api.example.com/api/v1/docs](https://api.example.com/api/v1/docs).
-
-You are encouraged to run your own directory or telemetry backend — the indexer is a thin layer over the same DNS records this library publishes and discovers, and the SDK telemetry sink is configurable via `DNS_AID_SDK_HTTP_PUSH_URL` (off by default).
+When a search, indexing, or telemetry layer is useful, the SDK can point at any HTTP endpoint that implements the documented interfaces. Operators are encouraged to run their own — the indexer is a thin layer over the same DNS records this library publishes and discovers, and the SDK telemetry sink is configurable via `DNS_AID_SDK_HTTP_PUSH_URL` (off by default). Independent directory implementations exist across the ecosystem; DNS-AID is designed to remain interoperable with any of them rather than canonicalize a single one.
 
 ## Quick Start
 
@@ -67,7 +65,7 @@ agents = await dns_aid.discover("example.com")
 for agent in agents:
     print(f"{agent.name}: {agent.endpoint_url}")
 
-# Discover via HTTP index (ANS-compatible, richer metadata)
+# Discover via HTTP index (richer metadata; format aligns with the ANS schema)
 agents = await dns_aid.discover("example.com", use_http_index=True)
 
 # Filtered discovery — pure-Python predicates over the in-memory result (v0.19.0+)
@@ -85,35 +83,28 @@ result = await dns_aid.verify("_my-agent._mcp._agents.example.com")
 print(f"Security Score: {result.security_score}/100")
 ```
 
-### Path B: cross-domain search via opt-in directory (v0.19.0+)
+### Path B: cross-domain search via an external directory (v0.19.0+)
 
-When you don't yet know which domain hosts the agent you want, query a configured
-directory backend for ranked candidates with pre-computed trust signals:
+When the caller does not yet know which domain hosts the agent it wants, the SDK can query any directory backend that implements the search endpoint. The directory layer is **opt-in convenience**; the DNS substrate remains the authoritative trust gate.
 
 ```python
 from dns_aid.sdk import AgentClient, SDKConfig
 
-# directory_api_url can also be set via DNS_AID_SDK_DIRECTORY_API_URL env var.
-config = SDKConfig(directory_api_url="https://api.example.com")
+# Point at whichever directory the caller has chosen to trust.
+# Can also be set via DNS_AID_SDK_DIRECTORY_API_URL.
+config = SDKConfig(directory_api_url="https://your-directory.example.com")
 
 async with AgentClient(config=config) as client:
-    response = await client.search(
-        q="payment processing",
-        protocol="mcp",
-        capabilities=["payment-processing"],
-        min_security_score=70,
-        verified_only=True,
-    )
+    response = await client.search(q="payment processing", protocol="mcp")
     for r in response.results:
-        print(f"{r.score:.2f}  {r.agent.fqdn}  T{r.trust.trust_tier}")
+        print(r.agent.fqdn)
 ```
 
-**Zero-trust composition**: Path B → Path A re-verify before invoking. Directory is
-opt-in convenience; DNS substrate is the authoritative trust gate.
+After the directory returns candidates, re-resolve each one through Path A and validate signatures / DNSSEC before invoking. This is the substrate-as-authority pattern: the directory provides ranking and discovery convenience, but never sits in the trust path between the caller and the agent.
 
 ```python
 async with AgentClient(config=config) as client:
-    response = await client.search(q="fraud detection", min_security_score=70)
+    response = await client.search(q="fraud detection")
     for candidate in response.results:
         verified = await dns_aid.discover(
             candidate.agent.domain,
@@ -122,6 +113,8 @@ async with AgentClient(config=config) as client:
         )
         # Invoke only when DNS substrate confirms the directory's claim.
 ```
+
+The SDK exposes additional filter parameters (`capabilities`, `min_security_score`, `verified_only`, etc.) for directories that compute and return those signals; see [API Reference](docs/api-reference.md) for the full surface. The semantics of those values are defined by whichever directory the caller has chosen — DNS-AID does not centralize them.
 
 ### SDK: Invoke Agents & Capture Telemetry (v0.6.0+)
 
@@ -137,37 +130,31 @@ print(f"Latency: {resp.signal.invocation_latency_ms}ms")
 print(f"Status:  {resp.signal.status}")
 print(f"Tools:   {resp.data}")
 
-# Rank multiple agents by performance
+# Rank multiple agents by your own local telemetry signals
 ranked = await dns_aid.rank(result.agents, method="tools/list")
 for r in ranked:
     print(f"{r.agent_fqdn}: score={r.composite_score:.1f}")
-
-# Fetch community-wide rankings from telemetry API (v0.6.0+)
-from dns_aid.sdk import AgentClient, SDKConfig
-
-config = SDKConfig(telemetry_api_url="https://api.example.com")
-async with AgentClient(config) as client:
-    rankings = await client.fetch_rankings(limit=10)
-    for r in rankings:
-        print(f"{r['agent_fqdn']}: {r['composite_score']}")
 ```
 
-For advanced usage (connection reuse, OTEL export):
+For advanced usage (connection reuse, OpenTelemetry export, pluggable telemetry sink):
 
 ```python
 from dns_aid.sdk import AgentClient, SDKConfig
 
 config = SDKConfig(
-    otel_enabled=True,         # Export to OpenTelemetry
+    otel_enabled=True,         # Export to any OpenTelemetry collector
     caller_id="my-app",
-    http_push_url="https://api.example.com/v1/telemetry/signals",
+    # Optional: push telemetry to any HTTP endpoint the caller controls
+    # http_push_url="https://your-telemetry.example.com/v1/signals",
 )
 
 async with AgentClient(config=config) as client:
     resp = await client.invoke(agent, method="tools/call", arguments={...})
     fqdns = [a.fqdn for a in agents]
-    ranked = client.rank(fqdns)  # Rank by local telemetry signals
+    ranked = client.rank(fqdns)  # Rank by the caller's own observed telemetry
 ```
+
+If an external aggregator publishes community-wide rankings over HTTP, the SDK can fetch them via `client.fetch_rankings(...)`; the endpoint is configured by the caller, not by the library.
 
 ## CLI Usage
 
@@ -216,11 +203,11 @@ dns-aid discover example.com \
     --auth-type oauth2 --realm prod \
     --require-signed --require-signature-algorithm ES256
 
-# Cross-domain search via configured directory backend (v0.19.0+)
-export DNS_AID_SDK_DIRECTORY_API_URL=https://api.example.com
-dns-aid search "payment processing" --protocol mcp --min-security-score 70
+# Cross-domain search via a directory the caller has chosen (v0.19.0+)
+export DNS_AID_SDK_DIRECTORY_API_URL=https://your-directory.example.com
+dns-aid search "payment processing" --protocol mcp
 
-# Discover via HTTP index (ANS-compatible, richer metadata)
+# Discover via HTTP index (richer metadata; format aligns with the ANS schema)
 dns-aid discover example.com --use-http-index
 
 # Output as JSON
@@ -248,12 +235,14 @@ dns-aid index sync example.com
 # Publish without updating the index (for internal agents)
 dns-aid publish --name internal-bot --domain example.com --protocol mcp --no-update-index
 
-# Domain Submission to Agent Directory (v0.4.0+)
-# Submit your domain for crawling and indexing
-dns-aid submit example.com
+# Domain Submission to a Directory (v0.4.0+)
+# Submit your domain to a directory of your choice for indexing.
+# The --to flag (or DNS_AID_SDK_DIRECTORY_API_URL) selects which directory.
+dns-aid submit example.com --to https://your-directory.example.com
 
 # Submit with company metadata
 dns-aid submit example.com \
+    --to https://your-directory.example.com \
     --company-name "Example Corp" \
     --company-website "https://example.com" \
     --company-description "We build AI agents"
@@ -313,9 +302,9 @@ if result.verified:
 
 See [Domain Control Validation](docs/api-reference.md#domain-control-validation-dcv) in the API reference for full details.
 
-### HTTP Index Discovery (ANS-Compatible)
+### HTTP Index Discovery
 
-DNS-AID also supports HTTP-based agent discovery for compatibility with ANS-style systems. This provides richer metadata (descriptions, model cards, capabilities, costs) while still validating endpoints via DNS.
+DNS-AID also supports HTTP-based agent discovery, with an index format whose schema aligns with ANS-style directories. This provides richer metadata (descriptions, model cards, capabilities, costs) while still validating endpoints via DNS.
 
 **Endpoint patterns tried (in order):**
 1. `https://index.aiagents.{domain}/index-wellknown` (demo-friendly, no underscores)
@@ -379,7 +368,7 @@ dns-aid-mcp --transport http --port 8000
 | Tool | Description |
 |------|-------------|
 | `publish_agent_to_dns` | Publish an AI agent to DNS (auto-updates index) |
-| `discover_agents_via_dns` | Discover AI agents at a domain (supports `use_http_index` for ANS-compatible discovery) |
+| `discover_agents_via_dns` | Discover AI agents at a domain (supports `use_http_index` for HTTP-index discovery) |
 | `list_agent_tools` | List available tools on a discovered MCP agent |
 | `call_agent_tool` | Call a tool on a discovered MCP agent (proxy requests) |
 | `verify_agent_dns` | Verify DNS-AID records and security |
@@ -616,36 +605,9 @@ GET https://mcp.example.com/.well-known/agent.json
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Server-Side: Agent Directory Pipeline
+### Directory and Indexing Layer (External)
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                    AGENT DIRECTORY PIPELINE                              │
-│                                                                          │
-│  ┌──────────┐   ┌───────────────┐   ┌──────────────┐   ┌────────────┐  │
-│  │ CRAWLING │──▶│   CURATION    │──▶│   INDEXING   │──▶│  SERVING   │  │
-│  │          │   │               │   │              │   │            │  │
-│  │ DNS SVCB │   │ trust_score   │   │ TSVECTOR     │   │ REST API   │  │
-│  │ HTTP Idx │   │ security_score│   │ full-text    │   │ Search     │  │
-│  │ .well-   │   │ telemetry     │   │ search       │   │ Rankings   │  │
-│  │ known/   │   │ scoring       │   │              │   │            │  │
-│  │ agent.json   │               │   │              │   │            │  │
-│  └──────────┘   └───────────────┘   └──────────────┘   └────────────┘  │
-│       │                                                                  │
-│       ▼                                                                  │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │             METADATA ENRICHMENT (Phase 5.5)                      │   │
-│  │                                                                  │   │
-│  │  GET /.well-known/agent.json                                     │   │
-│  │    ├─ "aid_version" present? → Parse as DNS-AID AgentMetadata    │   │
-│  │    └─ No? → Try A2A Agent Card → Transform to metadata fields    │   │
-│  │                                                                  │   │
-│  │  Extracts: transport, auth, capabilities (intent/semantics),     │   │
-│  │            lifecycle (deprecated, sunset_date, successor)        │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+Directory and indexing services that build on top of DNS-AID — crawlers that walk public DNS for agent records, services that index `.well-known/agent.json` metadata, search frontends — are **out of scope for this repository**. They build on the substrate but are operated independently. Implementations are free to define their own scoring, ranking, and curation policy; DNS-AID does not centralize those choices.
 
 ## Choosing the Right Interface
 
@@ -974,81 +936,22 @@ Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to it
 - **Simple API**: Well-documented REST API v4
 - **Full DNS-AID compliance**: Supports ServiceMode SVCB with all parameters
 
-## Why DNS-AID?
+## How DNS-AID Relates to Other Efforts
 
-### vs Competing Proposals
+Agent discovery is an active design space, with multiple proposals working at different layers of the stack. DNS-AID is intentionally narrow: it standardizes a DNS-layer substrate that publishers and resolvers can rely on, leaving directory, ranking, payments, and namespace policy to other efforts. The summary below is meant to help operators understand where DNS-AID fits — not to position it against other work.
 
-| Approach | Problem | DNS-AID Advantage |
-|----------|---------|-------------------|
-| **ANS (GoDaddy)** | Centralized registry, KYC required, single gatekeeper | Federated — you control your domain, publish instantly |
-| **Google (A2A + UCP)** | Discovery via Gemini/Search, payments via UCP | Neutral discovery — no platform lock-in or transaction fees |
-| **.agent gTLD** | Requires ICANN approval, ongoing domain fees | Works NOW with domains you already own |
-| **AgentDNS (China Telecom)** | Requires 6G infrastructure, carrier control | Works NOW on existing DNS infrastructure |
-| **NANDA (MIT)** | New P2P overlay network, new ops paradigm | Uses infrastructure your DNS team already operates |
-| **Web3 (ERC-8004)** | Gas fees, crypto wallets, enterprise-hostile | Free DNS queries, no blockchain complexity |
-| **ai.txt / llms.txt** | No integrity verification, free-form JSON | DNSSEC cryptographic verification, structured SVCB |
+**Adjacent efforts**
 
-### Feature Comparison
+- **Agent Name Service (ANS)** — A directory-oriented approach defining a JSON metadata schema and registry interfaces. DNS-AID's HTTP Index format is intentionally aligned with the ANS schema where it overlaps, so an ANS-style directory can be served from the same data a DNS-AID publisher produces.
+- **A2A** — A communication protocol for agent-to-agent messaging. DNS-AID is complementary: A2A defines how two agents talk, DNS-AID defines how one agent finds the other's endpoint to talk to.
+- **AgentDNS** — A separate proposal that builds an agent-naming layer on top of DNS primitives. The two proposals overlap in spirit and differ in mechanism; DNS-AID's choice is to stay inside RFC 9460 SVCB so existing authoritative servers and resolvers work unchanged.
+- **NANDA** — A peer-to-peer overlay approach. Useful in deployments where a DHT-style substrate is preferred; DNS-AID instead targets the DNS infrastructure organizations already operate.
+- **ai.txt / llms.txt** — Free-form text files at well-known URLs. Useful for human-readable discovery; DNS-AID adds structured SVCB records and optional DNSSEC-validated trust.
+- **`.agent` gTLD** — An ICANN new-gTLD effort by the [Agent Community](https://agentcommunity.org/) to create a dedicated namespace (`mycompany.agent`). Complementary to DNS-AID — when `.agent` domains become available, DNS-AID records will work on them too, the same way they work on any other zone.
 
-| Feature | DNS-AID | Central Registry | ai.txt |
-|---------|---------|------------------|--------|
-| **Decentralized** | ✅ | ❌ | ✅ |
-| **Secure (DNSSEC)** | ✅ | Varies | ❌ |
-| **Sovereign** | ✅ | ❌ | ✅ |
-| **Standards-based** | ✅ (IETF) | ❌ | ❌ |
-| **Works with existing infra** | ✅ | ❌ | ✅ |
+**Where DNS-AID is scoped**
 
-### The Sovereignty Question
-
-> **Who controls agent discovery?**
-> - ANS: GoDaddy (US company as gatekeeper)
-> - AgentDNS: China Telecom (state-owned carrier)
-> - Web3: Ethereum Foundation
-> - **DNS-AID: You control your own domain**
->
-> DNS-AID preserves sovereignty. Organizations and nations maintain control over their own agent namespaces with no central authority that can block, censor, or surveil agent discovery.
-
-### Google's Agent Ecosystem
-
-Google is building a full-stack agent platform: **A2A** (communication), **UCP** (payments), and **Gemini/Search** (discovery). While A2A is an open protocol, discovery through Google surfaces means:
-- Google controls visibility (pay-to-rank)
-- Transaction fees via [UCP](https://developers.google.com/merchant/ucp)
-- Platform dependency for reach
-
-**DNS-AID complements A2A** by providing neutral, decentralized discovery — find agents anywhere, not just through Google.
-
-### Understanding the .agent Domain Approach
-
-The [Agent Community](https://agentcommunity.org/) is pursuing a `.agent` top-level domain through ICANN's [new gTLD program](https://newgtlds.icann.org/). Here's how the two approaches compare:
-
-**How .agent Domains Would Work:**
-1. Apply to ICANN for `.agent` gTLD (~$185,000 application fee)
-2. Wait 9-20 months for ICANN approval process
-3. Build registry infrastructure (Open Agent Registry, Inc.)
-4. Sell `.agent` domains through accredited registrars
-5. Users pay annual registration fees (~$15-50/year per domain)
-
-**How DNS-AID Works:**
-1. Use your existing domain (you already own `yourcompany.com`)
-2. Add DNS-AID records to your zone (`_myagent._mcp._agents.yourcompany.com`)
-3. Start discovering and being discovered immediately
-
-| Factor | .agent gTLD | DNS-AID |
-|--------|-------------|---------|
-| **Cost to publish** | ~$15-50/year domain fee | Free (use existing domain) |
-| **Time to start** | Months (gTLD launch + registration) | Minutes |
-| **Who controls discovery** | Registry operator | You (your domain) |
-| **Works today** | ❌ Pending ICANN approval | ✅ Works now |
-| **Requires new infrastructure** | ✅ Registry, registrars | ❌ Uses existing DNS |
-| **Memorable names** | ✅ `myagent.agent` | `_myagent._mcp._agents.example.com` |
-
-**The Friendly Take:**
-
-Both approaches share the goal of making AI agents discoverable. The `.agent` gTLD creates a dedicated namespace that's easy to remember (`mycompany.agent`), while DNS-AID leverages existing infrastructure so you can start publishing agents today.
-
-DNS-AID doesn't require waiting for ICANN approval or paying for new domains—it works with the DNS infrastructure your organization already operates. If you own `example.com`, you can publish agents to `_myagent._mcp._agents.example.com` right now.
-
-*Fun fact: When `.agent` domains become available, DNS-AID records will work on them too! The approaches are complementary.*
+DNS-AID standardizes the publish/resolve substrate: SVCB record layout, naming convention, capability and policy parameters, and a DNSSEC-anchored verification path. It does not pick a winning directory, ranking algorithm, payment system, or trust authority. Operators are free to combine DNS-AID with any of the efforts above, or to run it standalone.
 
 ## Examples
 
