@@ -64,12 +64,16 @@ class Route53Backend(DNSBackend):
 
         Args:
             zone_id: Optional hosted zone ID (e.g., "ZEXAMPLEZONEID").
-                     If not provided, will be looked up by domain name.
+                     If omitted, falls back to the ``ROUTE53_ZONE_ID``
+                     environment variable; if neither is set, the zone is
+                     looked up by domain name via ``ListHostedZonesByName``
+                     (which requires the ``route53:ListHostedZones`` IAM
+                     permission).
             region: AWS region (defaults to us-east-1 for Route 53)
             aws_access_key_id: AWS access key (defaults to env/credentials)
             aws_secret_access_key: AWS secret key (defaults to env/credentials)
         """
-        self._zone_id = zone_id
+        self._zone_id = zone_id or os.environ.get("ROUTE53_ZONE_ID")
         self._region = region or os.environ.get("AWS_REGION", "us-east-1")
         self._aws_access_key_id = aws_access_key_id
         self._aws_secret_access_key = aws_secret_access_key

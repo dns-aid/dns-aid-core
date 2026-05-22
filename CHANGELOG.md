@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-05-22
+
+### Fixed
+
+- **Route 53 backend ignored `ROUTE53_ZONE_ID` env var**: `Route53Backend.__init__`
+  read `AWS_REGION` from the environment but silently dropped `ROUTE53_ZONE_ID`,
+  even though `dns_aid/cli/backends.py` advertised the variable as "auto-detected
+  if omitted." The CLI (`dns-aid publish`) and the MCP server both construct the
+  backend via `create_backend("route53")`, which calls `Route53Backend()` with no
+  keyword arguments — so callers who set only the env var always fell through to
+  a `ListHostedZones` paginated API call, requiring the broader
+  `route53:ListHostedZones` IAM permission and adding an avoidable round-trip to
+  every publish.
+
+  Route 53 was the only backend with this gap — every other backend
+  (`Cloudflare`, `NS1`, `Cloud DNS`, `BloxOne`, `NIOS`, `DDNS`) already used the
+  `kwarg or os.environ.get(VAR)` pattern. The fix brings Route 53 into line.
+
+  **Fix**: `self._zone_id = zone_id or os.environ.get("ROUTE53_ZONE_ID")` in
+  `src/dns_aid/backends/route53.py`. Explicit `zone_id=` kwarg continues to take
+  precedence; env var is consulted only when the kwarg is unset. No API change,
+  no behavior change for callers who already passed `zone_id` explicitly.
+
+  **Operational benefit**: callers who set `ROUTE53_ZONE_ID` can now scope their
+  IAM policy to `route53:ChangeResourceRecordSets` on the specific zone and skip
+  the `route53:ListHostedZones` grant. The fallback path (no kwarg, no env var)
+  still works unchanged — `_get_zone_id()` discovers the zone via API when
+  `self._zone_id` is unset.
+
+### Tests
+
+- New `tests/unit/test_route53_backend.py` cases pin the contract:
+  `test_init_no_zone_id_no_env`, `test_init_zone_id_from_env`,
+  `test_init_kwarg_wins_over_env` (precedence), plus a new test class
+  `TestRoute53GetZoneIdEnvShortCircuit::test_get_zone_id_short_circuits_on_env_var`
+  that asserts no boto3 client is constructed when the env var alone supplies
+  the zone ID.
+- `TestRoute53FactoryWiring::test_factory_with_env_var` /
+  `test_factory_without_env_var` cover the `create_backend("route53")` factory
+  path the CLI and MCP server both use.
+- `TestRoute53AdvertisedEnvContract::test_route53_zone_id_in_optional_env_registry`
+  pins the docs/code contract — if a future change drops `ROUTE53_ZONE_ID` from
+  `BACKEND_REGISTRY` or stops honoring it, the test fails.
+- Live integration verified against AWS Route 53: CLI (`dns-aid publish`), MCP
+  server (`publish_agent_to_dns` tool), and direct SDK use all honor the env
+  var; control case without the env var still falls through to API discovery.
+
 ## [0.21.1] - 2026-05-20
 
 ### Fixed

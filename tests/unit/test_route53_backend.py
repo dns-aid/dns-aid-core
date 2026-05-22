@@ -45,6 +45,35 @@ class TestRoute53BackendInit:
             backend = Route53Backend()
             assert backend._region == "eu-west-1"
 
+    # -----------------------------------------------------------------
+    # ROUTE53_ZONE_ID env var (regression — bug fix v0.21.2)
+    # -----------------------------------------------------------------
+    # Prior to v0.21.2 the constructor read AWS_REGION but ignored
+    # ROUTE53_ZONE_ID even though `cli/backends.py` advertised it as
+    # "auto-detected if omitted". The CLI and MCP server both flow
+    # through `create_backend("route53")` which calls `cls()` with no
+    # kwargs, so a caller with only ROUTE53_ZONE_ID set always fell
+    # through to ListHostedZones — requiring broader IAM than necessary
+    # and adding an avoidable API call to every publish. Pin the fix.
+
+    def test_init_no_zone_id_no_env(self, monkeypatch):
+        """Bare construction with no env var leaves zone_id unset."""
+        monkeypatch.delenv("ROUTE53_ZONE_ID", raising=False)
+        backend = Route53Backend()
+        assert backend._zone_id is None
+
+    def test_init_zone_id_from_env(self, monkeypatch):
+        """ROUTE53_ZONE_ID env var is honoured when no kwarg is supplied."""
+        monkeypatch.setenv("ROUTE53_ZONE_ID", "ZFROMENVVAR")
+        backend = Route53Backend()
+        assert backend._zone_id == "ZFROMENVVAR"
+
+    def test_init_kwarg_wins_over_env(self, monkeypatch):
+        """Explicit zone_id kwarg takes precedence over ROUTE53_ZONE_ID env."""
+        monkeypatch.setenv("ROUTE53_ZONE_ID", "ZFROMENVVAR")
+        backend = Route53Backend(zone_id="ZEXPLICITKWARG")
+        assert backend._zone_id == "ZEXPLICITKWARG"
+
 
 class TestRoute53BackendProperties:
     """Tests for Route53Backend properties."""
@@ -681,3 +710,70 @@ class TestRoute53PublishAgentParamDemotion:
         assert "dnsaid_key65402" in txt_strings  # bap
         assert "dnsaid_key65403" in txt_strings  # policy
         assert "dnsaid_key65404" in txt_strings  # realm
+
+
+# ---------------------------------------------------------------------------
+# ROUTE53_ZONE_ID end-to-end wiring (regression — bug fix v0.21.2)
+# ---------------------------------------------------------------------------
+
+
+class TestRoute53GetZoneIdEnvShortCircuit:
+    """``_get_zone_id`` returns the env-supplied zone ID without an AWS call.
+
+    Prior to the bug fix, the constructor ignored ROUTE53_ZONE_ID so the
+    CLI / MCP construction shape ``Route53Backend()`` always fell through
+    to ListHostedZones. Pin the end-to-end behaviour: env var alone is
+    sufficient to skip the API call entirely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_zone_id_short_circuits_on_env_var(self, monkeypatch):
+        monkeypatch.setenv("ROUTE53_ZONE_ID", "ZSHORTCIRCUITENV")
+        backend = Route53Backend()  # no kwargs — CLI / MCP construction shape
+
+        # If _get_client were invoked, this would raise — proving no API
+        # round-trip happened. That's the operational improvement.
+        backend._get_client = MagicMock(
+            side_effect=AssertionError("boto3 client must not be created")
+        )
+
+        result = await backend._get_zone_id("example.com")
+        assert result == "ZSHORTCIRCUITENV"
+        backend._get_client.assert_not_called()
+
+
+class TestRoute53FactoryWiring:
+    """``create_backend("route53")`` honours ROUTE53_ZONE_ID.
+
+    This is the path the CLI (``cli/main.py``) and the MCP server
+    (``mcp/server.py``) both take: a factory call with no kwargs. Pin
+    that the factory shape delivers the env var through to the backend.
+    """
+
+    def test_factory_with_env_var(self, monkeypatch):
+        from dns_aid.backends import create_backend
+
+        monkeypatch.setenv("ROUTE53_ZONE_ID", "ZFACTORYENV")
+        backend = create_backend("route53")
+        assert backend._zone_id == "ZFACTORYENV"  # type: ignore[attr-defined]
+
+    def test_factory_without_env_var(self, monkeypatch):
+        from dns_aid.backends import create_backend
+
+        monkeypatch.delenv("ROUTE53_ZONE_ID", raising=False)
+        backend = create_backend("route53")
+        assert backend._zone_id is None  # type: ignore[attr-defined]
+
+
+class TestRoute53AdvertisedEnvContract:
+    """The env var advertised in ``cli/backends.py`` is honoured by the code.
+
+    The original bug was a docs/code drift: the registry entry advertised
+    ROUTE53_ZONE_ID but no code read it. Pin the contract so future
+    contributors can't reintroduce the drift silently.
+    """
+
+    def test_route53_zone_id_in_optional_env_registry(self):
+        from dns_aid.cli.backends import BACKEND_REGISTRY
+
+        assert "ROUTE53_ZONE_ID" in BACKEND_REGISTRY["route53"].optional_env
