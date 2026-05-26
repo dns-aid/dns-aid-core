@@ -7,6 +7,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-05-26
+
+### Added — Production-grade OpenTelemetry integration (spec 005)
+
+Closes a 3.5-month-old docs/code drift. The `TelemetryManager` exporter
+class has lived in the SDK since v0.5.0 (Feb 2026) but was never connected
+to `AgentClient.invoke()` — setting `otel_enabled=True` produced no spans.
+This release wires everything end-to-end with production-grade hardening.
+
+**New on the wire**:
+
+- **Spans on every invoke**: `dns-aid.invoke {agent_fqdn}` (SpanKind=CLIENT)
+  with attributes for agent identity, method, status, latency, cost, DNSSEC.
+- **W3C Trace Context propagation**: outbound MCP/A2A/HTTPS requests carry
+  `traceparent` (and `tracestate`/`baggage` when applicable) when an OTEL
+  span is active. Downstream OTEL-instrumented agents see linked traces.
+- **Metrics**: histogram + 3 counters on every invoke regardless of span
+  sampling — `dns_aid.invocation.{duration,count,error_count,cost}` with
+  default labels `{protocol, status}`.
+
+**New SDK surface**:
+
+- `SDKConfig.otel_sampler` — sampler name (always_on, always_off,
+  traceidratio, parentbased_*). `None` defers to OTEL SDK default.
+- `SDKConfig.otel_environment` — populates `deployment.environment`
+  resource attribute.
+- `SDKConfig.otel_metric_labels` — opt-in high-cardinality labels
+  (`fqdn`, `caller`, `tool`).
+- New env vars: `DNS_AID_SDK_OTEL_SAMPLER`, `DNS_AID_SDK_OTEL_ENVIRONMENT`,
+  `DNS_AID_SDK_OTEL_METRIC_LABELS`.
+- Standard OTEL env vars honored: `OTEL_TRACES_SAMPLER`,
+  `OTEL_TRACES_SAMPLER_ARG`, `OTEL_PROPAGATORS`, `OTEL_RESOURCE_ATTRIBUTES`,
+  `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
+  `OTEL_EXPORTER_OTLP_CERTIFICATE`.
+
+**New optional dep**: `opentelemetry-exporter-otlp-proto-grpc>=1.20.0,<2.0.0`
+in the `otel` extra — required for `otel_export_format="otlp"`. Without
+this package the SDK silently fell back to console (a footgun fixed here).
+
+**Structured logging trace correlation**: every structlog event emitted
+while an OTEL span is active automatically carries `trace_id` and `span_id`
+matching the span. Always-on processor in `dns_aid.utils.logging` — works
+even when the integrator's own application provides OTEL (the SDK does not
+need to be the one to start the span). Cost when no span is active: ~100 ns.
+
+### Hardening — production release-blockers
+
+- **Credential sanitization in span attributes** (FR-019, FR-020):
+  `dns_aid.agent.endpoint` and span status descriptions are sanitized
+  through `dns_aid.utils.url_safety.redact_url_for_log()` to strip
+  `user:pass@` userinfo from URLs before they land on spans. Without
+  this, callers using `AgentRecord` with credentialed endpoint URLs
+  would have leaked credentials to every span exported to a (typically
+  multi-tenant) observability backend.
+- **asyncio.CancelledError propagates unchanged** (FR-022): all OTEL
+  defensive try/except blocks use `except Exception:` (not `except
+  BaseException:`); the span context manager's `__exit__` returns None
+  so the protocol does not suppress exceptions. Cancellation semantics
+  preserved exactly.
+- **Flush on AgentClient close** (FR-023, FR-024): `AgentClient.__aexit__`
+  calls `TelemetryManager.force_flush(5000ms)` before closing httpx,
+  so short-lived processes (CI jobs, Lambda invocations, scripts) do
+  not lose their last batch of spans.
+- **Rate-limited WARN logs** (FR-025): every OTEL warning event
+  (`sdk.otel_error`, `sdk.otel_propagation_failed`, `sdk.otel_init_failed`,
+  `sdk.otel_unavailable`, `sdk.otel_singleton_conflict`,
+  `sdk.otel_flush_failed`) is rate-limited to at most one per
+  (event_name, instance_id) per 60-second window, with a summary log
+  emitted when the window expires. A chronically-down collector cannot
+  fill the log stream.
+- **Provider-join detection** (FR-008): SDK does NOT call
+  `trace.set_tracer_provider()` or `metrics.set_meter_provider()` when
+  the integrator has already wired their own provider. Joins via
+  `trace.get_tracer("dns-aid-sdk")` against the existing provider
+  instead. Same for meter.
+- **Service version fix** (FR-009): the `service.version` resource
+  attribute now reads from `dns_aid.__version__` dynamically. Replaces
+  the bug where `"0.4.9"` was hardcoded since v0.5.0.
+- **OTEL SDK upper version bound** (FR-027): pinned
+  `opentelemetry-api>=1.20.0,<2.0.0` and `opentelemetry-sdk>=1.20.0,<2.0.0`.
+  Major version bumps now require a deliberate compat audit.
+- **`BatchSpanProcessor`** replaces `SimpleSpanProcessor` for async
+  export — production exporters no longer block the invoke path.
+
+### Backward compatibility
+
+- `otel_enabled=False` (the default) produces byte-identical SDK behavior
+  to v0.21.3 — no new HTTP headers on outbound requests, no new structlog
+  event keys, no new threads, no `opentelemetry` import.
+- Existing 17 OTEL test cases in `tests/unit/sdk/test_otel.py` continue
+  to pass unchanged (backward-compat shim for the `_build_span_attributes`
+  method).
+- `dns_aid.sdk.client` imports successfully with `opentelemetry`
+  uninstalled when `otel_enabled=False`.
+
+### Tests
+
+- 47 new tests across:
+  - `tests/unit/sdk/test_otel_wiring.py` — span emission, sanitization,
+    cancellation, flush, rate-limiting (16 tests including 4
+    release-blocker hardening verifications)
+  - `tests/unit/sdk/test_otel_propagation.py` — W3C trace context
+    injection in HTTPS, A2A, and the propagation function in isolation
+    (6 tests)
+  - `tests/unit/sdk/test_otel_span_lifecycle.py` — span active during
+    handler, duration matches latency, lifecycle on exception (3 tests)
+  - `tests/unit/sdk/test_otel_provider_safety.py` — sampler validation,
+    sampler resolution precedence, provider-join (12 tests)
+  - `tests/unit/sdk/test_otel_backward_compat.py` — no OTEL headers when
+    disabled, invocation result shape unchanged (3 tests)
+  - `tests/unit/sdk/test_otel_no_opentelemetry.py` — SDK works with
+    opentelemetry uninstalled, WARN emitted when enabled-but-unavailable
+    (3 tests)
+  - `tests/unit/utils/test_logging_trace_correlation.py` — structlog
+    correlation processor (4 tests)
+- Autouse fixture in `tests/unit/sdk/conftest.py` and
+  `tests/unit/utils/conftest.py` resets OTEL singleton + global state
+  before and after every test — prevents flakiness from singleton state
+  leaking across tests in random order.
+
+### Documentation
+
+- New `docs/integrations/opentelemetry.md` — end-to-end guide including
+  authenticating to managed collectors (Honeycomb, Grafana Cloud,
+  Datadog), sampler configuration, propagation contract, high-cardinality
+  label opt-in, and failure modes.
+- `docs/architecture.md` updated to describe the actual shipped wiring.
+- New example: `examples/integration_otel_collector/` with
+  docker-compose Jaeger, OTEL-instrumented FastAPI downstream agent, and
+  a caller — runnable end-to-end in under 10 minutes.
+
+### Specs
+
+Full spec materials in `specs/005-otel-production/` — spec.md, plan.md,
+design-decisions.md, hardening-addendum.md, research.md, data-model.md,
+quickstart.md, contracts/, tasks.md.
+
 ## [0.21.3] - 2026-05-26
 
 ### Fixed

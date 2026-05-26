@@ -18,6 +18,7 @@ import httpx
 
 from dns_aid.sdk.models import InvocationStatus
 from dns_aid.sdk.protocols.base import ProtocolHandler, RawResponse
+from dns_aid.sdk.telemetry.propagation import inject_otel_context
 
 if TYPE_CHECKING:
     from dns_aid.sdk.auth.base import AuthHandler
@@ -62,6 +63,9 @@ class HTTPSProtocolHandler(ProtocolHandler):
             )
             if auth_handler:
                 request = await auth_handler.apply(request)
+            # Spec 005 / FR-005: inject W3C trace context headers. No-op
+            # when otel_enabled=False or no current span (FR-006).
+            await inject_otel_context(request)
             response = await client.send(request)
             elapsed = (time.perf_counter() - start) * 1000
 

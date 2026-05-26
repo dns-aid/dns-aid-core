@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dns-aid"
-version = "0.21.3"
+version = "0.23.0"
 description = "DNS-based Agent Identification and Discovery - Reference Implementation"
 readme = "README.md"
 license = "Apache-2.0"
@@ -86,9 +86,14 @@ sdk = [
     # Core SDK uses httpx (already in deps)
 ]
 otel = [
-    # OpenTelemetry integration for SDK telemetry
-    "opentelemetry-api>=1.20.0",
-    "opentelemetry-sdk>=1.20.0",
+    # OpenTelemetry integration for SDK telemetry (spec 005).
+    # Upper bound pinned at <2.0.0 — major version bumps are coordinated
+    # via a deliberate compat audit (FR-027 / hardening H6).
+    "opentelemetry-api>=1.20.0,<2.0.0",
+    "opentelemetry-sdk>=1.20.0,<2.0.0",
+    # OTLP gRPC exporter — required for otel_export_format="otlp"; without
+    # this package, OTLP export silently falls back to console (a footgun).
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0,<2.0.0",
 ]
 cel = [
     # CEL (Common Expression Language) custom policy rules
@@ -133,9 +138,10 @@ all = [
     "google-auth>=2.30.0",
     # JWS
     "cryptography>=46.0.7",
-    # OpenTelemetry
-    "opentelemetry-api>=1.20.0",
-    "opentelemetry-sdk>=1.20.0",
+    # OpenTelemetry (spec 005 — upper bound pinned per FR-027)
+    "opentelemetry-api>=1.20.0,<2.0.0",
+    "opentelemetry-sdk>=1.20.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0,<2.0.0",
     # Dev
     "pytest>=9.0.3",
     "pytest-asyncio>=0.23.0",

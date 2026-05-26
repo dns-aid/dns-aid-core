@@ -595,9 +595,7 @@ class TestToolNameCEL:
                 effect="deny",
             )
         ]
-        v, _ = evaluator.evaluate(
-            rules, _ctx(protocol="a2a", tool_name="tasks/send"), "layer1"
-        )
+        v, _ = evaluator.evaluate(rules, _ctx(protocol="a2a", tool_name="tasks/send"), "layer1")
         assert len(v) == 0  # Expression true → allowed
 
 

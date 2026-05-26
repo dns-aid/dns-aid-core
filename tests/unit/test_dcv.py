@@ -70,7 +70,10 @@ def test_build_txt_value_with_bnd_req():
 def test_build_txt_value_domain_before_bnd_req():
     expiry = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
     txt = _build_txt_value("abc123", expiry, "svc:bot@orga.test", domain="example.com")
-    assert txt == "token=abc123 domain=example.com bnd-req=svc:bot@orga.test expiry=2026-01-02T03:04:05Z"
+    assert (
+        txt
+        == "token=abc123 domain=example.com bnd-req=svc:bot@orga.test expiry=2026-01-02T03:04:05Z"
+    )
 
 
 # ---------------------------------------------------------------------------

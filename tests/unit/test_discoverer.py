@@ -573,8 +573,7 @@ class TestParseSvcbCustomParams:
         params = _parse_svcb_custom_params(svcb_text)
         assert params["connect-meta"] == "apphub.googleapis.com/projects/test/services/My Service"
         assert (
-            params["enroll-uri"]
-            == "https://example.com/.well-known/agent-connect?label=My Service"
+            params["enroll-uri"] == "https://example.com/.well-known/agent-connect?label=My Service"
         )
 
 

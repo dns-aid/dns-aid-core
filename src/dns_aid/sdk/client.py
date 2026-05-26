@@ -42,7 +42,89 @@ from dns_aid.sdk.protocols.https import HTTPSProtocolHandler
 from dns_aid.sdk.protocols.mcp import MCPProtocolHandler
 from dns_aid.sdk.search import SearchResponse
 from dns_aid.sdk.signals.collector import SignalCollector
+from dns_aid.sdk.telemetry.otel import TelemetryManager
 from dns_aid.utils.url_safety import UnsafeURLError, redact_url_for_log, validate_fetch_url
+
+
+class _OTELInvocationContext:
+    """Minimal sync context wrapper around an OTEL span for one invoke (spec 005).
+
+    Purpose: keep ``AgentClient.invoke()`` readable while making the OTEL
+    span the active context throughout the protocol-handler call (so W3C
+    trace context propagation works) and ensuring the span is ended on
+    every code path — success, exception, or asyncio cancellation.
+
+    Receives a pre-resolved ``TelemetryManager`` (cached on AgentClient
+    at construction) so the hot path skips ``get_or_create()`` lookup
+    and the singleton-conflict check on every invoke — measurable
+    overhead reduction (SC-011 contributor).
+
+    No-op when ``mgr`` is None (otel_enabled=False or OTEL unavailable).
+    Defensive throughout — failures in OTEL never block the invoke
+    (FR-011).
+    """
+
+    __slots__ = ("_mgr", "_agent", "_method", "_span_cm", "_exited", "span")
+
+    def __init__(
+        self, mgr: TelemetryManager | None, agent: AgentRecord, method: str | None
+    ) -> None:
+        self._mgr = mgr
+        self._agent = agent
+        self._method = method
+        self._span_cm: Any = None
+        self._exited = False
+        self.span: Any = None
+
+    def __enter__(self) -> _OTELInvocationContext:
+        if self._mgr is None:
+            return self
+        try:
+            self._span_cm = self._mgr.start_invoke_span(self._agent, self._method)
+            if self._span_cm is not None:
+                self.span = self._span_cm.__enter__()
+        except Exception:
+            # Defensive — OTEL never blocks the invoke (FR-011).
+            self.span = None
+            self._span_cm = None
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        import contextlib
+
+        if self._exited:
+            return
+        self._exited = True
+        if self._span_cm is not None:
+            with contextlib.suppress(Exception):
+                self._span_cm.__exit__(exc_type, exc, tb)
+        # Returning None tells Python's context-manager protocol NOT to
+        # suppress the exception — CancelledError and other exceptions
+        # propagate to the caller unchanged (FR-022 / H2).
+
+    def record_outcome(self, signal: InvocationSignal) -> None:
+        """Set end-of-span attributes + status from a signal, and record metrics.
+
+        Safe to call multiple times (idempotent in effect; later calls
+        overwrite earlier attribute values). Metrics are recorded each
+        time, so callers should invoke this exactly once per signal.
+        """
+        if self._mgr is None:
+            return
+        try:
+            if self.span is not None:
+                self._mgr.set_span_outcome(self.span, signal)
+            self._mgr.record_signal(signal)
+        except Exception:
+            # set_span_outcome and record_signal are already defensive;
+            # this is belt-and-suspenders.
+            pass
+
 
 logger = structlog.get_logger(__name__)
 
@@ -88,6 +170,19 @@ class AgentClient:
             threshold=self._config.circuit_breaker_threshold,
             cooldown=self._config.circuit_breaker_cooldown,
         )
+        # Spec 005 / SC-011 — resolve TelemetryManager ONCE per AgentClient.
+        # The hot path in invoke() then skips get_or_create() lookups and
+        # the singleton-conflict check on every call. None when OTEL is
+        # disabled (the most common case) — keeps the no-OTEL path cheap.
+        self._otel_mgr: TelemetryManager | None = None
+        if self._config.otel_enabled:
+            try:
+                _mgr = TelemetryManager.get_or_create(self._config)
+                if _mgr.is_available:
+                    self._otel_mgr = _mgr
+            except Exception:
+                # Defensive — OTEL setup must never block AgentClient construction.
+                self._otel_mgr = None
 
     async def __aenter__(self) -> AgentClient:
         self._http_client = httpx.AsyncClient(
@@ -102,6 +197,16 @@ class AgentClient:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        # Spec 005 / FR-023, hardening H3: flush OTEL before closing httpx
+        # so short-lived processes don't lose the last batch of spans.
+        # Uses the cached _otel_mgr — no get_or_create() lookup needed.
+        if self._otel_mgr is not None:
+            import contextlib
+
+            # OTEL flush must never block client teardown.
+            with contextlib.suppress(Exception):
+                self._otel_mgr.force_flush(timeout_millis=5000)
+
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
@@ -377,6 +482,45 @@ class AgentClient:
             auth_type=resolved_auth.auth_type if resolved_auth else None,
         )
 
+        # Spec 005 / FR-001, FR-003: open OTEL span BEFORE the protocol
+        # handler runs and end it AFTER the signal is recorded. The span
+        # remains the active context so child spans + W3C trace context
+        # propagation (FR-005) work inside ``handler.invoke``. CancelledError
+        # propagates unchanged (FR-022 / hardening H2) — __exit__ never
+        # suppresses an exception. Uses the cached self._otel_mgr — no
+        # per-invoke get_or_create() lookup (SC-011 optimization).
+        _otel_ctx = _OTELInvocationContext(self._otel_mgr, agent, method)
+        _otel_ctx.__enter__()
+        try:
+            return await self._invoke_inner(
+                agent=agent,
+                protocol=protocol,
+                handler=handler,
+                method=method,
+                arguments=arguments,
+                effective_timeout=effective_timeout,
+                resolved_auth=resolved_auth,
+                otel_ctx=_otel_ctx,
+            )
+        except BaseException as _exc:
+            _otel_ctx.__exit__(type(_exc), _exc, _exc.__traceback__)
+            raise
+        finally:
+            if not _otel_ctx._exited:
+                _otel_ctx.__exit__(None, None, None)
+
+    async def _invoke_inner(
+        self,
+        *,
+        agent: AgentRecord,
+        protocol: str,
+        handler: ProtocolHandler,
+        method: str | None,
+        arguments: dict | None,
+        effective_timeout: float,
+        resolved_auth: AuthHandler | None,
+        otel_ctx: _OTELInvocationContext,
+    ) -> InvocationResult:
         # --- Tool name extraction (Phase 6.6) ---
         tool_name: str | None = None
         if method == "tools/call" and isinstance(arguments, dict):
@@ -403,6 +547,9 @@ class AgentClient:
                 error_message=f"Circuit open for {agent.fqdn}",
                 caller_id=self._config.caller_id,
             )
+            # Spec 005 — record OTEL outcome even on circuit-open refusal
+            # so dashboards see the refusal as a span + metric.
+            otel_ctx.record_outcome(signal)
             return InvocationResult(
                 success=False,
                 data={"error": "circuit_open", "agent_fqdn": agent.fqdn},
@@ -501,6 +648,11 @@ class AgentClient:
                 signal.policy_version = policy_doc.version if policy_doc else None
                 signal.policy_fetch_time_ms = policy_fetch_ms
             signal.target_policy_result = target_policy_result
+
+        # Spec 005 / FR-002, FR-003: set end-of-span attributes + status
+        # from the enriched signal, and record metric instruments. Done
+        # BEFORE the HTTP push so any OTEL failure cannot delay the push.
+        otel_ctx.record_outcome(signal)
 
         # HTTP push to telemetry API if configured (true fire-and-forget via thread).
         # Resolution order:

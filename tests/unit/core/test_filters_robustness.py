@@ -103,9 +103,7 @@ class TestEveryFilterSurvivesMinimalAgent:
 
     def test_require_signature_algorithm_requires_require_signed(self) -> None:
         with pytest.raises(ValueError, match="require_signed=True"):
-            apply_filters(
-                [_minimal_agent()], require_signature_algorithm=["ES256"]
-            )
+            apply_filters([_minimal_agent()], require_signature_algorithm=["ES256"])
 
     def test_no_filters_returns_input_unchanged(self) -> None:
         # Sparse agent + no constraints = passthrough.
@@ -130,9 +128,7 @@ class TestSparseAndFullCompose:
         # ``realm=None`` doesn't have a way to filter for "no realm" — there's
         # no inverse filter — so this just confirms ``realm="prod"`` selects
         # only the full agent and doesn't accidentally match the sparse one.
-        result = apply_filters(
-            [_minimal_agent(), _full_agent()], realm="prod"
-        )
+        result = apply_filters([_minimal_agent(), _full_agent()], realm="prod")
         assert [a.name for a in result] == ["full"]
 
     def test_compound_filter_requires_all_conditions(self) -> None:

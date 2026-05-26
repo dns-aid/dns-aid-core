@@ -190,7 +190,9 @@ class TestFetchCapDocument:
             _SSRF_BYPASS,
             patch(
                 "dns_aid.utils.url_safety.safe_fetch_bytes",
-                side_effect=_mock_fetch({"version": "1.0.0", "description": "An agent without caps"}),
+                side_effect=_mock_fetch(
+                    {"version": "1.0.0", "description": "An agent without caps"}
+                ),
             ),
         ):
             doc = await fetch_cap_document("https://example.com/cap.json")

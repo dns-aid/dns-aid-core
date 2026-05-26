@@ -13,7 +13,23 @@ import functools
 import os
 import warnings
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Spec 005 — supported sampler names (subset of OTEL Python SDK built-ins
+# we intentionally expose; rejecting unknown values prevents typo footguns).
+_SUPPORTED_OTEL_SAMPLERS = frozenset(
+    {
+        "always_on",
+        "always_off",
+        "traceidratio",
+        "parentbased_always_on",
+        "parentbased_always_off",
+        "parentbased_traceidratio",
+    }
+)
+
+# Spec 005 — opt-in high-cardinality metric labels (per contracts/metrics.md).
+_SUPPORTED_OTEL_METRIC_LABELS = frozenset({"fqdn", "caller", "tool"})
 
 
 class SDKConfig(BaseModel):
@@ -48,6 +64,75 @@ class SDKConfig(BaseModel):
         default="otlp",
         description="Export format: otlp, console, or noop.",
     )
+
+    # Spec 005 — production-grade OTEL fields (v0.23.0)
+    otel_sampler: str | None = Field(
+        default=None,
+        description=(
+            "OpenTelemetry sampler name. Supported: always_on, always_off, "
+            "traceidratio, parentbased_always_on, parentbased_always_off, "
+            "parentbased_traceidratio. None = OTEL SDK default "
+            "(parentbased_always_on). Overridden by OTEL_TRACES_SAMPLER env "
+            "var if set (FR-010)."
+        ),
+    )
+    otel_environment: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Populates the OTEL ``deployment.environment`` resource attribute "
+            "when set. Free-form string. Overridden by user-set value in "
+            "OTEL_RESOURCE_ATTRIBUTES env var (FR-014)."
+        ),
+    )
+    otel_metric_labels: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Opt-in high-cardinality labels for metric instruments. Each "
+            "element must be one of: 'fqdn', 'caller', 'tool'. Default empty "
+            "keeps the low-cardinality label set (protocol, status). See "
+            "specs/005-otel-production/contracts/metrics.md for the "
+            "cardinality cost discussion (FR-014)."
+        ),
+    )
+
+    @field_validator("otel_sampler")
+    @classmethod
+    def _validate_otel_sampler(cls, v: str | None) -> str | None:
+        # None is fine; means "use OTEL SDK default"
+        if v is None:
+            return v
+        if v not in _SUPPORTED_OTEL_SAMPLERS:
+            supported = ", ".join(sorted(_SUPPORTED_OTEL_SAMPLERS))
+            raise ValueError(
+                f"otel_sampler {v!r} is not supported (FR-010b). Supported values: {supported}"
+            )
+        return v
+
+    @field_validator("otel_environment")
+    @classmethod
+    def _validate_otel_environment(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        stripped = v.strip()
+        if stripped != v:
+            raise ValueError("otel_environment must not have leading/trailing whitespace")
+        return v
+
+    @field_validator("otel_metric_labels")
+    @classmethod
+    def _validate_otel_metric_labels(cls, v: list[str]) -> list[str]:
+        # Reject duplicates and unknown values.
+        if len(v) != len(set(v)):
+            raise ValueError("otel_metric_labels must not contain duplicates")
+        for item in v:
+            if item not in _SUPPORTED_OTEL_METRIC_LABELS:
+                supported = ", ".join(sorted(_SUPPORTED_OTEL_METRIC_LABELS))
+                raise ValueError(
+                    f"otel_metric_labels element {item!r} is not supported. "
+                    f"Supported values: {supported}"
+                )
+        return v
 
     # HTTP push (fire-and-forget POST to telemetry API)
     http_push_url: str | None = Field(
@@ -154,6 +239,11 @@ class SDKConfig(BaseModel):
             otel_enabled=os.getenv("DNS_AID_SDK_OTEL_ENABLED", "").lower() == "true",
             otel_endpoint=os.getenv("DNS_AID_SDK_OTEL_ENDPOINT"),
             otel_export_format=os.getenv("DNS_AID_SDK_OTEL_EXPORT_FORMAT", "otlp"),
+            otel_sampler=os.getenv("DNS_AID_SDK_OTEL_SAMPLER") or None,
+            otel_environment=os.getenv("DNS_AID_SDK_OTEL_ENVIRONMENT") or None,
+            otel_metric_labels=_parse_otel_metric_labels_env(
+                os.getenv("DNS_AID_SDK_OTEL_METRIC_LABELS", "")
+            ),
             console_signals=os.getenv("DNS_AID_SDK_CONSOLE_SIGNALS", "").lower() == "true",
             directory_api_url=os.getenv("DNS_AID_SDK_DIRECTORY_API_URL"),
             telemetry_api_url=os.getenv("DNS_AID_SDK_TELEMETRY_API_URL"),
@@ -167,6 +257,17 @@ class SDKConfig(BaseModel):
                 os.getenv("DNS_AID_CREDENTIAL_PROVIDER_TIMEOUT", "30")
             ),
         )
+
+
+def _parse_otel_metric_labels_env(raw: str) -> list[str]:
+    """Parse comma-separated ``DNS_AID_SDK_OTEL_METRIC_LABELS`` env var.
+
+    Returns an empty list when raw is empty/whitespace. Validation of element
+    membership is delegated to the SDKConfig validator.
+    """
+    if not raw or not raw.strip():
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 @functools.cache

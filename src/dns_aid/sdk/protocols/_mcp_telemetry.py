@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 import httpx
 from mcp.shared._httpx_utils import McpHttpClientFactory
 
+from dns_aid.sdk.telemetry.propagation import inject_otel_context
+
 
 @dataclass
 class _TelemetryCapture:
@@ -130,7 +132,11 @@ def _make_telemetry_factory(capture: _TelemetryCapture) -> McpHttpClientFactory:
             auth=auth,
             follow_redirects=True,
             event_hooks={
-                "request": [capture.on_request],
+                # Spec 005 / FR-005: inject_otel_context runs AFTER capture
+                # so the active span is read at the latest moment before the
+                # request goes on the wire. Captures + propagation are
+                # independent; ordering is for clarity.
+                "request": [capture.on_request, inject_otel_context],
                 "response": [capture.on_response],
             },
         )

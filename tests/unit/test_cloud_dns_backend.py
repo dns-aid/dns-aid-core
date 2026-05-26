@@ -57,9 +57,7 @@ class TestCloudDNSBackend:
                 "name": "_chat._mcp._agents.example.com.",
                 "type": "SVCB",
                 "ttl": 30,
-                "rrdatas": [
-                    '1 service.example.internal. alpn="mcp" port="443" key65406="lattice"'
-                ],
+                "rrdatas": ['1 service.example.internal. alpn="mcp" port="443" key65406="lattice"'],
             }
         ]
 

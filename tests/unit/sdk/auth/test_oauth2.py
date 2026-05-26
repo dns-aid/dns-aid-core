@@ -217,9 +217,7 @@ class TestOAuth2SSRFProtection:
             await handler.apply(request_obj)
 
     @pytest.mark.asyncio
-    async def test_discovered_token_endpoint_ssrf_blocked(
-        self, request_obj: httpx.Request
-    ) -> None:
+    async def test_discovered_token_endpoint_ssrf_blocked(self, request_obj: httpx.Request) -> None:
         """A legit discovery URL that returns a malicious token_endpoint must be rejected."""
         from dns_aid.utils.url_safety import UnsafeURLError
 

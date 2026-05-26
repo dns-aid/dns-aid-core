@@ -1,0 +1,9 @@
+# Downstream agent deps for the OTEL linked-trace demo.
+# Caller side only needs `dns-aid[otel]>=0.23.0` (declared in the repo's
+# main pyproject.toml).
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+opentelemetry-api>=1.20.0,<2.0.0
+opentelemetry-sdk>=1.20.0,<2.0.0
+opentelemetry-exporter-otlp-proto-grpc>=1.20.0,<2.0.0
+opentelemetry-instrumentation-fastapi>=0.46b0
