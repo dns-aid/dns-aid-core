@@ -142,15 +142,20 @@ ranked = await dns_aid.rank(result.agents, method="tools/list")
 for r in ranked:
     print(f"{r.agent_fqdn}: score={r.composite_score:.1f}")
 
-# Fetch community-wide rankings from telemetry API (v0.6.0+)
+# Fetch community-wide rankings from the directory API (v0.19.0+)
 from dns_aid.sdk import AgentClient, SDKConfig
 
-config = SDKConfig(telemetry_api_url="https://api.example.com")
+config = SDKConfig(directory_api_url="https://api.example.com")
 async with AgentClient(config) as client:
     rankings = await client.fetch_rankings(limit=10)
     for r in rankings:
         print(f"{r['agent_fqdn']}: {r['composite_score']}")
 ```
+
+**OpenTelemetry (v0.23.0+):** install `dns-aid[otel]` and set
+`otel_enabled=True` (or `DNS_AID_SDK_OTEL_ENABLED=true`) to emit spans +
+metrics per invoke and propagate W3C trace context to downstream agents.
+See [docs/integrations/opentelemetry.md](docs/integrations/opentelemetry.md).
 
 For advanced usage (connection reuse, OTEL export):
 

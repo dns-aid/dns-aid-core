@@ -1380,7 +1380,8 @@ from dns_aid.sdk import AgentClient, SDKConfig
 
 config = SDKConfig(
     persist_signals=True,      # Store signals in PostgreSQL
-    otel_enabled=True,         # Export to OpenTelemetry
+    otel_enabled=True,         # Export to OpenTelemetry (v0.23.0+)
+    otel_endpoint="http://localhost:4317",  # http:// plaintext, https:// TLS
     caller_id="my-app",
 )
 
@@ -1392,6 +1393,25 @@ async with AgentClient(config=config) as client:
     # Rank all invoked agents
     ranked = client.rank()
 ```
+
+**OpenTelemetry (v0.23.0+).** With `otel_enabled=True` the SDK emits a span
+per invoke, propagates W3C trace context (`traceparent`) to downstream
+agents, records metrics, and correlates structlog events with the active
+span. Configure via these env vars (no code change):
+
+```bash
+export DNS_AID_SDK_OTEL_ENABLED=true
+export DNS_AID_SDK_OTEL_ENDPOINT=http://collector:4317   # http:// plaintext, https:// TLS
+export DNS_AID_SDK_OTEL_SAMPLER=traceidratio             # optional sampler
+export DNS_AID_SDK_OTEL_ENVIRONMENT=production           # deployment.environment
+export DNS_AID_SDK_OTEL_METRIC_LABELS=fqdn,caller        # opt-in metric labels
+# Standard OTEL_* env vars also honored: OTEL_TRACES_SAMPLER,
+# OTEL_RESOURCE_ATTRIBUTES, OTEL_EXPORTER_OTLP_HEADERS, OTEL_PROPAGATORS.
+```
+
+Requires the `otel` extra: `pip install 'dns-aid[otel]'`. Full guide
+(sampling, propagation, managed-collector auth, runnable Jaeger example):
+[docs/integrations/opentelemetry.md](integrations/opentelemetry.md).
 
 ### Telemetry API
 

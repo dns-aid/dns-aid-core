@@ -1535,9 +1535,12 @@ config = SDKConfig(
     caller_id="my-app",              # Caller identifier for signals
     persist_signals=False,           # Auto-save signals to PostgreSQL
     database_url=None,               # DB URL (falls back to DATABASE_URL env)
-    otel_enabled=False,              # Enable OpenTelemetry export
-    otel_endpoint=None,              # OTLP endpoint URL
-    otel_export_format="otlp",       # "otlp" or "console"
+    otel_enabled=False,              # Enable OpenTelemetry export (v0.23.0+)
+    otel_endpoint=None,              # OTLP endpoint URL — use http:// (plaintext) or https:// (TLS)
+    otel_export_format="otlp",       # "otlp" | "console" | "noop"
+    otel_sampler=None,               # Sampler name; None = OTEL default (v0.23.0+)
+    otel_environment=None,           # deployment.environment resource attr (v0.23.0+)
+    otel_metric_labels=[],           # Opt-in high-cardinality labels: fqdn|caller|tool (v0.23.0+)
     http_push_url=None,              # POST signals to remote telemetry API
     directory_api_url=None,          # Base URL for AgentClient.search() and fetch_rankings()
     telemetry_api_url=None,          # Deprecated alias for directory_api_url
@@ -1556,11 +1559,21 @@ config = SDKConfig.from_env()
 | `DNS_AID_SDK_CALLER_ID` | None | Caller identifier |
 | `DNS_AID_SDK_PERSIST_SIGNALS` | false | Enable DB persistence |
 | `DATABASE_URL` | None | PostgreSQL connection URL |
-| `DNS_AID_SDK_OTEL_ENABLED` | false | Enable OpenTelemetry |
-| `DNS_AID_SDK_OTEL_ENDPOINT` | None | OTLP collector URL |
+| `DNS_AID_SDK_OTEL_ENABLED` | false | Enable OpenTelemetry (v0.23.0+) |
+| `DNS_AID_SDK_OTEL_ENDPOINT` | None | OTLP collector URL — `http://` plaintext, `https://` TLS |
+| `DNS_AID_SDK_OTEL_EXPORT_FORMAT` | otlp | `otlp` \| `console` \| `noop` |
+| `DNS_AID_SDK_OTEL_SAMPLER` | None | Sampler name; lower precedence than `OTEL_TRACES_SAMPLER` (v0.23.0+) |
+| `DNS_AID_SDK_OTEL_ENVIRONMENT` | None | Sets `deployment.environment` resource attr (v0.23.0+) |
+| `DNS_AID_SDK_OTEL_METRIC_LABELS` | None | Comma-separated opt-in labels: `fqdn,caller,tool` (v0.23.0+) |
 | `DNS_AID_SDK_HTTP_PUSH_URL` | None | POST signals to this URL |
 | `DNS_AID_SDK_DIRECTORY_API_URL` | None | Base URL for `AgentClient.search()` + `fetch_rankings()` (v0.19.0+) |
 | `DNS_AID_SDK_TELEMETRY_API_URL` | None | Deprecated alias for `DNS_AID_SDK_DIRECTORY_API_URL` |
+
+Standard OpenTelemetry env vars are also honored: `OTEL_TRACES_SAMPLER`,
+`OTEL_TRACES_SAMPLER_ARG`, `OTEL_PROPAGATORS`, `OTEL_RESOURCE_ATTRIBUTES`,
+`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_ENDPOINT`. See
+[docs/integrations/opentelemetry.md](integrations/opentelemetry.md) for the
+full guide (sampling, propagation, managed-collector auth, failure modes).
 
 The `resolved_directory_url` property returns `directory_api_url` when set, falling
 back to `telemetry_api_url` for backwards compatibility. Using the legacy alias
