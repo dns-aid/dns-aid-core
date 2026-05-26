@@ -349,9 +349,7 @@ class TestSecurityGuards:
     """
 
     @pytest.mark.asyncio
-    async def test_3xx_redirect_rejected_with_clear_error(
-        self, public_directory_url: str
-    ) -> None:
+    async def test_3xx_redirect_rejected_with_clear_error(self, public_directory_url: str) -> None:
         # follow_redirects=False is set on the search call; a directory that
         # responds with a redirect is misconfigured. Surface that explicitly
         # instead of letting the body parse fail with a confusing JSON error.
@@ -359,9 +357,7 @@ class TestSecurityGuards:
         async with AgentClient(config=config) as client:
             assert client._http_client is not None
             client._http_client.get = AsyncMock(  # type: ignore[method-assign]
-                return_value=_mock_response(
-                    302, headers={"Location": "https://internal.local/"}
-                )
+                return_value=_mock_response(302, headers={"Location": "https://internal.local/"})
             )
             with pytest.raises(DirectoryUnavailableError) as exc_info:
                 await client.search(q="x")
@@ -411,9 +407,7 @@ class TestSecurityGuards:
         # MUST surface DirectoryUnavailableError without ever logging or echoing
         # the password.
         monkeypatch.setenv("DNS_AID_FETCH_ALLOWLIST", "directory.test.example")
-        config = SDKConfig(
-            directory_api_url="https://igor:s3cret@directory.test.example/"
-        )
+        config = SDKConfig(directory_api_url="https://igor:s3cret@directory.test.example/")
         async with AgentClient(config=config) as client:
             with pytest.raises(DirectoryUnavailableError) as exc_info:
                 await client.search(q="x")

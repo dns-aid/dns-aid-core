@@ -12,6 +12,53 @@ from dns_aid.core.models import AgentRecord, Protocol
 from dns_aid.sdk._config import SDKConfig
 
 
+@pytest.fixture(autouse=True)
+def reset_otel_singleton():
+    """Reset OTEL global state before AND after every test.
+
+    Spec 005 hardening H5 / FR-026 — eliminates per-test cleanup burden and
+    prevents flaky failures from singleton state leaking across tests when
+    they run in random order.
+
+    Resets:
+    - ``TelemetryManager`` singleton (our SDK)
+    - OTEL global ``TracerProvider`` and ``MeterProvider`` (so each test
+      starts from the proxy/default — tests that install a custom provider
+      must do so explicitly)
+    - ``_OTELWarnRateLimiter`` state (so a previous test's suppressed-event
+      counter doesn't leak)
+    """
+    from dns_aid.sdk.telemetry.otel import TelemetryManager
+
+    def _reset_otel_globals() -> None:
+        try:
+            from opentelemetry import metrics, trace
+
+            # Force OTEL to allow re-setting the provider. This is an
+            # internal flag but is the only practical way to reset between
+            # tests; OTEL itself does not expose a public reset.
+            if hasattr(trace, "_TRACER_PROVIDER_SET_ONCE"):
+                trace._TRACER_PROVIDER_SET_ONCE._done = False  # type: ignore[attr-defined]
+            if hasattr(metrics, "_METER_PROVIDER_SET_ONCE"):
+                metrics._METER_PROVIDER_SET_ONCE._done = False  # type: ignore[attr-defined]
+
+            # Replace the global with a fresh ProxyTracerProvider so
+            # ``_is_default_tracer_provider()`` returns True at test start.
+            from opentelemetry.trace import ProxyTracerProvider
+
+            trace._TRACER_PROVIDER = ProxyTracerProvider()  # type: ignore[attr-defined]
+        except (ImportError, AttributeError):
+            # opentelemetry absent or its internal attrs moved — nothing to
+            # reset in that case; the OTEL tests skip via pytestmark anyway.
+            pass
+
+    _reset_otel_globals()
+    TelemetryManager.reset()
+    yield
+    TelemetryManager.reset()
+    _reset_otel_globals()
+
+
 class _ModernTransportRejected:
     """Async context manager whose __aenter__ raises HTTP 406."""
 

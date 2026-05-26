@@ -232,9 +232,15 @@ AgentClient.invoke(agent, method, arguments)
 │  └─ Weighted composite: 40% reliability + 30% latency + 15% cost + 15% freshness
 │  └─ Pluggable strategies (LatencyFirst, ReliabilityFirst, WeightedComposite)
 │
-└─ TelemetryManager (optional, OpenTelemetry)
-   └─ Spans: dns-aid.invoke with agent/protocol/status attributes
-   └─ Metrics: duration histogram, count/error counters, cost counter
+└─ TelemetryManager (optional, OpenTelemetry — v0.23.0+, spec 005)
+   ├─ Singleton with thread-safe init; joins existing global providers without clobbering
+   ├─ Span lifecycle: open BEFORE protocol handler, end AFTER signal recorded
+   ├─ Spans: dns-aid.invoke {fqdn} (SpanKind=CLIENT) — agent identity, method, status, latency, cost, DNSSEC
+   ├─ W3C Trace Context propagation: traceparent + tracestate (+ baggage) on outbound MCP/A2A/HTTPS requests
+   ├─ Metrics: duration histogram, count/error counters, cost counter — unsampled per OTEL spec
+   ├─ Sampler config: OTEL_TRACES_SAMPLER env wins, then DNS_AID_SDK_OTEL_SAMPLER, then SDKConfig.otel_sampler
+   ├─ Sanitizes credentials embedded in URLs before they reach spans (FR-019/FR-020)
+   └─ Force-flushes on AgentClient.__aexit__ so short-lived processes don't lose spans (FR-023)
 ```
 
 ### Signal Flow
@@ -242,12 +248,22 @@ AgentClient.invoke(agent, method, arguments)
 ```
 dns_aid.invoke(agent)
     → AgentClient.invoke()
-        → ProtocolHandler.invoke() → RawResponse (timing + status)
-        → SignalCollector.record() → InvocationSignal (enriched)
-        → SignalStore.save()       → PostgreSQL (if persist_signals=True)
-        → HTTP Push (thread)       → POST to telemetry API (if http_push_url set)
-        → TelemetryManager.emit() → OTEL span + metrics (if otel_enabled=True)
+        → opens OTEL span "dns-aid.invoke {fqdn}" (if otel_enabled)
+            → ProtocolHandler.invoke() → RawResponse (timing + status)
+                ├─ httpx event hook injects traceparent header (if span active)
+                ├─ MCP / A2A / HTTPS handlers all participate
+            → SignalCollector.record() → InvocationSignal (enriched)
+            → set_span_outcome(span, signal) → end-of-span attributes + status
+            → TelemetryManager.record_signal(signal) → metric instruments fire
+            → HTTP Push (thread) → POST to telemetry API (if directory_api_url set)
+        → span ends; OTEL BatchSpanProcessor flushes async
     → InvocationResult (data + signal)
+
+(in parallel, always-on)
+    structlog event during invoke chain
+        → otel_trace_processor (in utils/logging.py)
+        → adds trace_id/span_id when current span context valid
+        → renders to stdout / JSON / configured sink
 ```
 
 ### HTTP Telemetry Push (Optional)

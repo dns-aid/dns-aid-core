@@ -1,0 +1,21 @@
+# DNS-AID SDK + OpenTelemetry end-to-end example
+# Jaeger all-in-one — UI on :16686, OTLP gRPC ingest on :4317.
+#
+# Hardening note: production deployments should pin by SHA digest
+# (e.g., jaegertracing/all-in-one@sha256:<digest>) instead of tag. The tag
+# below is left readable for the demo; replace with SHA before adapting
+# to a production-adjacent context.
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    container_name: dns-aid-otel-demo-jaeger
+    ports:
+      - "16686:16686"    # Jaeger UI
+      - "4317:4317"      # OTLP gRPC ingest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:14269"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

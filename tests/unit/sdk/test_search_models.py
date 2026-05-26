@@ -200,19 +200,13 @@ class TestSearchResponse:
         )
 
     def test_has_more_true_when_more_results_exist(self) -> None:
-        results = [
-            SearchResult(agent=_make_agent(name=f"a{i}"), score=0.5)
-            for i in range(20)
-        ]
+        results = [SearchResult(agent=_make_agent(name=f"a{i}"), score=0.5) for i in range(20)]
         response = self._response(results, total=50, offset=0)
         assert response.has_more is True
         assert response.next_offset == 20
 
     def test_has_more_false_at_last_page(self) -> None:
-        results = [
-            SearchResult(agent=_make_agent(name=f"a{i}"), score=0.5)
-            for i in range(7)
-        ]
+        results = [SearchResult(agent=_make_agent(name=f"a{i}"), score=0.5) for i in range(7)]
         response = self._response(results, total=27, offset=20)
         assert response.has_more is False
         assert response.next_offset is None
