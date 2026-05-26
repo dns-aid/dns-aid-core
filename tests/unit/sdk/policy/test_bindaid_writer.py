@@ -79,8 +79,9 @@ class TestNSRecord:
 class TestActionDirectives:
     def test_nxdomain_txt(self, result_with_directives: CompilationResult) -> None:
         zone = write_bindaid_zone(result_with_directives, "policy.example.com", serial=1)
-        assert "evil.com" in zone
-        assert "ACTION:nxdomain" in zone
+        # Assert the full record line, not a bare host substring (avoids the
+        # incomplete-URL-substring anti-pattern and is a stronger check).
+        assert 'evil.com  300  IN  TXT  "ACTION:nxdomain"' in zone
 
     def test_passthru_txt(self, result_with_directives: CompilationResult) -> None:
         zone = write_bindaid_zone(result_with_directives, "policy.example.com", serial=1)
