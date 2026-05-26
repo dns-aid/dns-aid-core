@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.3] - 2026-05-26
+
+### Fixed
+
+- **`check_target_policy()` dropped caller-supplied `tool_name`**:
+  `dns_aid.sdk.policy.guard.check_target_policy()` constructed a
+  `PolicyContext` but did not expose `tool_name` as a kwarg, so callers
+  who wanted tool-name-based policy enforcement (e.g., MCP servers gating
+  on `tools/call`) had to bypass the helper and build `PolicyContext`
+  directly. The data model already supported the field —
+  `PolicyContext.tool_name` has been present since the policy engine
+  shipped — the helper just didn't plumb it through.
+
+  **Fix**: add an optional `tool_name: str | None = None` kwarg to
+  `check_target_policy()` and forward it into the `PolicyContext`.
+  Strictly additive; existing call sites continue to work unchanged.
+  The denial log entry now also records `tool_name` for observability.
+
+  **Use case**: MCP servers integrating with `dns-aid` can now write:
+
+  ```python
+  from dns_aid.sdk.policy.guard import check_target_policy
+
+  result = await check_target_policy(
+      policy_uri=agent.policy_uri,
+      method="tools/call",
+      tool_name=tool_name,
+  )
+  if result.denied:
+      return {"error": "policy_denied", ...}
+  ```
+
+  No more shim wrappers in caller projects.
+
+### Tests
+
+- `tests/unit/mcp/test_policy_guard.py::TestCheckTargetPolicy::test_tool_name_forwarded_to_context`
+  captures the `PolicyContext` constructed inside the helper and asserts
+  the kwarg lands on `ctx.tool_name`.
+- `test_tool_name_defaults_to_none` pins the backward-compatibility
+  contract: callers that omit the new kwarg see `ctx.tool_name is None`,
+  matching pre-v0.21.3 behaviour.
+
 ## [0.21.2] - 2026-05-22
 
 ### Fixed

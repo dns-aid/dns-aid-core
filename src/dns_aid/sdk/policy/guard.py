@@ -40,6 +40,7 @@ async def check_target_policy(
     *,
     protocol: str = "mcp",
     method: str | None = None,
+    tool_name: str | None = None,
     caller_id: str = "dns-aid-mcp-server",
 ) -> PolicyResult:
     """Check target agent's policy before invocation.
@@ -49,6 +50,10 @@ async def check_target_policy(
                     or agent card). If None, returns allowed (no-policy).
         protocol: Protocol being used (mcp, a2a, https).
         method: Method being invoked (e.g., tools/call).
+        tool_name: For MCP tools/call, the name of the tool being invoked
+                   (e.g., "explore_network"). Forwarded to ``PolicyContext``
+                   so policy rules can match on tool name (e.g.,
+                   ``denied_tools`` or per-tool ``allowed_caller_domains``).
         caller_id: Identifier for the calling MCP server.
 
     Returns:
@@ -70,6 +75,7 @@ async def check_target_policy(
             caller_domain=os.getenv("DNS_AID_CALLER_DOMAIN"),
             protocol=protocol,
             method=method,
+            tool_name=tool_name,
         )
         result = evaluator.evaluate(
             policy_doc,
@@ -83,6 +89,7 @@ async def check_target_policy(
                 policy_uri=policy_uri,
                 protocol=protocol,
                 method=method,
+                tool_name=tool_name,
                 violations=[f"{v.rule}:{v.detail}" for v in result.violations],
                 mode=policy_mode,
             )

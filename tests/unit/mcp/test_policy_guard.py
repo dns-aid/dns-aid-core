@@ -175,3 +175,70 @@ class TestCheckTargetPolicy:
             )
             assert captured_ctx["protocol"] == "a2a"
             assert captured_ctx["method"] == "message/send"
+
+    @pytest.mark.asyncio
+    async def test_tool_name_forwarded_to_context(self) -> None:
+        """tool_name kwarg is forwarded to PolicyContext.
+
+        Regression test for v0.21.3: ``PolicyContext`` already had a
+        ``tool_name`` field, but ``check_target_policy()`` discarded any
+        caller-supplied value because it wasn't a kwarg. Callers wanting
+        per-tool policy enforcement had to bypass the helper entirely.
+        """
+        captured_ctx = {}
+
+        def capture_evaluate(doc, ctx, **kw):
+            captured_ctx["tool_name"] = ctx.tool_name
+            captured_ctx["method"] = ctx.method
+            return PolicyResult(allowed=True)
+
+        doc = PolicyDocument(
+            version="1.0",
+            agent="_test._mcp._agents.example.com",
+            rules=PolicyRules(),
+        )
+        mock_eval = AsyncMock()
+        mock_eval.fetch = AsyncMock(return_value=doc)
+        mock_eval.evaluate = capture_evaluate
+
+        with (
+            patch("dns_aid.sdk.policy.guard._get_evaluator", return_value=mock_eval),
+            patch.dict("os.environ", {"DNS_AID_POLICY_MODE": "permissive"}),
+        ):
+            await check_target_policy(
+                "https://example.com/policy.json",
+                protocol="mcp",
+                method="tools/call",
+                tool_name="explore_network",
+            )
+            assert captured_ctx["tool_name"] == "explore_network"
+            assert captured_ctx["method"] == "tools/call"
+
+    @pytest.mark.asyncio
+    async def test_tool_name_defaults_to_none(self) -> None:
+        """Backward compat: callers that omit tool_name see None in the context."""
+        captured_ctx = {}
+
+        def capture_evaluate(doc, ctx, **kw):
+            captured_ctx["tool_name"] = ctx.tool_name
+            return PolicyResult(allowed=True)
+
+        doc = PolicyDocument(
+            version="1.0",
+            agent="_test._mcp._agents.example.com",
+            rules=PolicyRules(),
+        )
+        mock_eval = AsyncMock()
+        mock_eval.fetch = AsyncMock(return_value=doc)
+        mock_eval.evaluate = capture_evaluate
+
+        with (
+            patch("dns_aid.sdk.policy.guard._get_evaluator", return_value=mock_eval),
+            patch.dict("os.environ", {"DNS_AID_POLICY_MODE": "permissive"}),
+        ):
+            await check_target_policy(
+                "https://example.com/policy.json",
+                protocol="mcp",
+                method="tools/call",
+            )
+            assert captured_ctx["tool_name"] is None
