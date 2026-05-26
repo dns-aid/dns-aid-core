@@ -65,14 +65,21 @@ class TestGetBackend:
 
     def test_unknown_backend_exits(self):
         import click
+        import typer
 
         from dns_aid.cli.main import _get_backend
 
+        # _get_backend raises typer.Exit(1) on unknown backend. Depending on
+        # the resolved typer version, typer.Exit is either an alias of
+        # click.exceptions.Exit OR typer's own vendored exception
+        # (typer._click.exceptions.Exit) — catch typer.Exit directly so the
+        # test is robust to both (CI's fresh pip resolve differs from the
+        # uv-locked dev venv).
         try:
             _get_backend("nonexistent")
             raise AssertionError("Should have raised")
-        except (SystemExit, click.exceptions.Exit):
-            pass  # Either exception is acceptable
+        except (SystemExit, click.exceptions.Exit, typer.Exit):
+            pass  # Any of these exit exceptions is acceptable
 
 
 class TestDiscoverCommand:
