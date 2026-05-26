@@ -11,11 +11,18 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from opentelemetry import trace
 
 from dns_aid.core.models import AgentRecord, Protocol
 from dns_aid.sdk._config import SDKConfig
 from dns_aid.sdk.client import AgentClient
+from dns_aid.sdk.telemetry.otel import _otel_available
+
+# Skip the whole module when opentelemetry is not installed (e.g., CI jobs
+# that don't pull the [otel] extra). The SDK itself works without it
+# (FR-012) — these tests exercise the OTEL feature and need the package.
+pytestmark = pytest.mark.skipif(
+    not _otel_available, reason="opentelemetry not installed ([otel] extra)"
+)
 
 
 def _agent() -> AgentRecord:
@@ -29,6 +36,7 @@ def _agent() -> AgentRecord:
 
 
 def _install_recording_exporter():
+    from opentelemetry import trace
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -63,6 +71,8 @@ class TestSpanActiveDuringHandler:
         captured_span_names: list[str] = []
 
         async def handler(request: httpx.Request) -> httpx.Response:
+            from opentelemetry import trace
+
             current = trace.get_current_span()
             captured_span_names.append(current.name if hasattr(current, "name") else "")
             return httpx.Response(200, json={"ok": True})

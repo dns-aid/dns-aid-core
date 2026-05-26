@@ -10,7 +10,15 @@ nothing when no span is active.
 
 from __future__ import annotations
 
+import pytest
+
+from dns_aid.sdk.telemetry.otel import _otel_available
 from dns_aid.utils.logging import otel_trace_processor
+
+# OTEL feature tests — skip when opentelemetry isn't installed (FR-012).
+pytestmark = pytest.mark.skipif(
+    not _otel_available, reason="opentelemetry not installed ([otel] extra)"
+)
 
 
 class TestOTELTraceProcessor:

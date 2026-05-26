@@ -16,7 +16,15 @@ import pytest
 from dns_aid.core.models import AgentRecord, Protocol
 from dns_aid.sdk._config import SDKConfig
 from dns_aid.sdk.client import AgentClient
+from dns_aid.sdk.telemetry.otel import _otel_available
 from dns_aid.sdk.telemetry.propagation import inject_otel_context
+
+# OTEL feature tests — skip when opentelemetry isn't installed (FR-012:
+# the SDK still works without it; that path is covered by
+# test_otel_no_opentelemetry.py / test_otel_backward_compat.py).
+pytestmark = pytest.mark.skipif(
+    not _otel_available, reason="opentelemetry not installed ([otel] extra)"
+)
 
 
 def _agent(protocol: Protocol, name: str = "echo") -> AgentRecord:

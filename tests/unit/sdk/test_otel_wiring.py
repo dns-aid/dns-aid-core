@@ -25,9 +25,15 @@ from dns_aid.sdk._config import SDKConfig
 from dns_aid.sdk.client import AgentClient
 from dns_aid.sdk.telemetry.otel import (
     TelemetryManager,
+    _otel_available,
     _OTELWarnRateLimiter,
     _sanitize_endpoint_url,
     _sanitize_error_message,
+)
+
+# OTEL feature tests — skip when opentelemetry isn't installed (FR-012).
+pytestmark = pytest.mark.skipif(
+    not _otel_available, reason="opentelemetry not installed ([otel] extra)"
 )
 
 # ---------------------------------------------------------------------------
