@@ -29,12 +29,12 @@ Production-grade hardening (per specs/005-otel-production/):
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import threading
 import time
 from typing import Any
-from typing import Protocol as TypingProtocol
 
 import structlog
 
@@ -226,10 +226,6 @@ def _sanitize_error_message(msg: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-class _Signer(TypingProtocol):  # legacy alias retained for compatibility
-    def sign(self, data: bytes) -> bytes: ...
-
-
 def _parse_signal_fqdn(fqdn: str) -> tuple[str | None, str | None]:
     """Parse ``agent_name`` and ``domain`` from ``_name._proto._agents.domain``."""
     parts = fqdn.split("._agents.")
@@ -305,13 +301,11 @@ def _is_default_tracer_provider() -> bool:
     if not _otel_available:
         return True
     provider = trace.get_tracer_provider()
-    try:
+    with contextlib.suppress(ImportError):
         from opentelemetry.trace import ProxyTracerProvider
 
         if isinstance(provider, ProxyTracerProvider):
             return True
-    except ImportError:
-        pass
     # Class-name fallback — survives OTEL SDK refactors.
     return type(provider).__name__ in {"ProxyTracerProvider", "_DefaultTracerProvider"}
 
@@ -417,8 +411,6 @@ class TelemetryManager:
         ``reset_otel_singleton`` (in ``tests/unit/sdk/conftest.py``) uses
         it for isolation (hardening H5 / FR-026).
         """
-        import contextlib
-
         with cls._instance_lock:
             if cls._instance is not None:
                 with contextlib.suppress(Exception):
@@ -657,16 +649,12 @@ class TelemetryManager:
             return
         # Flush before shutdown so pending spans drain.
         self.force_flush(timeout_millis=5000)
-        try:
+        with contextlib.suppress(Exception):
             if self._tracer_provider is not None and hasattr(self._tracer_provider, "shutdown"):
                 self._tracer_provider.shutdown()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             if self._meter_provider is not None and hasattr(self._meter_provider, "shutdown"):
                 self._meter_provider.shutdown()
-        except Exception:
-            pass
         self._tracer = None
         self._tracer_provider = None
         self._meter_provider = None
@@ -743,18 +731,12 @@ class TelemetryManager:
             labels[ATTR_AGENT_FQDN] = signal.agent_fqdn
         if "caller" in self._metric_labels_opts and signal.caller_id:
             labels["dns_aid.caller.id"] = signal.caller_id
-        if "tool" in self._metric_labels_opts:
-            # Tool name is the MCP "tool" param when method == tools/call.
-            # For other methods, no tool label.
-            tool = None
-            if signal.method == "tools/call":
-                # Signal doesn't carry arguments; the AgentClient sets
-                # tool_name via metric label opt-in path. We pass through
-                # whatever signal.method indicates. Detailed tool extraction
-                # is the caller's responsibility (see client.py invoke()).
-                pass
-            if tool:
-                labels["dns_aid.tool.name"] = tool
+        # NOTE: the "tool" opt-in label is accepted by SDKConfig for
+        # forward-compatibility, but InvocationSignal does not currently
+        # carry the per-call tool name, so no `dns_aid.tool.name` label is
+        # emitted here yet. Populating it requires threading the tool name
+        # from the MCP tools/call arguments into the signal — tracked as a
+        # follow-up. Until then, opting into "tool" is a no-op for metrics.
         return labels
 
     def record_signal(self, signal: InvocationSignal) -> None:

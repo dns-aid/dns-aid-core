@@ -115,10 +115,10 @@ class TestSanitizationHelpers:
     def test_sanitize_error_message_redacts_url_with_userinfo(self) -> None:
         msg = "Connection refused: https://leaked-user:leaked-pass@target.com:443/api"
         out = _sanitize_error_message(msg)
-        assert out is not None
-        assert "leaked-user" not in out
-        assert "leaked-pass" not in out
-        assert "target.com:443" in out
+        # Exact-match the redacted output: userinfo stripped, host:port/path
+        # preserved. (Exact equality avoids a substring-on-URL check, which
+        # is an incomplete-sanitization anti-pattern.)
+        assert out == "Connection refused: https://target.com:443/api"
 
     def test_sanitize_error_message_passthrough_when_clean(self) -> None:
         msg = "Plain error message with no URL"

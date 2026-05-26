@@ -48,6 +48,8 @@ def reset_otel_singleton():
 
             trace._TRACER_PROVIDER = ProxyTracerProvider()  # type: ignore[attr-defined]
         except (ImportError, AttributeError):
+            # opentelemetry absent or its internal attrs moved — nothing to
+            # reset in that case; the OTEL tests skip via pytestmark anyway.
             pass
 
     _reset_otel_globals()

@@ -38,7 +38,10 @@ try:
 
     _otel_available = True
 except ImportError:
-    pass
+    # opentelemetry is an optional dependency ([otel] extra). When absent,
+    # inject_otel_context() below becomes a no-op — propagation is simply
+    # not performed (FR-006 / FR-012).
+    _otel_available = False
 
 
 async def inject_otel_context(request: httpx.Request) -> None:
