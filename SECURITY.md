@@ -1,5 +1,11 @@
 # Security Policy
 
+## Scope
+
+This security policy covers vulnerabilities in this reference implementation.
+
+Protocol-level security considerations belong with the IETF draft: https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/.
+
 ## Supported Versions
 
 | Version | Supported          |

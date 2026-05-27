@@ -1,6 +1,6 @@
 # DNS-AID Demo Guide
 
-This guide demonstrates use of the DNS-AID reference implementation for agent discovery workflows. Perfect for conference calls, IETF presentations, and Linux Foundation demos.
+This guide demonstrates use of the DNS-AID reference implementation for agent discovery workflows. The underlying specification is developed at the IETF (https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
 
 > **Version 0.6.0** - DNSSEC enforcement, DANE full certificate matching, Sigstore release signing, Route53/Cloudflare SVCB param demotion, JWS signatures for application-layer verification, Tier 1 Execution Telemetry SDK, and community rankings.
 
