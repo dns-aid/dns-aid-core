@@ -238,7 +238,7 @@ quickstart.md, contracts/, tasks.md.
 
 ### Fixed
 
-- **DDNS backend `list_records()` yield shape ([#137](https://github.com/infobloxopen/dns-aid-core/issues/137))**:
+- **DDNS backend `list_records()` yield shape ([#137](https://github.com/dns-aid/dns-aid-core/issues/137))**:
   `DDNSBackend.list_records()` previously yielded one dict per rdata with a
   singular `data: str(rdata)` key, diverging from every other backend
   (Route53, Cloudflare, NS1, Cloud DNS, BloxOne, NIOS, Mock) which yield
@@ -377,7 +377,7 @@ quickstart.md, contracts/, tasks.md.
   pattern with a per-CVE rationale comment; publicly acknowledged in
   `SECURITY.md` "Accepted dependency vulnerabilities" section with the
   full dispute context. Re-evaluation tracked at
-  [#141](https://github.com/infobloxopen/dns-aid-core/issues/141).
+  [#141](https://github.com/dns-aid/dns-aid-core/issues/141).
 
 ### Tests
 
@@ -1190,7 +1190,7 @@ Explicit version floors added to our `pyproject.toml` because upstream parents (
 
 ### Changed
 - **Neutral Branding** — Removed all personal domain references (`example.com`, `highvelocitynetworking.com`) from source, docs, and examples; replaced with `example.com` (RFC 2606)
-- **Repository URLs** — All URLs now point to `infobloxopen/dns-aid-core` (pyproject.toml, Dockerfile, CHANGELOG, docs)
+- **Repository URLs** — All URLs now point to `dns-aid/dns-aid-core` (pyproject.toml, Dockerfile, CHANGELOG, docs)
 - **Telemetry Push URL** — MCP server default is now `None`; configured via `DNS_AID_SDK_HTTP_PUSH_URL` env var
 - **AWS Zone ID** — Docstring examples use `ZEXAMPLEZONEID` placeholder instead of real zone ID
 
@@ -1518,39 +1518,39 @@ Explicit version floors added to our `pyproject.toml` because upstream parents (
 - [RFC 9460 - SVCB and HTTPS Resource Records](https://www.rfc-editor.org/rfc/rfc9460.html)
 - [RFC 4033-4035 - DNSSEC](https://www.rfc-editor.org/rfc/rfc4033.html)
 
-[Unreleased]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.4...HEAD
-[0.13.4]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.3...v0.13.4
-[0.13.3]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.2...v0.13.3
-[0.13.2]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.1...v0.13.2
-[0.13.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.0...v0.13.1
-[0.13.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.12.1...v0.13.0
-[0.12.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.12.0...v0.12.1
-[0.12.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.11.0...v0.12.0
-[0.11.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.10.1...v0.11.0
-[0.10.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.10.0...v0.10.1
-[0.10.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.9.0...v0.10.0
-[0.9.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.8.0...v0.9.0
-[0.8.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.7.3...v0.8.0
-[0.7.3]: https://github.com/infobloxopen/dns-aid-core/compare/v0.7.2...v0.7.3
-[0.7.2]: https://github.com/infobloxopen/dns-aid-core/compare/v0.7.1...v0.7.2
-[0.7.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.7.0...v0.7.1
-[0.7.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.9...v0.7.0
-[0.6.9]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.8...v0.6.9
-[0.6.8]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.7...v0.6.8
-[0.6.7]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.6...v0.6.7
-[0.6.6]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.5...v0.6.6
-[0.6.5]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.4...v0.6.5
-[0.6.4]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.3...v0.6.4
-[0.6.3]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.2...v0.6.3
-[0.6.2]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.1...v0.6.2
-[0.6.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.5.1...v0.6.0
-[0.5.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.5.0...v0.5.1
-[0.5.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.4.9...v0.5.0
-[0.4.9]: https://github.com/infobloxopen/dns-aid-core/compare/v0.4.8...v0.4.9
-[0.4.8]: https://github.com/infobloxopen/dns-aid-core/compare/v0.3.1...v0.4.8
-[0.3.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.3.1...v0.3.1
-[0.3.0]: https://github.com/infobloxopen/dns-aid-core/releases/tag/v0.3.1
-[0.2.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/infobloxopen/dns-aid-core/releases/tag/v0.1.0
+[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.4...HEAD
+[0.13.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.3...v0.13.4
+[0.13.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.2...v0.13.3
+[0.13.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.1...v0.13.2
+[0.13.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.0...v0.13.1
+[0.13.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.12.1...v0.13.0
+[0.12.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.12.0...v0.12.1
+[0.12.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.10.1...v0.11.0
+[0.10.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.7.3...v0.8.0
+[0.7.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.9...v0.7.0
+[0.6.9]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.8...v0.6.9
+[0.6.8]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.7...v0.6.8
+[0.6.7]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.6...v0.6.7
+[0.6.6]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.4.9...v0.5.0
+[0.4.9]: https://github.com/dns-aid/dns-aid-core/compare/v0.4.8...v0.4.9
+[0.4.8]: https://github.com/dns-aid/dns-aid-core/compare/v0.3.1...v0.4.8
+[0.3.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.3.1...v0.3.1
+[0.3.0]: https://github.com/dns-aid/dns-aid-core/releases/tag/v0.3.1
+[0.2.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/dns-aid/dns-aid-core/releases/tag/v0.1.0

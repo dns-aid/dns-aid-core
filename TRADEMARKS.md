@@ -28,7 +28,7 @@ If DNS-AID is accepted into a Linux Foundation foundation, this trademark policy
 
 ## Contact
 
-Questions about trademark usage: open a [GitHub Discussion](https://github.com/infobloxopen/dns-aid-core/discussions) or contact the project lead listed in [MAINTAINERS.md](MAINTAINERS.md).
+Questions about trademark usage: open a [GitHub Discussion](https://github.com/dns-aid/dns-aid-core/discussions) or contact the project lead listed in [MAINTAINERS.md](MAINTAINERS.md).
 
 ## Other marks referenced in this project
 

@@ -22,7 +22,7 @@ This guide will walk you through installing, configuring, and testing DNS-AID.
 
 ```bash
 # Clone the repository
-git clone https://github.com/infobloxopen/dns-aid-core.git
+git clone https://github.com/dns-aid/dns-aid-core.git
 cd dns-aid-core
 
 # Create virtual environment
