@@ -4,7 +4,7 @@
 """
 Fetch agent capability document from cap URI (IETF draft-compliant).
 
-Per IETF draft-mozleywilliams-dnsop-dnsaid-01, the SVCB record may contain
+Per IETF draft-mozleywilliams-dnsop-dnsaid-02, the SVCB record may contain
 a `cap` parameter with a URI pointing to a JSON capability document. This module
 fetches and parses that document.
 

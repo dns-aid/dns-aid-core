@@ -2,7 +2,7 @@
 
 ## Overview
 
-DNS-AID implements the IETF draft-mozleywilliams-dnsop-dnsaid-01 protocol for
+DNS-AID implements the IETF draft-mozleywilliams-dnsop-dnsaid-02 protocol for
 DNS-based agent discovery. This document covers the key architectural decisions.
 
 ---

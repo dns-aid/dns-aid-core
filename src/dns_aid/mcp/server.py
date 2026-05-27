@@ -5,7 +5,7 @@
 DNS-AID MCP Server.
 
 Provides MCP tools for AI agents to publish and discover other agents via DNS.
-Uses the DNS-AID protocol (IETF draft-mozleywilliams-dnsop-dnsaid-01).
+Uses the DNS-AID protocol (IETF draft-mozleywilliams-dnsop-dnsaid-02).
 
 Usage:
     # Run with stdio transport (default for MCP)
@@ -1930,7 +1930,7 @@ try:
                     "/ready": "Readiness check (GET)",
                 },
                 "documentation": "https://github.com/infobloxopen/dns-aid-core",
-                "specification": "IETF draft-mozleywilliams-dnsop-dnsaid-01",
+                "specification": "IETF draft-mozleywilliams-dnsop-dnsaid-02",
             }
         )
 

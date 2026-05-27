@@ -326,7 +326,7 @@ DCV is a stateless challenge/verify primitive that lets one party prove control 
 domain to another using a short-lived TXT record at `_agents-challenge.{domain}`.
 It implements [draft-ietf-dnsop-domain-verification-techniques-12](https://datatracker.ietf.org/doc/draft-ietf-dnsop-domain-verification-techniques/)
 plus the `bnd-req` binding extension from
-[draft-mozleywilliams-dnsop-dnsaid-01](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
+[draft-mozleywilliams-dnsop-dnsaid-02](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
 
 **Role split:**
 - *Challenger* — calls `issue()` and `verify()`; no DNS write credentials required.
@@ -761,7 +761,7 @@ async with InfobloxBloxOneBackend() as backend:
 | `INFOBLOX_DNS_VIEW` | No | `default` | DNS view name |
 | `INFOBLOX_BASE_URL` | No | `https://csp.infoblox.com` | API URL |
 
-**DNS-AID Compliance**: Infoblox UDDI is **not fully compliant** with the [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/). It only supports alias mode SVCB (priority 0) and lacks `alpn`, `port`, and `mandatory` parameters. For full compliance, use Route53Backend, InfobloxNIOSBackend, NS1Backend, or DDNSBackend.
+**DNS-AID Compliance**: Infoblox UDDI is **not fully compliant** with the [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/). It only supports alias mode SVCB (priority 0) and lacks `alpn`, `port`, and `mandatory` parameters. For full compliance, use Route53Backend, InfobloxNIOSBackend, NS1Backend, or DDNSBackend.
 
 ### InfobloxNIOSBackend
 
@@ -1837,6 +1837,6 @@ print(dns_aid.__version__)  # "0.6.0"
 ## See Also
 
 - [Getting Started Guide](getting-started.md)
-- [IETF Draft: DNS-AID](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/)
+- [IETF Draft: DNS-AID](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/)
 - [RFC 9460: SVCB Records](https://www.rfc-editor.org/rfc/rfc9460.html)
 - [GitHub Repository](https://github.com/infobloxopen/dns-aid-core)

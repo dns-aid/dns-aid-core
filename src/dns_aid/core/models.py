@@ -5,7 +5,7 @@
 Data models for DNS-AID.
 
 These models represent agents, discovery results, and DNS records
-as specified in IETF draft-mozleywilliams-dnsop-dnsaid-01.
+as specified in IETF draft-mozleywilliams-dnsop-dnsaid-02.
 """
 
 from __future__ import annotations

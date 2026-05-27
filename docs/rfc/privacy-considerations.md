@@ -1,6 +1,6 @@
 # Privacy Considerations
 
-This document describes the privacy considerations for DNS-AID (DNS-based Agent Identification and Discovery) as specified in [draft-mozleywilliams-dnsop-dnsaid-01](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/).
+This document describes the privacy considerations for DNS-AID (DNS-based Agent Identification and Discovery) as specified in [draft-mozleywilliams-dnsop-dnsaid-02](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/).
 
 ## 1. Privacy Model
 
