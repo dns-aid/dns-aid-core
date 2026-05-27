@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Repository moved to the vendor-neutral `dns-aid` GitHub organization** (`github.com/dns-aid/dns-aid-core`), ahead of Linux Foundation graduation. Previous `infobloxopen/dns-aid-core` URLs redirect automatically, so existing clones, links, and badges continue to work. Contributors should update their git remotes (`git remote set-url <remote> https://github.com/dns-aid/dns-aid-core.git`). The PyPI Trusted Publisher and MCP Registry namespace are being updated to match the new organization.
+
 ## [0.23.0] - 2026-05-26
 
 ### Added — Production-grade OpenTelemetry integration (spec 005)
