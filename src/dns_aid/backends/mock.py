@@ -202,7 +202,9 @@ class MockBackend(DNSBackend):
         """
         records: list[str] = []
         zone = agent.domain
-        name = f"_{agent.name}._{agent.protocol.value}._agents"
+        # draft-02: flat primary owner — relative record name is just the agent name.
+        name = agent.name
+        walkable_name = f"{agent.name}._agents"
 
         svcb_fqdn = await self.create_svcb_record(
             zone=zone,
@@ -223,6 +225,18 @@ class MockBackend(DNSBackend):
                 ttl=agent.ttl,
             )
             records.append(f"TXT {txt_fqdn}")
+
+        # Optional walkable AliasMode at {name}._agents.{domain}.
+        if agent.publish_walkable_alias:
+            walkable_fqdn = await self.create_svcb_record(
+                zone=zone,
+                name=walkable_name,
+                priority=0,  # AliasMode
+                target=agent.svcb_target,
+                params={},
+                ttl=agent.ttl,
+            )
+            records.append(f"SVCB(AliasMode) {walkable_fqdn}")
 
         return records
 

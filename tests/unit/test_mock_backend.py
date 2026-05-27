@@ -201,15 +201,15 @@ class TestMockBackend:
 
     @pytest.mark.asyncio
     async def test_publish_agent_helper(self, mock_backend: MockBackend, sample_agent):
-        """Test publish_agent convenience method."""
+        """Test publish_agent convenience method (draft-02 default writes walkable too)."""
         records = await mock_backend.publish_agent(sample_agent)
 
-        assert len(records) == 2
+        # SVCB primary + TXT companion + walkable AliasMode (draft-02 default-on)
+        assert len(records) == 3
         assert any("SVCB" in r for r in records)
         assert any("TXT" in r for r in records)
+        assert any("AliasMode" in r for r in records)
 
-        # Verify records created
-        svcb = mock_backend.get_svcb_record(
-            sample_agent.domain, f"_{sample_agent.name}._{sample_agent.protocol.value}._agents"
-        )
+        # Verify records created — flat primary owner under draft-02
+        svcb = mock_backend.get_svcb_record(sample_agent.domain, sample_agent.name)
         assert svcb is not None

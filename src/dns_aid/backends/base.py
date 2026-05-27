@@ -238,7 +238,11 @@ class DNSBackend(ABC):
         """
         records: list[str] = []
         zone = agent.domain
-        name = f"_{agent.name}._{agent.protocol.value}._agents"
+        # Under draft-02 the agent's primary owner is the flat name
+        # {name}.{domain}; the relative record name under the zone is
+        # just the agent name. PR 3a flips the wire-format default.
+        name = agent.name
+        walkable_name = f"{agent.name}._agents"
 
         all_params = agent.to_svcb_params()
         support = self.supports_private_svcb_keys
@@ -317,6 +321,30 @@ class DNSBackend(ABC):
                 ttl=agent.ttl,
             )
             records.append(f"TXT {txt_fqdn}")
+
+        # Optional walkable AliasMode at {name}._agents.{domain} pointing
+        # at the flat primary owner. Per draft-02 §Known Agent, operators
+        # MAY emit this record so DNS-SD-style consumers can enumerate.
+        # dns-aid-core publishes it by default; callers can suppress it
+        # by setting publish_walkable_alias=False on the AgentRecord.
+        if agent.publish_walkable_alias:
+            try:
+                walkable_fqdn = await self.create_svcb_record(
+                    zone=zone,
+                    name=walkable_name,
+                    priority=0,  # AliasMode
+                    target=agent.svcb_target,
+                    params={},
+                    ttl=agent.ttl,
+                )
+                records.append(f"SVCB(AliasMode) {walkable_fqdn}")
+            except Exception as exc:
+                logger.warning(
+                    "Walkable AliasMode write failed; continuing",
+                    backend=self.name,
+                    walkable_name=walkable_name,
+                    error=str(exc),
+                )
 
         logger.info(
             "Agent published successfully",

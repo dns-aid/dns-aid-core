@@ -166,7 +166,7 @@ class TestClientAuthIntegration:
 
         async with AgentClient(config=config) as client:
             client._http_client = httpx.AsyncClient(transport=transport)
-            with pytest.raises(ValueError, match="test-agent.*mcp.*example.com"):
+            with pytest.raises(ValueError, match="test-agent.*example.com"):
                 # Missing 'token' in credentials triggers ValueError
                 await client.invoke(
                     agent,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import shlex
 import time
 from typing import Any, Literal
@@ -203,9 +204,16 @@ async def discover(
 
     protocol = _normalize_protocol(protocol)
 
-    # Build query based on filters
+    # Build query based on filters. draft-02: the primary owner is a
+    # flat FQDN ({name}.{domain}); protocol is no longer in the
+    # FQDN — it lives in the bap/alpn SvcParam after resolution. The
+    # organization-level index keeps the underscored shape
+    # (_index._agents.{domain}) per draft-02 §Known Organization.
     if name and protocol:
-        query = f"_{name}._{protocol.value}._agents.{domain}"
+        # Known-agent query: flat draft-02 form. Legacy -01 form is
+        # tried as a fallback in _query_single_agent when
+        # DNS_AID_LEGACY_01_FALLBACK=1.
+        query = f"{name}.{domain}"
     elif protocol:
         query = f"_index._{protocol.value}._agents.{domain}"
     else:
@@ -314,21 +322,47 @@ async def _query_single_agent(
     name: str,
     protocol: Protocol,
 ) -> AgentRecord | None:
-    """Query DNS for a specific agent's SVCB record."""
-    fqdn = f"_{name}._{protocol.value}._agents.{domain}"
+    """Query DNS for a specific agent's SVCB record.
+
+    draft-02: tries the flat FQDN ({name}.{domain}) first. If that
+    returns no answer and ``DNS_AID_LEGACY_01_FALLBACK=1`` is set, also
+    tries the legacy -01 shape (_{name}._{protocol}._agents.{domain})
+    so consumers can still resolve publishers that haven't migrated.
+    """
+    fqdn = f"{name}.{domain}"
+    legacy_fqdn: str | None = None
+    if os.environ.get("DNS_AID_LEGACY_01_FALLBACK", "").lower() in ("1", "true", "yes"):
+        legacy_fqdn = f"_{name}._{protocol.value}._agents.{domain}"
 
     try:
         resolver = dns.asyncresolver.Resolver()
 
-        # Query SVCB record
-        # Note: dnspython uses type 64 for SVCB
-        try:
-            answers = await resolver.resolve(fqdn, "SVCB")
-        except dns.resolver.NoAnswer:
-            # Try HTTPS record as fallback (type 65)
+        # Query SVCB record. dnspython uses type 64 for SVCB.
+        # draft-02: try the flat FQDN first. On NoAnswer / NXDOMAIN
+        # try the legacy -01 shape if the back-compat env flag is set.
+        async def _try(name_to_query: str):
             try:
-                answers = await resolver.resolve(fqdn, "HTTPS")
+                return await resolver.resolve(name_to_query, "SVCB")
             except dns.resolver.NoAnswer:
+                # HTTPS record (type 65) is the protocol-specific alias
+                # of SVCB; some publishers may have used it instead.
+                return await resolver.resolve(name_to_query, "HTTPS")
+
+        try:
+            answers = await _try(fqdn)
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+            if legacy_fqdn is None:
+                return None
+            try:
+                logger.debug(
+                    "Flat FQDN returned no answer; trying legacy -01 fallback",
+                    fqdn=fqdn,
+                    legacy_fqdn=legacy_fqdn,
+                )
+                answers = await _try(legacy_fqdn)
+                # Hand the legacy FQDN downstream so logging is accurate.
+                fqdn = legacy_fqdn
+            except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
                 return None
 
         for rdata in answers:
@@ -776,25 +810,66 @@ def _parse_fqdn(fqdn: str) -> tuple[str | None, str | None]:
     """
     Parse agent name and protocol from a DNS-AID FQDN.
 
-    FQDN format: _{name}._{protocol}._agents.{domain}
+    Recognized shapes (in priority order):
+
+    1. Legacy -01 form ``_{name}._{protocol}._agents.{domain}`` — name
+       is the first label (sans leading underscore); protocol is the
+       second label (sans leading underscore).
+    2. Walkable AliasMode form ``{name}._agents.{domain}`` (draft-02) —
+       name is the label before ``._agents.``; protocol returns
+       ``None`` because draft-02 carries the protocol in the SVCB
+       SvcParams (``bap`` / ``alpn``), not in the FQDN.
+    3. Flat primary owner ``{name}.{domain}`` (draft-02) — name is the
+       first label; protocol returns ``None`` (same reason as above).
 
     Returns:
-        (name, protocol_str) or (None, None) if parsing fails.
+        ``(name, protocol_str)`` or ``(None, None)`` if the input
+        doesn't look like any recognized shape (e.g. single-label
+        strings).
     """
-    if not fqdn or not fqdn.startswith("_"):
+    if not fqdn:
         return None, None
 
-    parts = fqdn.split(".")
-    if len(parts) < 3:
+    # Legacy -01: _{name}._{protocol}._agents.{domain}
+    # Requires (a) leading underscore, (b) ._agents. infix, AND
+    # (c) parts[2] == "_agents" so the protocol label is correctly the
+    # second one (rejecting strings like "_booking._agents.example.com"
+    # which is the walkable shape with an erroneous underscore prefix).
+    if fqdn.startswith("_") and "._agents." in fqdn:
+        parts = fqdn.split(".")
+        if len(parts) < 4:
+            return None, None
+        name_part = parts[0]
+        protocol_part = parts[1]
+        agents_part = parts[2]
+        if (
+            not name_part.startswith("_")
+            or not protocol_part.startswith("_")
+            or agents_part != "_agents"
+        ):
+            return None, None
+        return name_part[1:], protocol_part[1:]
+
+    # Walkable AliasMode draft-02: {name}._agents.{domain}. The name
+    # must be a single DNS label without a leading underscore, and the
+    # domain portion must be non-empty (otherwise the string is
+    # malformed and we don't try to "parse" it).
+    if "._agents." in fqdn:
+        prefix, _, suffix = fqdn.partition("._agents.")
+        if prefix and suffix and "." not in prefix and not prefix.startswith("_"):
+            return prefix, None
         return None, None
 
-    name_part = parts[0]  # _name
-    protocol_part = parts[1]  # _protocol
+    # Flat draft-02: {name}.{domain}. We require at least three labels
+    # total ({name} + at least a two-label domain such as example.com)
+    # and the name must not start with an underscore, to avoid matching
+    # strings like "_a._b" or arbitrary short inputs.
+    if "." in fqdn:
+        first_label, _, rest = fqdn.partition(".")
+        if first_label and rest and "." in rest and not first_label.startswith("_"):
+            return first_label, None
 
-    if not name_part.startswith("_") or not protocol_part.startswith("_"):
-        return None, None
-
-    return name_part[1:], protocol_part[1:]
+    return None, None
 
 
 def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> None:
@@ -1200,46 +1275,54 @@ async def discover_at_fqdn(fqdn: str) -> AgentRecord | None:
     """
     Discover agent at a specific FQDN.
 
+    Accepts any of the three DNS-AID FQDN shapes (draft-02 flat,
+    draft-02 walkable, or legacy -01) and resolves the agent at it.
+    When the input doesn't carry a protocol (the two draft-02 shapes),
+    the discoverer attempts mcp first, then a2a.
+
     Args:
-        fqdn: Full DNS-AID record name (e.g., "_chat._a2a._agents.example.com")
+        fqdn: Full DNS-AID record name. Examples:
+            - ``"chat.example.com"`` (draft-02 flat)
+            - ``"chat._agents.example.com"`` (draft-02 walkable)
+            - ``"_chat._a2a._agents.example.com"`` (legacy -01)
 
     Returns:
-        AgentRecord if found, None otherwise
+        AgentRecord if found, None otherwise.
     """
-    # Parse FQDN to extract components
-    # Format: _{name}._{protocol}._agents.{domain}
-    parts = fqdn.split(".")
-
-    if len(parts) < 4:
+    name, protocol_str = _parse_fqdn(fqdn)
+    if not name:
         logger.error("Invalid DNS-AID FQDN format", fqdn=fqdn)
         return None
 
-    # Extract components
-    name_part = parts[0]  # _name
-    protocol_part = parts[1]  # _protocol
+    # Derive domain from the FQDN: everything after the name + any
+    # walkable/legacy infix labels.
+    if "._agents." in fqdn:
+        domain = fqdn.split("._agents.", 1)[1]
+    else:
+        # Flat shape: domain is everything after the first label.
+        domain = fqdn.split(".", 1)[1] if "." in fqdn else ""
 
-    if not name_part.startswith("_") or not protocol_part.startswith("_"):
-        logger.error("Invalid DNS-AID FQDN format", fqdn=fqdn)
+    if not domain:
+        logger.error("Could not extract domain from FQDN", fqdn=fqdn)
         return None
 
-    name = name_part[1:]  # Remove leading underscore
-    protocol_str = protocol_part[1:]  # Remove leading underscore
+    # For the legacy form the protocol is in the FQDN; use it directly.
+    if protocol_str:
+        try:
+            protocol = Protocol(protocol_str)
+        except ValueError:
+            logger.error("Unknown protocol", protocol=protocol_str)
+            return None
+        return await _query_single_agent(domain, name, protocol)
 
-    # Find _agents marker to determine domain
-    try:
-        agents_idx = parts.index("_agents")
-        domain = ".".join(parts[agents_idx + 1 :])
-    except ValueError:
-        logger.error("Missing _agents in FQDN", fqdn=fqdn)
-        return None
-
-    try:
-        protocol = Protocol(protocol_str)
-    except ValueError:
-        logger.error("Unknown protocol", protocol=protocol_str)
-        return None
-
-    return await _query_single_agent(domain, name, protocol)
+    # draft-02 shapes don't carry protocol in the FQDN. Try mcp then
+    # a2a; the SVCB record's alpn/bap params will reveal the actual
+    # protocol on the discovered AgentRecord.
+    for proto in (Protocol.MCP, Protocol.A2A):
+        result = await _query_single_agent(domain, name, proto)
+        if result is not None:
+            return result
+    return None
 
 
 async def _verify_agent_signatures(

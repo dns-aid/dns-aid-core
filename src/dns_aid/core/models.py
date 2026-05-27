@@ -466,6 +466,14 @@ class AgentRecord(BaseModel):
     # DNS settings
     ttl: int = Field(default=3600, ge=30, le=86400, description="Time-to-live in seconds")
 
+    publish_walkable_alias: bool = Field(
+        default=True,
+        description="Whether to publish the optional walkable AliasMode SVCB record at "
+        "{name}._agents.{domain} pointing at the flat primary owner. Per draft-02 §Known "
+        "Agent, this is operator-optional. dns-aid-core publishes it by default so "
+        "DNS-SD-style enumeration crawlers can discover the agent; set False to suppress.",
+    )
+
     # Optional direct endpoint (overrides target_host:port for HTTP index agents)
     endpoint_override: str | None = Field(
         default=None, description="Direct endpoint URL (e.g., 'https://booking.example.com/mcp')"
@@ -593,10 +601,40 @@ class AgentRecord(BaseModel):
     @property
     def fqdn(self) -> str:
         """
-        Fully qualified domain name for DNS-AID record.
+        Fully qualified domain name for the agent's primary owner record.
 
-        Format: _{name}._{protocol}._agents.{domain}
-        Per IETF draft section 3.1
+        Returns the flat form ``{name}.{domain}`` per draft-02. The agent
+        protocol is no longer part of the FQDN under -02 — it lives in
+        the ``bap`` SvcParamKey (or ``alpn`` when only one protocol is
+        supported). The flat FQDN is valid as an x.509 SAN dNSName.
+
+        For the optional walkable AliasMode form, see ``walkable_fqdn``.
+        For the legacy -01 form, see ``legacy_fqdn``.
+        """
+        return f"{self.name}.{self.domain}"
+
+    @property
+    def walkable_fqdn(self) -> str:
+        """
+        Optional walkable AliasMode FQDN at ``{name}._agents.{domain}``.
+
+        Per draft-02 §Known Agent, publishers MAY emit an SVCB AliasMode
+        record at this name pointing at the flat primary owner so that
+        DNS-SD-style consumers and enumeration crawlers can discover the
+        agent. dns-aid-core's publisher writes this record by default;
+        operators can disable it via ``SDKConfig`` if a deployment
+        doesn't need walkable enumeration.
+        """
+        return f"{self.name}._agents.{self.domain}"
+
+    @property
+    def legacy_fqdn(self) -> str:
+        """
+        Backwards-compatible -01 FQDN ``_{name}._{protocol}._agents.{domain}``.
+
+        Used only by the legacy-fallback discovery path when the env
+        flag ``DNS_AID_LEGACY_01_FALLBACK=1`` is set. Not used for
+        publishing under -02.
         """
         return f"_{self.name}._{self.protocol.value}._agents.{self.domain}"
 
