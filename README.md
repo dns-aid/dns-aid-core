@@ -9,6 +9,8 @@
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
 [![PyPI](https://img.shields.io/pypi/v/dns-aid)](https://pypi.org/project/dns-aid/)
 
+<!-- mcp-name: io.github.dns-aid/dns-aid -->
+
 **DNS-based Agent Identification and Discovery**
 
 Reference implementation of the DNS-AID specification, developed at the IETF: https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/.
