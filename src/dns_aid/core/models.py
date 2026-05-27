@@ -144,7 +144,15 @@ class SvcbRecord(BaseModel):
         description="Capability document URI mapped to the DNS-AID 'cap' SVCB parameter",
     )
     cap_sha256: str | None = Field(default=None, description="SHA-256 digest for the cap URI")
-    bap: list[str] = Field(default_factory=list, description="Bulk application protocols")
+    bap: str | None = Field(
+        default=None,
+        description="Bulk Agent Protocol (draft-02 §FutureWork). Carries a single "
+        "versioned agent-protocol identifier (e.g. 'mcp2.1', 'a2a1.0') per SVCB "
+        "record. Experimental in draft-02 — alpn remains the canonical protocol "
+        "carrier; bap adds version information when present. Multi-protocol "
+        "agents publish multiple SVCB records at the same flat owner, each with "
+        "its own alpn and (optionally) bap.",
+    )
     policy_uri: str | None = Field(default=None, description="Agent policy URI")
     realm: str | None = Field(default=None, description="Opaque authz realm identifier")
     sig: str | None = Field(default=None, description="JWS signature for the record")
@@ -204,7 +212,7 @@ class SvcbRecord(BaseModel):
         if self.cap_sha256:
             params[_svcb_param_key("cap-sha256")] = self.cap_sha256
         if self.bap:
-            params[_svcb_param_key("bap")] = ",".join(self.bap)
+            params[_svcb_param_key("bap")] = self.bap
         if self.policy_uri:
             params[_svcb_param_key("policy")] = self.policy_uri
         if self.realm:
@@ -314,10 +322,16 @@ class AgentRecord(BaseModel):
         "capability descriptor it prefers 'cap' (explicit locator) and falls back to "
         "reconstructing https://<svcb-target>/.well-known/<well_known_path>.",
     )
-    bap: list[str] = Field(
-        default_factory=list,
-        description="DNS-AID Application Protocols with versions understood by the endpoint "
-        "(e.g., ['mcp/1', 'a2a/1']). Distinct from transport-level alpn per draft Section 4.4.3.",
+    bap: str | None = Field(
+        default=None,
+        description="Bulk Agent Protocol — single versioned agent-protocol "
+        "identifier (e.g. 'mcp2.1', 'a2a1.0') for this SVCB record. Per "
+        "draft-02 §FutureWork (Bulk Agent Protocol) this is experimental; "
+        "the canonical protocol carrier remains 'alpn'. bap adds version "
+        "information when present. Multi-protocol agents are published as "
+        "multiple AgentRecord instances at the same flat owner name, each "
+        "with its own alpn and (optionally) bap — NOT as a comma-separated "
+        "list on one record.",
     )
     policy_uri: str | None = Field(
         default=None,

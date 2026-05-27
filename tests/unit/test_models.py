@@ -141,7 +141,7 @@ class TestAgentRecord:
             target_host="mcp.example.com",
             cap_uri="https://mcp.example.com/.well-known/agent-cap.json",
             cap_sha256="abc123base64url",
-            bap=["mcp/1", "a2a/1"],
+            bap="mcp2.1",
             policy_uri="https://example.com/agent-policy",
             realm="production",
         )
@@ -151,7 +151,7 @@ class TestAgentRecord:
         # Default: keyNNNNN format per RFC 9460
         assert params["key65400"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert params["key65401"] == "abc123base64url"
-        assert params["key65402"] == "mcp/1,a2a/1"
+        assert params["key65402"] == "mcp2.1"  # scalar bap per draft-02 §FutureWork
         assert params["key65403"] == "https://example.com/agent-policy"
         assert params["key65404"] == "production"
         # Standard params still present
@@ -170,7 +170,7 @@ class TestAgentRecord:
             target_host="mcp.example.com",
             cap_uri="https://mcp.example.com/.well-known/agent-cap.json",
             cap_sha256="abc123base64url",
-            bap=["mcp/1", "a2a/1"],
+            bap="mcp2.1",
             policy_uri="https://example.com/agent-policy",
             realm="production",
         )
@@ -180,7 +180,7 @@ class TestAgentRecord:
 
         assert params["cap"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert params["cap-sha256"] == "abc123base64url"
-        assert params["bap"] == "mcp/1,a2a/1"
+        assert params["bap"] == "mcp2.1"
         assert params["policy"] == "https://example.com/agent-policy"
         assert params["realm"] == "production"
 
@@ -239,6 +239,32 @@ class TestAgentRecord:
 
         assert params["key65401"] == "dGVzdGhhc2g"
         assert "key65400" not in params
+
+    def test_svcb_params_bap_emits_as_scalar(self):
+        """draft-02 §FutureWork: bap is a single versioned protocol per record."""
+        agent = AgentRecord(
+            name="booking",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+            bap="mcp2.1",
+        )
+        params = agent.to_svcb_params()
+        # No comma, no list — emitted exactly as the scalar string.
+        assert params["key65402"] == "mcp2.1"
+        assert "," not in params["key65402"]
+
+    def test_svcb_params_bap_absent_when_none(self):
+        """When bap is unset (None) the key65402 param is not emitted."""
+        agent = AgentRecord(
+            name="booking",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+        )
+        params = agent.to_svcb_params()
+        assert "key65402" not in params
+        assert "bap" not in params
 
     def test_svcb_params_with_well_known_path(self):
         """Test draft-02 `well-known` SvcParamKey is emitted at key65409."""

@@ -214,7 +214,7 @@ class TestA2AAgentCard:
             "description": "Payment workflows",
             "ttl": 3600,
             "cap_uri": "https://a2a.example.com/.well-known/agent-card.json",
-            "bap": ["a2a/1"],
+            "bap": "a2a1.0",
         }
 
     def test_to_publish_params_respects_overrides(self) -> None:
@@ -273,7 +273,7 @@ class TestPublishAgentCard:
             description=None,
             ttl=30,
             cap_uri="https://a2a.example.com/.well-known/agent-card.json",
-            bap=["a2a/1"],
+            bap="a2a1.0",
             backend=None,
         )
 

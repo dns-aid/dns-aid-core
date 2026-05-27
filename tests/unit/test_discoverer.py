@@ -765,7 +765,12 @@ class TestDiscoveryWithCapUri:
 
     @pytest.mark.asyncio
     async def test_discovery_extracts_bap_and_policy(self):
-        """Test that bap and policy_uri are extracted from SVCB."""
+        """Test that bap and policy_uri are extracted from SVCB.
+
+        Per draft-02 §FutureWork (Bulk Agent Protocol), bap is scalar.
+        The discoverer accepts a pre-draft-02 comma-separated value and
+        collapses to the first entry, preserving a sensible scalar.
+        """
         mock_rdata = MagicMock()
         mock_rdata.target = dns.name.from_text("mcp.example.com.")
         mock_rdata.priority = 1
@@ -773,7 +778,7 @@ class TestDiscoveryWithCapUri:
         mock_rdata.params = {}
         mock_rdata.__str__ = lambda self: (
             '1 mcp.example.com. alpn="mcp" port="443" '
-            'bap="mcp,a2a" policy="https://example.com/policy" realm="staging"'
+            'bap="mcp2.1" policy="https://example.com/policy" realm="staging"'
         )
 
         mock_answers = MagicMock()
@@ -798,9 +803,45 @@ class TestDiscoveryWithCapUri:
             agent = await _query_single_agent("example.com", "chat", Protocol.MCP)
 
         assert agent is not None
-        assert agent.bap == ["mcp", "a2a"]
+        assert agent.bap == "mcp2.1"
         assert agent.policy_uri == "https://example.com/policy"
         assert agent.realm == "staging"
+
+    @pytest.mark.asyncio
+    async def test_discovery_collapses_legacy_comma_bap_to_scalar(self):
+        """Pre-draft-02 publishers may have written bap as a comma-separated
+        list. The discoverer takes the first value to preserve a sensible
+        scalar (per draft-02 §FutureWork — Bulk Agent Protocol is scalar)."""
+        mock_rdata = MagicMock()
+        mock_rdata.target = dns.name.from_text("mcp.example.com.")
+        mock_rdata.priority = 1
+        mock_rdata.port = 443
+        mock_rdata.params = {}
+        mock_rdata.__str__ = lambda self: (
+            '1 mcp.example.com. alpn="mcp" port="443" bap="mcp/1,a2a/1"'
+        )
+        mock_answers = MagicMock()
+        mock_answers.__iter__ = lambda self: iter([mock_rdata])
+        mock_resolver = MagicMock()
+        mock_resolver.resolve = AsyncMock(return_value=mock_answers)
+
+        with (
+            patch(
+                "dns_aid.core.discoverer.dns.asyncresolver.Resolver",
+                return_value=mock_resolver,
+            ),
+            patch(
+                "dns_aid.core.discoverer._query_capabilities",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            from dns_aid.core.discoverer import _query_single_agent
+
+            agent = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert agent is not None
+        assert agent.bap == "mcp/1"
 
     @pytest.mark.asyncio
     async def test_discovery_extracts_connect_fields(self):

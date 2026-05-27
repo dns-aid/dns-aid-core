@@ -408,8 +408,12 @@ async def _query_single_agent(
             cap_uri = custom_params.get("cap")
             cap_sha256 = custom_params.get("cap-sha256")
             well_known_path = custom_params.get("well-known")
-            bap_str = custom_params.get("bap", "")
-            bap = [b.strip() for b in bap_str.split(",") if b.strip()] if bap_str else []
+            # Under draft-02 §FutureWork (Bulk Agent Protocol), `bap` carries
+            # a single versioned protocol identifier per record (e.g., "mcp2.1").
+            # Pre-PR 4 records may have a comma-separated list; in that case we
+            # take the first value to preserve a sensible scalar.
+            bap_raw = custom_params.get("bap")
+            bap = bap_raw.split(",")[0].strip() if bap_raw else None
             policy_uri = custom_params.get("policy")
             realm = custom_params.get("realm")
             connect_class = custom_params.get("connect-class")
