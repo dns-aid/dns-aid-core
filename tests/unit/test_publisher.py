@@ -8,6 +8,7 @@ import pytest
 from dns_aid.backends.mock import MockBackend
 from dns_aid.core.models import Protocol
 from dns_aid.core.publisher import publish, unpublish
+from dns_aid.utils.validation import ValidationError
 
 
 class TestPublish:
@@ -228,6 +229,97 @@ class TestPublish:
             == "arn:aws:vpc-lattice:us-east-1:123456789012:service/svc-123"
         )
         assert svcb["params"]["key65408"] == "https://overlay.example.com/.well-known/agent-connect"
+
+
+class TestPublishWellKnown:
+    """Tests for the draft-02 `well-known` SvcParamKey on the publish path."""
+
+    @pytest.mark.asyncio
+    async def test_publish_with_well_known_path(self, mock_backend: MockBackend):
+        """Setting well_known_path emits key65409 on the SVCB record."""
+        result = await publish(
+            name="booking",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="booking.example.com",
+            well_known_path="agent-card.json",
+            backend=mock_backend,
+        )
+        assert result.success is True
+        assert result.agent.well_known_path == "agent-card.json"
+
+        svcb = mock_backend.get_svcb_record("example.com", "_booking._mcp._agents")
+        assert svcb is not None
+        assert svcb["params"]["key65409"] == "agent-card.json"
+
+    @pytest.mark.asyncio
+    async def test_publish_cap_and_well_known_coexist(self, mock_backend: MockBackend):
+        """`cap` and `well-known` are independent — both may be set on one record."""
+        result = await publish(
+            name="booking",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="booking.example.com",
+            cap_uri="urn:example:agent-cap:abc",
+            cap_sha256="dGVzdGhhc2g",
+            well_known_path="agent-card.json",
+            backend=mock_backend,
+        )
+        assert result.success is True
+        assert result.agent.cap_uri == "urn:example:agent-cap:abc"
+        assert result.agent.well_known_path == "agent-card.json"
+
+        svcb = mock_backend.get_svcb_record("example.com", "_booking._mcp._agents")
+        assert svcb is not None
+        assert svcb["params"]["key65400"] == "urn:example:agent-cap:abc"
+        assert svcb["params"]["key65401"] == "dGVzdGhhc2g"
+        assert svcb["params"]["key65409"] == "agent-card.json"
+
+
+class TestPublishTargetUnderscoreValidation:
+    """Tests for the draft-02 §Known-Organization no-underscore-in-target rule."""
+
+    @pytest.mark.asyncio
+    async def test_underscored_endpoint_rejected_by_default(self, mock_backend: MockBackend):
+        """Underscored TargetName fails publish unless explicitly allowed."""
+        with pytest.raises(ValidationError) as exc:
+            await publish(
+                name="chat",
+                domain="example.com",
+                protocol="a2a",
+                endpoint="_chat.example.com",
+                backend=mock_backend,
+            )
+        assert exc.value.field == "target"
+
+    @pytest.mark.asyncio
+    async def test_underscored_endpoint_allowed_with_flag(self, mock_backend: MockBackend, caplog):
+        """allow_underscore_target=True downgrades to a warning and proceeds."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result = await publish(
+                name="chat",
+                domain="example.com",
+                protocol="a2a",
+                endpoint="_chat.internal.example",
+                backend=mock_backend,
+                allow_underscore_target=True,
+            )
+        assert result.success is True
+        assert any("_chat" in record.message for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_clean_endpoint_passes(self, mock_backend: MockBackend):
+        """A normal hostname publishes without warnings or errors."""
+        result = await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+        )
+        assert result.success is True
 
 
 class TestUnpublish:

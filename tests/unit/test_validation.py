@@ -14,6 +14,7 @@ from dns_aid.utils.validation import (
     validate_domain,
     validate_endpoint,
     validate_fqdn,
+    validate_no_underscore_in_target,
     validate_port,
     validate_protocol,
     validate_ttl,
@@ -336,3 +337,59 @@ class TestValidateBackend:
         with pytest.raises(ValidationError) as exc:
             validate_backend("")
         assert exc.value.field == "backend"
+
+
+class TestValidateNoUnderscoreInTarget:
+    """Tests for the SVCB TargetName no-underscore rule (draft-02 §Known Organization)."""
+
+    def test_clean_target_passes(self):
+        assert (
+            validate_no_underscore_in_target("agent-index.example.com") == "agent-index.example.com"
+        )
+
+    def test_trailing_dot_tolerated(self):
+        assert (
+            validate_no_underscore_in_target("agent-index.example.com.")
+            == "agent-index.example.com."
+        )
+
+    def test_label_starting_with_underscore_rejected(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_no_underscore_in_target("_index.example.com")
+        assert exc.value.field == "target"
+        assert "_index" in str(exc.value)
+
+    def test_label_containing_underscore_rejected(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_no_underscore_in_target("agent_index.example.com")
+        assert exc.value.field == "target"
+        assert "agent_index" in str(exc.value)
+
+    def test_multiple_underscored_labels_all_reported(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_no_underscore_in_target("_a._b.example.com")
+        msg = str(exc.value)
+        assert "_a" in msg
+        assert "_b" in msg
+
+    def test_allow_underscore_downgrades_to_warning(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result = validate_no_underscore_in_target("_index.example.com", allow_underscore=True)
+        assert result == "_index.example.com"
+        assert any("_index" in record.message for record in caplog.records)
+        assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+    def test_allow_underscore_on_clean_target_is_silent(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result = validate_no_underscore_in_target("clean.example.com", allow_underscore=True)
+        assert result == "clean.example.com"
+        assert not caplog.records
+
+    def test_empty_target_raises_regardless_of_flag(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_no_underscore_in_target("", allow_underscore=True)
+        assert exc.value.field == "target"

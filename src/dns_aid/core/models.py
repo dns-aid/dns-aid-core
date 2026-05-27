@@ -18,9 +18,16 @@ from pydantic import BaseModel, Field, field_validator
 
 from dns_aid.utils.validation import validate_connect_class
 
-# DNS-AID custom SVCB param key mapping (IETF draft-01, Section 4.4.3)
+# DNS-AID custom SVCB param key mapping (IETF draft-02 §4 IANA Considerations).
 # These use the RFC 9460 Private Use range (65280-65534).
 # Once IANA assigns official SvcParamKey numbers, update these values.
+#
+# Six of the entries below (cap, cap-sha256, bap, policy, realm, well-known)
+# correspond to keys that draft-02 requests IANA register normatively. The
+# remaining four (sig, connect-class, connect-meta, enroll-uri) are not in
+# the draft-02 normative set; they back features discussed in -02 §FutureWork
+# or shipping in dns-aid-core as extensions and remain at private-use code
+# points pending a follow-up discussion.
 DNS_AID_KEY_MAP: dict[str, str] = {
     "cap": "key65400",
     "cap-sha256": "key65401",
@@ -31,6 +38,7 @@ DNS_AID_KEY_MAP: dict[str, str] = {
     "connect-class": "key65406",
     "connect-meta": "key65407",
     "enroll-uri": "key65408",
+    "well-known": "key65409",
 }
 
 DNS_AID_KEY_MAP_REVERSE: dict[str, str] = {v: k for k, v in DNS_AID_KEY_MAP.items()}
@@ -155,6 +163,12 @@ class SvcbRecord(BaseModel):
         max_length=2048,
         description="Managed enrollment URI required before direct connection",
     )
+    well_known_path: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="RFC 8615 well-known path suffix mapped to the DNS-AID 'well-known' "
+        "SvcParamKey (per draft-02). Independent of 'uri'/'cap'; both may be present.",
+    )
 
     @field_validator("connect_class", mode="before")
     @classmethod
@@ -203,6 +217,8 @@ class SvcbRecord(BaseModel):
             params[_svcb_param_key("connect-meta")] = self.connect_meta
         if self.enroll_uri:
             params[_svcb_param_key("enroll-uri")] = self.enroll_uri
+        if self.well_known_path:
+            params[_svcb_param_key("well-known")] = self.well_known_path
         return params
 
 
@@ -282,12 +298,21 @@ class AgentRecord(BaseModel):
     #     add custom keys to the mandatory list for downgrade safety.
     cap_uri: str | None = Field(
         default=None,
-        description="URI or URN to capability descriptor (per DNS-AID draft Section 4.4.3 'cap')",
+        description="URI, URN, or compact JSON-Ref locator for the capability descriptor "
+        "(per draft-02 'cap' SvcParamKey)",
     )
     cap_sha256: str | None = Field(
         default=None,
-        description="Base64url-encoded SHA-256 digest of the capability descriptor "
-        "for integrity checks and cache revalidation (per DNS-AID draft 'cap-sha256')",
+        description="Base64url-encoded SHA-256 digest of the canonical capability descriptor "
+        "for integrity checks and cache revalidation (per draft-02 'cap-sha256' SvcParamKey)",
+    )
+    well_known_path: str | None = Field(
+        default=None,
+        description="RFC 8615 well-known path suffix (e.g. 'agent-card.json') under "
+        "/.well-known/ on the SVCB target's host. Per draft-02 'well-known' SvcParamKey. "
+        "Independent of 'cap'; both may be present. When dns-aid-core fetches a "
+        "capability descriptor it prefers 'cap' (explicit locator) and falls back to "
+        "reconstructing https://<svcb-target>/.well-known/<well_known_path>.",
     )
     bap: list[str] = Field(
         default_factory=list,
@@ -329,10 +354,11 @@ class AgentRecord(BaseModel):
 
     # Capability source tracking
     capability_source: (
-        Literal["cap_uri", "agent_card", "http_index", "txt_fallback", "none"] | None
+        Literal["cap_uri", "well_known", "agent_card", "http_index", "txt_fallback", "none"] | None
     ) = Field(
         default=None,
         description="Where capabilities were sourced from: 'cap_uri' (SVCB cap param), "
+        "'well_known' (SVCB well-known param, reconstructed against the target host), "
         "'agent_card' (A2A /.well-known/agent-card.json skills), "
         "'http_index' (HTTP index capabilities), "
         "'txt_fallback' (TXT record), or 'none'",
@@ -477,6 +503,7 @@ class AgentRecord(BaseModel):
             connect_class=self.connect_class,
             connect_meta=self.connect_meta,
             enroll_uri=self.enroll_uri,
+            well_known_path=self.well_known_path,
         )
 
     def to_svcb_params(self) -> dict[str, str]:

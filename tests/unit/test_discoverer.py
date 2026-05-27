@@ -550,6 +550,29 @@ class TestParseSvcbCustomParams:
         assert params["cap-sha256"] == "abc123base64url"
         assert params["cap"] == "https://example.com/cap.json"
 
+    def test_parses_well_known(self):
+        """draft-02 `well-known` SvcParamKey is recognized in string form."""
+        svcb_text = '1 mcp.example.com. alpn="mcp" port="443" well-known="agent-card.json"'
+        params = _parse_svcb_custom_params(svcb_text)
+        assert params["well-known"] == "agent-card.json"
+
+    def test_parses_well_known_via_keynnnnn(self):
+        """`key65409` resolves back to the `well-known` string name."""
+        svcb_text = '1 mcp.example.com. alpn="mcp" port="443" key65409="agent-card.json"'
+        params = _parse_svcb_custom_params(svcb_text)
+        assert params["well-known"] == "agent-card.json"
+
+    def test_well_known_and_cap_coexist(self):
+        """`cap` and `well-known` are independent keys; both must be parsed when present."""
+        svcb_text = (
+            '1 mcp.example.com. alpn="mcp" port="443" '
+            'cap="urn:example:agent-cap:abc" '
+            'well-known="agent-card.json"'
+        )
+        params = _parse_svcb_custom_params(svcb_text)
+        assert params["cap"] == "urn:example:agent-cap:abc"
+        assert params["well-known"] == "agent-card.json"
+
     def test_empty_svcb_text(self):
         params = _parse_svcb_custom_params("")
         assert params == {}

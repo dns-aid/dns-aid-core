@@ -79,6 +79,7 @@ async def publish(
     backend: DNSBackend | None = None,
     cap_uri: str | None = None,
     cap_sha256: str | None = None,
+    well_known_path: str | None = None,
     bap: list[str] | None = None,
     policy_uri: str | None = None,
     realm: str | None = None,
@@ -89,6 +90,7 @@ async def publish(
     ipv6_hint: str | None = None,
     sign: bool = False,
     private_key_path: str | None = None,
+    allow_underscore_target: bool = False,
 ) -> PublishResult:
     """
     Publish an AI agent to DNS using DNS-AID protocol.
@@ -109,8 +111,15 @@ async def publish(
         category: Agent category (e.g., "network", "security")
         ttl: DNS record TTL in seconds
         backend: DNS backend to use (defaults to global backend)
-        cap_uri: URI to capability document (DNS-AID draft-compliant)
+        cap_uri: URI, URN, or compact JSON-Ref locator for the capability
+            descriptor (DNS-AID draft-02 'cap' SvcParamKey)
         cap_sha256: Base64url-encoded SHA-256 digest of the capability descriptor
+            (DNS-AID draft-02 'cap-sha256' SvcParamKey)
+        well_known_path: RFC 8615 well-known path suffix (e.g., 'agent-card.json')
+            for the DNS-AID draft-02 'well-known' SvcParamKey. Independent of
+            cap_uri; both may be set. Consumers prefer cap_uri when both are
+            present and fall back to reconstructing
+            https://<svcb-target>/.well-known/<well_known_path>.
         bap: Supported bulk agent protocols (e.g., ["mcp", "a2a"])
         policy_uri: URI to agent policy document
         realm: Multi-tenant scope identifier (e.g., "production")
@@ -121,6 +130,13 @@ async def publish(
         ipv6_hint: IPv6 address hints for SVCB record (RFC 9460 key 6)
         sign: If True, sign the record with JWS (requires private_key_path)
         private_key_path: Path to EC P-256 private key PEM file for signing
+        allow_underscore_target: If True, downgrade a TargetName-contains-
+            underscore violation from an error to a warning. Per
+            draft-mozleywilliams-dnsop-dnsaid-02 §Known Organization, SVCB
+            TargetNames reached over TLS with publicly-issued x.509 certs
+            MUST NOT contain underscores. dns-aid-core enforces this by
+            default; set this flag for internal-only deployments where the
+            target is not behind public PKI.
 
     Returns:
         PublishResult with created records
@@ -141,6 +157,14 @@ async def publish(
     # Normalize protocol to enum
     if isinstance(protocol, str):
         protocol = Protocol(protocol.lower())
+
+    # Enforce draft-02 §Known Organization: the SVCB TargetName MUST NOT
+    # contain underscores when reached over TLS with a public x.509 cert.
+    # Strict-by-default; the allow_underscore_target flag downgrades to a
+    # warning for internal-only deployments.
+    from dns_aid.utils.validation import validate_no_underscore_in_target
+
+    validate_no_underscore_in_target(endpoint, allow_underscore=allow_underscore_target)
 
     # Generate JWS signature if requested
     sig = None
@@ -182,6 +206,7 @@ async def publish(
         ttl=ttl,
         cap_uri=cap_uri,
         cap_sha256=cap_sha256,
+        well_known_path=well_known_path,
         bap=bap or [],
         policy_uri=policy_uri,
         realm=realm,

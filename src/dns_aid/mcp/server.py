@@ -239,6 +239,7 @@ def publish_agent_to_dns(
     update_index: bool = True,
     cap_uri: str | None = None,
     cap_sha256: str | None = None,
+    well_known_path: str | None = None,
     bap: list[str] | None = None,
     policy_uri: str | None = None,
     realm: str | None = None,
@@ -247,6 +248,7 @@ def publish_agent_to_dns(
     enroll_uri: str | None = None,
     ipv4_hint: list[str] | None = None,
     ipv6_hint: list[str] | None = None,
+    allow_underscore_target: bool = False,
 ) -> dict:
     """
     Publish an AI agent to DNS using DNS-AID protocol.
@@ -279,6 +281,11 @@ def publish_agent_to_dns(
         cap_sha256: Base64url-encoded SHA-256 digest of the capability descriptor
             for integrity checks and cache revalidation. Included in the SVCB record
             as a `cap-sha256` parameter.
+        well_known_path: RFC 8615 well-known path suffix (e.g., "agent-card.json")
+            for the DNS-AID draft-02 `well-known` SvcParamKey. Independent of
+            cap_uri; both may be set. Consumers prefer cap_uri when both are present
+            and fall back to reconstructing
+            https://<svcb-target>/.well-known/<well_known_path>.
         bap: Supported bulk agent protocols (e.g., ["mcp", "a2a"]). Included in
             the SVCB record as a `bap` parameter.
         policy_uri: URI to agent policy document. Included in the SVCB record as
@@ -289,6 +296,12 @@ def publish_agent_to_dns(
             Eliminates extra A record lookup for the target hostname.
         ipv6_hint: IPv6 address hints for SVCB record (RFC 9460 key 6).
             Eliminates extra AAAA record lookup for the target hostname.
+        allow_underscore_target: When True, downgrade a "TargetName contains
+            underscored label" violation from an error to a warning. Per
+            draft-mozleywilliams-dnsop-dnsaid-02 §Known Organization, SVCB
+            TargetNames reached over TLS with publicly-issued x.509 certs
+            MUST NOT contain underscores. Set this only when the target is
+            internal-only and will not be reached over public PKI.
 
     Returns:
         dict with:
@@ -339,6 +352,7 @@ def publish_agent_to_dns(
             backend=dns_backend,
             cap_uri=cap_uri,
             cap_sha256=cap_sha256,
+            well_known_path=well_known_path,
             bap=bap,
             policy_uri=policy_uri,
             realm=realm,
@@ -347,6 +361,7 @@ def publish_agent_to_dns(
             enroll_uri=enroll_uri,
             ipv4_hint=ipv4_hint,
             ipv6_hint=ipv6_hint,
+            allow_underscore_target=allow_underscore_target,
         )
 
     try:
@@ -530,6 +545,7 @@ def discover_agents_via_dns(
                     "capability_source": agent.capability_source,
                     "cap_uri": agent.cap_uri,
                     "cap_sha256": agent.cap_sha256,
+                    "well_known_path": agent.well_known_path,
                     "bap": agent.bap if agent.bap else None,
                     "policy_uri": agent.policy_uri,
                     "realm": agent.realm,

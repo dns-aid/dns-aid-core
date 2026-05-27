@@ -461,3 +461,82 @@ def validate_backend(
         )
 
     return backend
+
+
+def validate_no_underscore_in_target(
+    target: str,
+    *,
+    allow_underscore: bool = False,
+) -> str:
+    """
+    Validate that an SVCB TargetName contains no underscored DNS labels.
+
+    Per draft-mozleywilliams-dnsop-dnsaid-02 §Known Organization, the
+    TargetName of an SVCB record that will be reached over TLS with a
+    publicly-issued x.509 certificate MUST NOT contain underscores. The
+    constraint exists because CA/Browser Forum Baseline Requirements and
+    RFC 5280 dNSName SANs both forbid underscored labels.
+
+    dns-aid-core applies this rule to all SVCB TargetNames on its publish
+    paths by default. Deployments where the target is internal-only and
+    will not be reached via public PKI (for example, a sandbox or
+    inside-the-perimeter service identified by a private CA-issued cert)
+    can pass ``allow_underscore=True`` to downgrade the failure into a
+    warning that is logged but not raised. The validator is still called
+    in that case so the log surfaces the deliberate exception.
+
+    Args:
+        target: The SVCB TargetName host (e.g. ``"chat.example.com"`` or
+            ``"agent-index.example.com."``). Trailing dots are tolerated.
+        allow_underscore: When True, downgrade a violation to a warning
+            log line and return the (unchanged) target instead of
+            raising.
+
+    Returns:
+        The target string, unchanged. (Returns rather than mutating so
+        callers can chain the call into existing pipelines.)
+
+    Raises:
+        ValidationError: If ``target`` contains a label starting with or
+            consisting of an underscore and ``allow_underscore`` is
+            False.
+
+    Examples:
+        >>> validate_no_underscore_in_target("agent-index.example.com")
+        'agent-index.example.com'
+        >>> validate_no_underscore_in_target("_index.example.com")
+        Traceback (most recent call last):
+            ...
+        ValidationError: ...
+        >>> validate_no_underscore_in_target("_index.example.com", allow_underscore=True)
+        '_index.example.com'
+    """
+    if not target:
+        raise ValidationError("target", "SVCB TargetName cannot be empty")
+
+    # Strip a trailing dot if present — the constraint applies to labels,
+    # not to the FQDN root marker.
+    candidate = target.rstrip(".")
+    labels = candidate.split(".")
+    underscored = [label for label in labels if "_" in label]
+
+    if not underscored:
+        return target
+
+    message = (
+        f"SVCB TargetName '{target}' contains underscored label(s) "
+        f"{underscored!r}. CA/Browser Forum and RFC 5280 dNSName SANs forbid "
+        "underscored labels, so a publicly-issued x.509 cert cannot cover "
+        "this name. Per draft-mozleywilliams-dnsop-dnsaid-02 §Known "
+        "Organization the TargetName MUST NOT contain underscores. Pass "
+        "allow_underscore=True if this target is internal-only and will "
+        "not be reached via public PKI."
+    )
+
+    if allow_underscore:
+        import logging
+
+        logging.getLogger(__name__).warning(message)
+        return target
+
+    raise ValidationError("target", message, target)
