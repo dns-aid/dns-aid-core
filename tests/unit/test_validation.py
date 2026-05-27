@@ -14,10 +14,12 @@ from dns_aid.utils.validation import (
     validate_domain,
     validate_endpoint,
     validate_fqdn,
+    validate_no_underscore_in_target,
     validate_port,
     validate_protocol,
     validate_ttl,
     validate_version,
+    validate_well_known_path,
 )
 
 
@@ -336,3 +338,134 @@ class TestValidateBackend:
         with pytest.raises(ValidationError) as exc:
             validate_backend("")
         assert exc.value.field == "backend"
+
+
+class TestValidateNoUnderscoreInTarget:
+    """Tests for the SVCB TargetName no-underscore rule (draft-02 §Known Organization)."""
+
+    def test_clean_target_passes(self):
+        assert (
+            validate_no_underscore_in_target("agent-index.example.com") == "agent-index.example.com"
+        )
+
+    def test_trailing_dot_tolerated(self):
+        assert (
+            validate_no_underscore_in_target("agent-index.example.com.")
+            == "agent-index.example.com."
+        )
+
+    def test_label_starting_with_underscore_rejected(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_no_underscore_in_target("_index.example.com")
+        assert exc.value.field == "target"
+        assert "_index" in str(exc.value)
+
+    def test_label_containing_underscore_rejected(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_no_underscore_in_target("agent_index.example.com")
+        assert exc.value.field == "target"
+        assert "agent_index" in str(exc.value)
+
+    def test_multiple_underscored_labels_all_reported(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_no_underscore_in_target("_a._b.example.com")
+        msg = str(exc.value)
+        assert "_a" in msg
+        assert "_b" in msg
+
+    def test_allow_underscore_downgrades_to_warning(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result = validate_no_underscore_in_target("_index.example.com", allow_underscore=True)
+        assert result == "_index.example.com"
+        assert any("_index" in record.message for record in caplog.records)
+        assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+    def test_allow_underscore_on_clean_target_is_silent(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result = validate_no_underscore_in_target("clean.example.com", allow_underscore=True)
+        assert result == "clean.example.com"
+        assert not caplog.records
+
+    def test_empty_target_raises_regardless_of_flag(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_no_underscore_in_target("", allow_underscore=True)
+        assert exc.value.field == "target"
+
+
+class TestValidateWellKnownPath:
+    """Tests for validate_well_known_path.
+
+    The well-known SvcParamKey value flows from DNS into a URL the
+    discoverer fetches. Untrusted input must not be able to slip path
+    traversal, query strings, fragments, or embedded slashes through to
+    the URL — even though validate_fetch_url pins the host, the path is
+    still attacker-influenceable without this check.
+    """
+
+    def test_accepts_iana_registered_examples(self):
+        # Pull from IANA RFC 8615 examples to show the validator
+        # accepts the actual shape of real well-known names.
+        for name in (
+            "agent-card.json",
+            "oauth-authorization-server",
+            "did-configuration",
+            "change-password",
+            "openid-credential-issuer",
+            "openid-federation",
+            "matrix",
+        ):
+            assert validate_well_known_path(name) == name
+
+    def test_rejects_empty(self):
+        with pytest.raises(ValidationError):
+            validate_well_known_path("")
+
+    def test_rejects_path_traversal(self):
+        for evil in (
+            "..",
+            "../etc/passwd",
+            "..%2Fetc",
+            "agent-card.json/..",
+        ):
+            with pytest.raises(ValidationError):
+                validate_well_known_path(evil)
+
+    def test_rejects_query_or_fragment(self):
+        for evil in (
+            "agent-card.json?token=x",
+            "agent-card.json#section",
+            "agent-card.json?",
+            "agent-card.json#",
+        ):
+            with pytest.raises(ValidationError):
+                validate_well_known_path(evil)
+
+    def test_rejects_embedded_slash(self):
+        for evil in (
+            "agent/card.json",
+            "/agent-card.json",
+            "agent-card.json/extra",
+        ):
+            with pytest.raises(ValidationError):
+                validate_well_known_path(evil)
+
+    def test_rejects_percent_encoded(self):
+        for evil in (
+            "agent%2Fcard.json",
+            "%2E%2E",
+            "agent-card%00.json",
+        ):
+            with pytest.raises(ValidationError):
+                validate_well_known_path(evil)
+
+    def test_rejects_oversize(self):
+        with pytest.raises(ValidationError):
+            validate_well_known_path("a" * 129)
+
+    def test_rejects_non_string(self):
+        with pytest.raises(ValidationError):
+            validate_well_known_path(None)  # type: ignore[arg-type]

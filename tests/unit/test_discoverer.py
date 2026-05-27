@@ -550,6 +550,29 @@ class TestParseSvcbCustomParams:
         assert params["cap-sha256"] == "abc123base64url"
         assert params["cap"] == "https://example.com/cap.json"
 
+    def test_parses_well_known(self):
+        """draft-02 `well-known` SvcParamKey is recognized in string form."""
+        svcb_text = '1 mcp.example.com. alpn="mcp" port="443" well-known="agent-card.json"'
+        params = _parse_svcb_custom_params(svcb_text)
+        assert params["well-known"] == "agent-card.json"
+
+    def test_parses_well_known_via_keynnnnn(self):
+        """`key65409` resolves back to the `well-known` string name."""
+        svcb_text = '1 mcp.example.com. alpn="mcp" port="443" key65409="agent-card.json"'
+        params = _parse_svcb_custom_params(svcb_text)
+        assert params["well-known"] == "agent-card.json"
+
+    def test_well_known_and_cap_coexist(self):
+        """`cap` and `well-known` are independent keys; both must be parsed when present."""
+        svcb_text = (
+            '1 mcp.example.com. alpn="mcp" port="443" '
+            'cap="urn:example:agent-cap:abc" '
+            'well-known="agent-card.json"'
+        )
+        params = _parse_svcb_custom_params(svcb_text)
+        assert params["cap"] == "urn:example:agent-cap:abc"
+        assert params["well-known"] == "agent-card.json"
+
     def test_empty_svcb_text(self):
         params = _parse_svcb_custom_params("")
         assert params == {}
@@ -984,3 +1007,142 @@ class TestProcessHttpAgent:
         )
         result = await _process_http_agent(http_agent, "example.com", Protocol.MCP, None)
         assert result is None
+
+
+class TestWellKnownReconstruction:
+    """End-to-end coverage for the draft-02 ``well-known`` SvcParamKey
+    path: the discoverer validates the suffix, reconstructs
+    ``https://<target>/.well-known/<path>`` from the SVCB target, fetches
+    the cap document there, and stamps ``capability_source="well_known"``
+    on the resulting AgentRecord.
+
+    Adversarial cases confirm path traversal, query-string injection,
+    and embedded slashes are rejected before the URL is built rather
+    than being normalised away by httpx (which would silently escape
+    the /.well-known/ confinement).
+    """
+
+    @pytest.mark.asyncio
+    async def test_well_known_reconstructed_url_drives_fetch(self):
+        from dns_aid.core.discoverer import _query_single_agent
+
+        fake_rdata = MagicMock()
+        fake_rdata.priority = 1
+        fake_rdata.target = MagicMock()
+        fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+        fake_rdata.params = {}
+        fake_rdata.__str__ = MagicMock(
+            return_value=('1 chat.example.com. alpn="mcp" port=443 well-known="agent-card.json"')
+        )
+        fake_answers = MagicMock()
+        fake_answers.__iter__ = lambda self: iter([fake_rdata])
+
+        captured_urls: list[str] = []
+
+        async def fake_fetch(url, expected_sha256=None):
+            captured_urls.append(url)
+            return CapabilityDocument(capabilities=["chat"], raw_data={"capabilities": ["chat"]})
+
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            resolver = MagicMock()
+            resolver.resolve = AsyncMock(return_value=fake_answers)
+            mock_mod.Resolver.return_value = resolver
+            with patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                side_effect=fake_fetch,
+            ):
+                result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert result is not None
+        # URL reconstructed correctly from SVCB target + well-known suffix.
+        assert captured_urls == ["https://chat.example.com/.well-known/agent-card.json"]
+        assert result.well_known_path == "agent-card.json"
+        assert result.capability_source == "well_known"
+        assert "chat" in result.capabilities
+
+    @pytest.mark.asyncio
+    async def test_well_known_with_cap_sha256_forwarded_to_fetch(self):
+        """`cap-sha256` flows through to fetch_cap_document as
+        expected_sha256 so the integrity check fires on the well-known
+        path too — not just on explicit cap URIs."""
+        from dns_aid.core.discoverer import _query_single_agent
+
+        fake_rdata = MagicMock()
+        fake_rdata.priority = 1
+        fake_rdata.target = MagicMock()
+        fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+        fake_rdata.params = {}
+        fake_rdata.__str__ = MagicMock(
+            return_value=(
+                '1 chat.example.com. alpn="mcp" port=443 '
+                'well-known="agent-card.json" cap-sha256="EXPECTED_DIGEST"'
+            )
+        )
+        fake_answers = MagicMock()
+        fake_answers.__iter__ = lambda self: iter([fake_rdata])
+
+        seen_sha: list[str | None] = []
+
+        async def fake_fetch(url, expected_sha256=None):
+            seen_sha.append(expected_sha256)
+            return CapabilityDocument(capabilities=["chat"], raw_data={})
+
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            resolver = MagicMock()
+            resolver.resolve = AsyncMock(return_value=fake_answers)
+            mock_mod.Resolver.return_value = resolver
+            with patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                side_effect=fake_fetch,
+            ):
+                result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert result is not None
+        assert seen_sha == ["EXPECTED_DIGEST"]
+        assert result.capability_source == "well_known"
+
+    @pytest.mark.asyncio
+    async def test_malicious_well_known_value_rejected_before_fetch(self):
+        """Path-traversal / query-string / embedded-slash values must
+        be rejected by the validator before any URL is constructed.
+
+        Without this validator a value like ``../../admin`` would
+        survive ``.lstrip('/')`` and httpx would normalise the
+        dot-segments — silently escaping ``/.well-known/`` confinement
+        and turning a discovery-fetch into a path-traversal primitive.
+        """
+        from dns_aid.core.discoverer import _query_single_agent
+
+        fake_rdata = MagicMock()
+        fake_rdata.priority = 1
+        fake_rdata.target = MagicMock()
+        fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+        fake_rdata.params = {}
+        fake_rdata.__str__ = MagicMock(
+            return_value=('1 chat.example.com. alpn="mcp" port=443 well-known="../../admin"')
+        )
+        fake_answers = MagicMock()
+        fake_answers.__iter__ = lambda self: iter([fake_rdata])
+
+        captured_urls: list[str] = []
+
+        async def fake_fetch(url, expected_sha256=None):
+            captured_urls.append(url)
+            return None
+
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            resolver = MagicMock()
+            resolver.resolve = AsyncMock(return_value=fake_answers)
+            mock_mod.Resolver.return_value = resolver
+            with patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                side_effect=fake_fetch,
+            ):
+                result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        # The malicious URL must NOT have been constructed or fetched.
+        assert captured_urls == [], (
+            "validator must reject the malicious value before URL construction"
+        )
+        # The record is not stamped as well_known (validator skipped the fetch).
+        assert result is None or result.capability_source != "well_known"

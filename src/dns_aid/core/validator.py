@@ -5,6 +5,27 @@
 DNS-AID Validator: Verify agent DNS records and security.
 
 Handles DNSSEC validation, DANE/TLSA verification, and endpoint health checks.
+
+DNSSEC requirement posture (draft-mozleywilliams-dnsop-dnsaid-02):
+
+- DNSSEC is ``MAY`` by default. Publishers MAY publish unsigned SVCB
+  records and the validator MUST NOT fail verification solely because
+  DNSSEC was not observed.
+- DNSSEC is ``MUST`` when TLSA records are used to authenticate the TLS
+  endpoint. DANE depends on DNSSEC (RFC 6698 §10.1) and a TLSA record
+  served without a validated chain of trust offers no integrity
+  guarantee. In that case the validator treats DANE-without-DNSSEC as a
+  failure of the DANE check and the consumer SHOULD refuse to trust the
+  endpoint.
+
+The current code path already reflects this: ``_check_dnssec_detail``
+gathers DNSSEC state independently of pass/fail, and only the DANE
+section escalates ``dnssec_valid=False`` into a problem (see the
+``dane_note`` augmentation when DANE is present without DNSSEC).
+Verification of a record set without TLSA continues to pass without
+DNSSEC. No behaviour change in -02; the posture is unchanged from the
+prior implementation, only the spec's prose now matches what the code
+already does.
 """
 
 from __future__ import annotations

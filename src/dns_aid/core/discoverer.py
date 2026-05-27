@@ -373,6 +373,7 @@ async def _query_single_agent(
 
             cap_uri = custom_params.get("cap")
             cap_sha256 = custom_params.get("cap-sha256")
+            well_known_path = custom_params.get("well-known")
             bap_str = custom_params.get("bap", "")
             bap = [b.strip() for b in bap_str.split(",") if b.strip()] if bap_str else []
             policy_uri = custom_params.get("policy")
@@ -381,22 +382,68 @@ async def _query_single_agent(
             connect_meta = custom_params.get("connect-meta")
             enroll_uri = custom_params.get("enroll-uri")
 
-            # Discovery priority: cap URI first, then TXT fallback
+            # Discovery priority per draft-02:
+            #   1. cap (explicit URI/URN/JSON-Ref locator) — preferred
+            #   2. well-known (RFC 8615 path suffix) — reconstructed against the SVCB target
+            #   3. A2A agent-card from cap_uri response
+            #   4. TXT fallback
             capabilities: list[str] = []
             capability_source: Literal[
-                "cap_uri", "agent_card", "http_index", "txt_fallback", "none"
+                "cap_uri", "well_known", "agent_card", "http_index", "txt_fallback", "none"
             ] = "none"
             agent_card = None
 
+            # Resolve effective descriptor URL: prefer cap (explicit locator);
+            # fall back to reconstructing https://<target>/.well-known/<wk_path>
+            # when only well-known is set.
+            effective_descriptor_url: str | None = None
+            descriptor_source_label: Literal["cap_uri", "well_known", "none"] = "none"
             if cap_uri:
-                cap_doc = await fetch_cap_document(cap_uri, expected_sha256=cap_sha256)
+                effective_descriptor_url = cap_uri
+                descriptor_source_label = "cap_uri"
+            elif well_known_path:
+                # The well-known value comes from a DNS SVCB SvcParamKey,
+                # which an attacker controls if DNSSEC isn't enforced.
+                # Validate to a single RFC 8615 suffix before interpolating
+                # into a URL — otherwise `..`, `?`, `#`, or embedded
+                # slashes would let a forged record steer the fetch off
+                # the legitimate well-known namespace. validate_fetch_url
+                # pins the host but doesn't constrain the path.
+                from dns_aid.utils.validation import (
+                    ValidationError,
+                    validate_well_known_path,
+                )
+
+                try:
+                    safe_wk = validate_well_known_path(well_known_path)
+                except ValidationError as exc:
+                    logger.warning(
+                        "well-known SvcParamKey rejected — skipping descriptor fetch",
+                        fqdn=fqdn,
+                        well_known_path=well_known_path,
+                        reason=str(exc),
+                    )
+                    safe_wk = None
+
+                if safe_wk:
+                    # SVCB target is the host serving the well-known path.
+                    # Strip any trailing dot for URL construction.
+                    wk_host = target.rstrip(".")
+                    effective_descriptor_url = f"https://{wk_host}/.well-known/{safe_wk}"
+                    descriptor_source_label = "well_known"
+
+            if effective_descriptor_url:
+                cap_doc = await fetch_cap_document(
+                    effective_descriptor_url, expected_sha256=cap_sha256
+                )
                 if cap_doc and cap_doc.capabilities:
                     capabilities = cap_doc.capabilities
-                    capability_source = "cap_uri"
+                    capability_source = descriptor_source_label
                     logger.debug(
-                        "Capabilities fetched from cap URI",
+                        "Capabilities fetched from descriptor URL",
                         fqdn=fqdn,
-                        cap_uri=cap_uri,
+                        descriptor_url=effective_descriptor_url,
+                        source=descriptor_source_label,
                         capabilities=capabilities,
                     )
 
@@ -441,6 +488,7 @@ async def _query_single_agent(
                 capabilities=capabilities,
                 cap_uri=cap_uri,
                 cap_sha256=cap_sha256,
+                well_known_path=well_known_path,
                 bap=bap,
                 policy_uri=policy_uri,
                 realm=realm,
@@ -485,6 +533,7 @@ def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
         "connect-class",
         "connect-meta",
         "enroll-uri",
+        "well-known",
     }
 
     try:

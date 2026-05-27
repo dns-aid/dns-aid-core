@@ -110,6 +110,14 @@ def publish(
             help="Base64url-encoded SHA-256 digest of the capability descriptor for integrity checks",
         ),
     ] = None,
+    well_known: Annotated[
+        str | None,
+        typer.Option(
+            "--well-known",
+            help="RFC 8615 well-known path suffix (e.g., 'agent-card.json'). Independent "
+            "of --cap-uri; both may be set. Consumers prefer --cap-uri when both are present.",
+        ),
+    ] = None,
     bap: Annotated[
         str | None,
         typer.Option(
@@ -163,6 +171,14 @@ def publish(
         str | None,
         typer.Option("--private-key", help="Path to EC P-256 private key PEM for signing"),
     ] = None,
+    allow_underscore_target: Annotated[
+        bool,
+        typer.Option(
+            "--allow-underscore-target",
+            help="Downgrade the TargetName-contains-underscore check from error to warning. "
+            "Use only when the target is internal-only and not reached over public PKI.",
+        ),
+    ] = False,
 ):
     """
     Publish an agent to DNS using DNS-AID protocol.
@@ -226,6 +242,7 @@ def publish(
             backend=dns_backend,
             cap_uri=cap_uri,
             cap_sha256=cap_sha256,
+            well_known_path=well_known,
             bap=bap_list,
             policy_uri=policy_uri,
             realm=realm,
@@ -236,6 +253,7 @@ def publish(
             ipv6_hint=",".join(ipv6hint) if ipv6hint else None,
             sign=sign,
             private_key_path=private_key,
+            allow_underscore_target=allow_underscore_target,
         )
     )
 
@@ -426,6 +444,7 @@ def discover(
                     "capability_source": a.capability_source,
                     "cap_uri": a.cap_uri,
                     "cap_sha256": a.cap_sha256,
+                    "well_known_path": a.well_known_path,
                     "bap": a.bap if a.bap else None,
                     "policy_uri": a.policy_uri,
                     "realm": a.realm,

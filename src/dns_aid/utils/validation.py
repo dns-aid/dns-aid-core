@@ -461,3 +461,161 @@ def validate_backend(
         )
 
     return backend
+
+
+def validate_no_underscore_in_target(
+    target: str,
+    *,
+    allow_underscore: bool = False,
+) -> str:
+    """
+    Validate that an SVCB TargetName contains no underscored DNS labels.
+
+    Per draft-mozleywilliams-dnsop-dnsaid-02 §Known Organization, the
+    TargetName of an SVCB record that will be reached over TLS with a
+    publicly-issued x.509 certificate MUST NOT contain underscores. The
+    constraint exists because CA/Browser Forum Baseline Requirements and
+    RFC 5280 dNSName SANs both forbid underscored labels.
+
+    dns-aid-core applies this rule to all SVCB TargetNames on its publish
+    paths by default. Deployments where the target is internal-only and
+    will not be reached via public PKI (for example, a sandbox or
+    inside-the-perimeter service identified by a private CA-issued cert)
+    can pass ``allow_underscore=True`` to downgrade the failure into a
+    warning that is logged but not raised. The validator is still called
+    in that case so the log surfaces the deliberate exception.
+
+    Args:
+        target: The SVCB TargetName host (e.g. ``"chat.example.com"`` or
+            ``"agent-index.example.com."``). Trailing dots are tolerated.
+        allow_underscore: When True, downgrade a violation to a warning
+            log line and return the (unchanged) target instead of
+            raising.
+
+    Returns:
+        The target string, unchanged. (Returns rather than mutating so
+        callers can chain the call into existing pipelines.)
+
+    Raises:
+        ValidationError: If ``target`` contains a label starting with or
+            consisting of an underscore and ``allow_underscore`` is
+            False.
+
+    Examples:
+        >>> validate_no_underscore_in_target("agent-index.example.com")
+        'agent-index.example.com'
+        >>> validate_no_underscore_in_target("_index.example.com")
+        Traceback (most recent call last):
+            ...
+        ValidationError: ...
+        >>> validate_no_underscore_in_target("_index.example.com", allow_underscore=True)
+        '_index.example.com'
+    """
+    if not target:
+        raise ValidationError("target", "SVCB TargetName cannot be empty")
+
+    # Strip a trailing dot if present — the constraint applies to labels,
+    # not to the FQDN root marker.
+    candidate = target.rstrip(".")
+    labels = candidate.split(".")
+    underscored = [label for label in labels if "_" in label]
+
+    if not underscored:
+        return target
+
+    message = (
+        f"SVCB TargetName '{target}' contains underscored label(s) "
+        f"{underscored!r}. CA/Browser Forum and RFC 5280 dNSName SANs forbid "
+        "underscored labels, so a publicly-issued x.509 cert cannot cover "
+        "this name. Per draft-mozleywilliams-dnsop-dnsaid-02 §Known "
+        "Organization the TargetName MUST NOT contain underscores. Pass "
+        "allow_underscore=True if this target is internal-only and will "
+        "not be reached via public PKI."
+    )
+
+    if allow_underscore:
+        import logging
+
+        logging.getLogger(__name__).warning(message)
+        return target
+
+    raise ValidationError("target", message, target)
+
+
+# RFC 8615 well-known URI names are a single path segment under
+# /.well-known/<name>. The IANA registry shows examples like
+# ``agent-card.json``, ``oauth-authorization-server``,
+# ``did-configuration``, ``change-password`` — short, ASCII-safe,
+# unambiguous strings. We constrain to that class to prevent path
+# traversal (`..`), query-string injection (`?`), fragment injection
+# (`#`), embedded slashes, percent-encoded escapes, and any other
+# character that would let an attacker steer the reconstructed URL
+# off of the SVCB target host's `/.well-known/` namespace.
+_WELL_KNOWN_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_WELL_KNOWN_PATH_MAX_LEN = 128
+
+
+def validate_well_known_path(path: str) -> str:
+    """Validate a `well-known` SvcParamKey value to a safe RFC 8615 suffix.
+
+    The discoverer reconstructs the descriptor URL as
+    ``https://<svcb-target>/.well-known/<path>`` and fetches it. Without
+    validation, a publisher (or a SVCB-record forger if DNSSEC isn't
+    enforced) could supply a path containing ``..``, ``?``, ``#``, or
+    embedded slashes and steer the fetch away from the legitimate
+    well-known namespace. The SSRF guard at ``validate_fetch_url`` pins
+    the host but doesn't restrict the path.
+
+    Allowed: ``^[A-Za-z0-9._-]+$``, length 1..128, no ``..`` traversal.
+
+    Args:
+        path: The well-known path suffix (no leading slash, no
+            ``.well-known/`` prefix).
+
+    Returns:
+        The validated path (unchanged on success).
+
+    Raises:
+        ValidationError: On empty, oversize, or pattern-mismatched input.
+    """
+    if not isinstance(path, str) or not path:
+        raise ValidationError(
+            "well_known_path",
+            "well-known path must be a non-empty string",
+            path,
+        )
+    if len(path) > _WELL_KNOWN_PATH_MAX_LEN:
+        raise ValidationError(
+            "well_known_path",
+            f"well-known path exceeds {_WELL_KNOWN_PATH_MAX_LEN} characters",
+            path,
+        )
+    if not _WELL_KNOWN_PATH_PATTERN.match(path):
+        raise ValidationError(
+            "well_known_path",
+            (
+                "well-known path must match RFC 8615 single-segment "
+                "form (allowed: A-Z a-z 0-9 . _ - ); reject any "
+                "embedded slash, '?', '#', or other URL control "
+                "character"
+            ),
+            path,
+        )
+    # `.` is in the allowed character class (needed for names like
+    # `agent-card.json`), but two consecutive dots produce a path
+    # traversal token. Reject explicitly. A path made entirely of
+    # dots / underscores / hyphens with no alphanumeric content is
+    # also nonsense and we refuse it.
+    if ".." in path:
+        raise ValidationError(
+            "well_known_path",
+            "well-known path must not contain '..' (path traversal)",
+            path,
+        )
+    if not any(c.isalnum() for c in path):
+        raise ValidationError(
+            "well_known_path",
+            "well-known path must contain at least one alphanumeric character",
+            path,
+        )
+    return path

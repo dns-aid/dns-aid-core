@@ -220,6 +220,39 @@ class TestAgentRecord:
         assert params["key65401"] == "dGVzdGhhc2g"
         assert "key65400" not in params
 
+    def test_svcb_params_with_well_known_path(self):
+        """Test draft-02 `well-known` SvcParamKey is emitted at key65409."""
+        agent = AgentRecord(
+            name="booking",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+            well_known_path="agent-card.json",
+        )
+
+        params = agent.to_svcb_params()
+
+        assert params["key65409"] == "agent-card.json"
+
+    def test_svcb_params_well_known_independent_of_cap(self):
+        """`well-known` and `cap` are independent keys; both may be present."""
+        agent = AgentRecord(
+            name="booking",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+            cap_uri="urn:example:agent-cap:abc",
+            cap_sha256="dGVzdGhhc2g",
+            well_known_path="agent-card.json",
+        )
+
+        params = agent.to_svcb_params()
+
+        # All three SvcParamKeys present, none collapsing into another.
+        assert params["key65400"] == "urn:example:agent-cap:abc"
+        assert params["key65401"] == "dGVzdGhhc2g"
+        assert params["key65409"] == "agent-card.json"
+
     def test_svcb_params_with_connect_fields(self):
         """Test provider-managed connection params are serialized as SVCB custom keys."""
         agent = AgentRecord(
