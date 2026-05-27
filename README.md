@@ -76,7 +76,9 @@ await dns_aid.publish(
     capabilities=["chat", "code-review"]
 )
 
-# Discover agents at a domain (Path A: DNS substrate)
+# Discover agents at a domain (Path A: DNS substrate).
+# Falls back to a v=1 TXT record automatically for zones whose authoritative
+# DNS doesn't expose SVCB — see docs/architecture.md for the resolution ladder.
 agents = await dns_aid.discover("example.com")
 for agent in agents:
     print(f"{agent.name}: {agent.endpoint_url}")

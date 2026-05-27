@@ -308,7 +308,11 @@ async def _query_single_agent(
             try:
                 answers = await resolver.resolve(fqdn, "HTTPS")
             except dns.resolver.NoAnswer:
-                return None
+                # Last-resort: TXT-encoded fallback for DNS servers that
+                # don't expose SVCB. Returns a complete AgentRecord when a
+                # v=1 fallback record is present at this FQDN; returns None
+                # when only metadata TXT (or nothing) is there.
+                return await _try_txt_fallback(resolver, fqdn, name, domain, protocol)
 
         for rdata in answers:
             # AliasMode (priority 0): follow alias to canonical name
@@ -506,6 +510,138 @@ def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
             custom_params[key] = value
 
     return custom_params
+
+
+async def _try_txt_fallback(
+    resolver: dns.asyncresolver.Resolver,
+    fqdn: str,
+    name: str,
+    domain: str,
+    protocol: Protocol,
+) -> AgentRecord | None:
+    """Last-resort TXT-encoded fallback when SVCB / HTTPS RR aren't available.
+
+    Used by ``_query_single_agent`` when the authoritative DNS server doesn't
+    expose SVCB (older DNS appliances, smaller hosted providers, self-hosted
+    DNS that hasn't adopted SVCB yet). Looks for a ``v=1`` agent record
+    encoded inside a TXT RR at the same FQDN the SVCB lookup targeted.
+
+    Returns a complete :class:`AgentRecord` when a v=1 fallback record is
+    present and parses cleanly. Returns ``None`` when:
+
+    - No TXT records exist at the FQDN
+    - TXT records exist but none carry a v=1 marker (the publisher only
+      writes metadata TXT, no endpoint fallback)
+    - Parsing fails (malformed body, missing required field)
+
+    Coexists with metadata TXT (``capabilities=`` and friends) on the same
+    FQDN: parser ignores RRs that lack ``v=`` so they fall through. When
+    multiple v=1 RRs are present (out-of-spec), the first parses-able one
+    wins and a warning is logged.
+
+    Mitigates the SVCB-less-DNS reach gap; mirrors the SVCB SvcParam set
+    in TXT key=value form so the consumer parser stays symmetric with
+    :func:`_parse_svcb_custom_params`.
+    """
+    from dns_aid.core._txt_fallback import parse_txt_fallback
+
+    try:
+        answers = await resolver.resolve(fqdn, "TXT")
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return None
+    except Exception as exc:  # noqa: BLE001 — fallback is best-effort
+        logger.debug("txt_fallback.resolve_failed", fqdn=fqdn, error=str(exc))
+        return None
+
+    matches: list[Any] = []
+    for rdata in answers:
+        parsed = parse_txt_fallback(rdata.strings)
+        if parsed is not None:
+            matches.append(parsed)
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        logger.warning(
+            "txt_fallback.multiple_records",
+            fqdn=fqdn,
+            count=len(matches),
+            note="using first; spec does not permit multiple v=1 records at one FQDN",
+        )
+    fallback = matches[0]
+
+    # Cross-validate the parsed ``alpn=`` against the protocol the caller
+    # derived from the FQDN. They should match — the publisher wrote the
+    # record at ``_{name}._{protocol}._agents.{domain}`` AND emitted
+    # ``alpn={protocol}`` in the TXT body. A mismatch indicates a publisher
+    # error (record published at the wrong FQDN, or hand-edited alpn that
+    # diverged). The FQDN-derived protocol is authoritative — the record
+    # location is what the SDK dispatched on — but the discrepancy is
+    # worth surfacing so the deployment can fix it.
+    if fallback.alpn is not None and fallback.alpn != protocol.value:
+        logger.warning(
+            "txt_fallback.alpn_mismatch",
+            fqdn=fqdn,
+            fqdn_protocol=protocol.value,
+            txt_alpn=fallback.alpn,
+            note="using FQDN protocol; publisher should align alpn= with the record's _{protocol} label",
+        )
+
+    # Tier 1: cap URI (mirrors the SVCB-success path's tier 1)
+    capabilities: list[str] = []
+    capability_source: Literal["cap_uri", "agent_card", "http_index", "txt_fallback", "none"] = (
+        "none"
+    )
+    agent_card = None
+    if fallback.cap:
+        cap_doc = await fetch_cap_document(fallback.cap, expected_sha256=fallback.cap_sha256)
+        if cap_doc and cap_doc.capabilities:
+            capabilities = cap_doc.capabilities
+            capability_source = "cap_uri"
+        if cap_doc and cap_doc.raw_data:
+            try:
+                agent_card = A2AAgentCard.from_dict(cap_doc.raw_data)
+            except Exception:  # nosec B110 — not an agent card; that's fine
+                agent_card = None
+
+    # Tier 4: TXT capabilities — same TXT records may carry both the v=1
+    # fallback record and a separate ``capabilities=`` metadata string.
+    # _query_capabilities already filters for ``capabilities=`` so it
+    # ignores the v=1 record itself.
+    if not capabilities:
+        capabilities = await _query_capabilities(fqdn)
+        if capabilities:
+            capability_source = "txt_fallback"
+
+    logger.info(
+        "Resolved agent via TXT fallback (SVCB unavailable)",
+        fqdn=fqdn,
+        target=fallback.target,
+        port=fallback.port,
+    )
+
+    return AgentRecord(
+        name=name,
+        domain=domain,
+        protocol=protocol,
+        target_host=fallback.target,
+        port=fallback.port,
+        ipv4_hint=fallback.ipv4hint,
+        ipv6_hint=fallback.ipv6hint,
+        capabilities=capabilities,
+        cap_uri=fallback.cap,
+        cap_sha256=fallback.cap_sha256,
+        bap=fallback.bap,
+        policy_uri=fallback.policy,
+        realm=fallback.realm,
+        sig=fallback.sig,
+        connect_class=fallback.connect_class,
+        connect_meta=fallback.connect_meta,
+        enroll_uri=fallback.enroll_uri,
+        capability_source=capability_source,
+        endpoint_source="dns_txt_fallback",
+        agent_card=agent_card,
+    )
 
 
 async def _query_capabilities(fqdn: str) -> list[str]:

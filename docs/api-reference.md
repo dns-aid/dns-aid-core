@@ -241,6 +241,13 @@ When every filter is unset, the input list is returned unchanged with no allocat
 | **DNS (default)** | `_index._agents.{domain}` TXT record | Decentralized, cached, minimal round trips |
 | **HTTP Index** | `https://_index._aiagents.{domain}/index-wellknown` | ANS-compatible, rich metadata (descriptions, model cards) |
 
+For zones whose authoritative DNS server does not expose SVCB, per-agent
+resolution falls back to a `v=1` TXT record at the same FQDN. The returned
+`AgentRecord` carries `endpoint_source="dns_txt_fallback"`. See
+[architecture.md](architecture.md#svcb--https--txt-fallback-ladder) for
+the resolution ladder and [`docs/rfc/wire-format.abnf`](rfc/wire-format.abnf)
+for the wire grammar.
+
 #### Returns
 
 `DiscoveryResult` - Contains list of discovered agents and query metadata.
@@ -574,7 +581,7 @@ agent = AgentRecord(
 | `policy_uri` | `str` | No | `None` | URI to agent policy document |
 | `realm` | `str` | No | `None` | Multi-tenant scope identifier |
 | `capability_source` | `str` | No | `None` | Where capabilities came from: `cap_uri`, `agent_card`, `http_index`, `txt_fallback`, `none` |
-| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `direct` |
+| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `dns_txt_fallback`, `http_index`, `http_index_fallback`, `direct`, `directory` |
 
 #### Properties
 

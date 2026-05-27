@@ -228,6 +228,64 @@ txt-value      = 1*255(VCHAR / SP)
                  ; Max 255 characters per TXT string chunk
 
 ; ==================================================================
+; DNS-AID TXT Fallback Record Format (SVCB-less DNS deployments)
+; ==================================================================
+
+; Optional TXT-encoded agent record for DNS deployments that don't
+; expose SVCB. Published at the same FQDN as the SVCB ServiceMode
+; record would otherwise be: _{name}._{protocol}._agents.{domain}.
+;
+; The leading "v=1" discriminator distinguishes this endpoint TXT
+; from the capabilities/metadata TXT defined above; both may
+; coexist as distinct TXT RRs on the same FQDN.
+;
+; Acknowledgment: the TXT-based agent identification approach this
+; rule encodes was surfaced by the Agent Community
+; (https://agentcommunity.org/, maintainer Balazs Nemethi). The wire
+; format here mirrors SVCB SvcParam names for parser symmetry.
+
+dns-aid-txt-fallback = version-marker SP target-kv *(SP fallback-kv)
+
+; REQUIRED — version marker, currently fixed at 1
+version-marker = "v=1"
+
+; REQUIRED — endpoint hostname
+target-kv      = "target=" hostname
+
+; OPTIONAL — mirror of SVCB SvcParam set. Field names are identical
+; to the SVCB parameters they represent so the parser is symmetric
+; with the SVCB consumer.
+fallback-kv    = port-kv / alpn-kv / ipv4hint-kv / ipv6hint-kv /
+                 cap-kv / cap-sha256-kv / bap-kv / policy-kv /
+                 realm-kv / sig-kv / connect-class-kv /
+                 connect-meta-kv / enroll-uri-kv
+
+port-kv          = "port=" 1*5DIGIT          ; default 443 if omitted
+alpn-kv          = "alpn=" 1*32(ALPHA / DIGIT / "-")
+ipv4hint-kv      = "ipv4hint=" IPv4-address
+ipv6hint-kv      = "ipv6hint=" IPv6-address
+cap-kv           = "cap=" URI
+cap-sha256-kv    = "cap-sha256=" base64url
+bap-kv           = "bap=" bap-list
+policy-kv        = "policy=" URI
+realm-kv         = "realm=" 1*64(ALPHA / DIGIT / "-" / "_" / SP)
+sig-kv           = "sig=" jws-compact
+connect-class-kv = "connect-class=" 1*32(ALPHA / DIGIT / "-")
+connect-meta-kv  = "connect-meta=" 1*255(VCHAR)
+enroll-uri-kv    = "enroll-uri=" URI
+
+; ; Concatenation rule (RFC 1035 character-string): when a TXT RR
+; ; carries multiple <character-string>s, the parser joins them with
+; ; a single space before key=value tokenization.
+; ;
+; ; Multiple TXT RRs with v=1 at the same FQDN are not permitted in
+; ; this version; consumers that observe more than one SHOULD log a
+; ; warning and use the first.
+; ;
+; ; Unknown fields are silently ignored by v=1 parsers (forward-
+; ; compatibility with future field additions).
+
+; ==================================================================
 ; DNS-AID Error Codes
 ; ==================================================================
 
