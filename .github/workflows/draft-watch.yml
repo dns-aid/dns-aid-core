@@ -1,0 +1,25 @@
+name: IETF draft watch
+
+# Consumer workflow that invokes the reusable draft-watch implementation.
+# On every PR (and on manual dispatch) checks the pinned IETF draft state
+# against Datatracker and maintains a single canonical tracking issue
+# when state has changed. Always passes; never blocks merge.
+#
+# Pin config: .github/draft-tracking.json
+# Reusable: .github/workflows/_draft-watch-reusable.yml (same repo for v1)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    uses: ./.github/workflows/_draft-watch-reusable.yml
+    permissions:
+      contents: read
+      issues: write
