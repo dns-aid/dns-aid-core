@@ -1,0 +1,13 @@
+{
+  "slug": "draft-mozleywilliams-dnsop-dnsaid",
+  "known_rev": "01",
+  "author_person_id": 137653,
+  "watched_keywords": [
+    "dnsaid",
+    "dns-aid",
+    "ai discovery",
+    "agent discovery",
+    "bandaid"
+  ],
+  "_comment": "Pin for the IETF draft this codebase implements. Bump slug and known_rev together when a migration PR has actually synchronized dns-aid-core to a new revision or rename. author_person_id is the IETF Datatracker Person ID for the primary draft author this codebase tracks (https://datatracker.ietf.org/api/v1/person/person/137653/) and powers the keyword-based safety-net sweep that catches successor drafts filed without a `replaces` relationship."
+}
