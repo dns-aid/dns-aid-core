@@ -91,6 +91,7 @@ async def publish(
     sign: bool = False,
     private_key_path: str | None = None,
     allow_underscore_target: bool = False,
+    publish_walkable_alias: bool = True,
 ) -> PublishResult:
     """
     Publish an AI agent to DNS using DNS-AID protocol.
@@ -137,6 +138,13 @@ async def publish(
             MUST NOT contain underscores. dns-aid-core enforces this by
             default; set this flag for internal-only deployments where the
             target is not behind public PKI.
+        publish_walkable_alias: If True (default), additionally write the
+            optional walkable AliasMode SVCB record at
+            {name}._agents.{domain} pointing at the flat primary owner.
+            Per draft-02 §Known Agent this is operator-optional; the
+            walkable record makes DNS-SD-style enumeration crawlers able
+            to discover the agent. Set False to suppress the walkable
+            write if your deployment doesn't need enumeration.
 
     Returns:
         PublishResult with created records
@@ -152,7 +160,7 @@ async def publish(
         ...     realm="production",
         ... )
         >>> print(result.agent.fqdn)
-        '_network-specialist._mcp._agents.example.com'
+        'network-specialist.example.com'
     """
     # Normalize protocol to enum
     if isinstance(protocol, str):
@@ -180,7 +188,9 @@ async def publish(
 
         logger.info("Signing record with JWS", private_key_path=private_key_path)
         private_key = load_private_key_from_pem(private_key_path)
-        fqdn = f"_{name}._{protocol.value}._agents.{domain}"
+        # JWS payload binds to the flat draft-02 FQDN ({name}.{domain}).
+        # Verifiers reconstruct the same FQDN before validating the signature.
+        fqdn = f"{name}.{domain}"
         payload = RecordPayload.from_agent_record(
             fqdn=fqdn,
             target=endpoint,
@@ -216,6 +226,7 @@ async def publish(
         ipv4_hint=ipv4_hint,
         ipv6_hint=ipv6_hint,
         sig=sig,
+        publish_walkable_alias=publish_walkable_alias,
     )
 
     # Get backend
@@ -299,13 +310,24 @@ async def unpublish(
 
     dns_backend = backend or get_default_backend()
 
-    record_name = f"_{name}._{protocol.value}._agents"
+    # Under draft-02 the agent's primary owner is the flat name; the
+    # relative record name under the zone is just the agent name. We
+    # also remove the optional walkable AliasMode record at
+    # {name}._agents.{domain} if the publisher wrote one. To keep the
+    # migration path clean for operators who published under draft-01
+    # before upgrading, we additionally remove the legacy
+    # _{name}._{protocol}._agents form (silent if absent).
+    record_name = name
+    walkable_record_name = f"{name}._agents"
+    legacy_record_name = f"_{name}._{protocol.value}._agents"
 
     logger.info(
         "Removing agent from DNS",
         agent_name=name,
         domain=domain,
         record_name=record_name,
+        walkable_record_name=walkable_record_name,
+        legacy_record_name=legacy_record_name,
     )
 
     # Check zone exists before attempting deletion
@@ -313,11 +335,42 @@ async def unpublish(
         logger.error("Zone does not exist", zone=domain)
         return False
 
-    # Delete both record types
+    # Delete the primary-owner records (SVCB + companion TXT).
     svcb_deleted = await dns_backend.delete_record(domain, record_name, "SVCB")
     txt_deleted = await dns_backend.delete_record(domain, record_name, "TXT")
 
-    success = svcb_deleted or txt_deleted
+    # Delete the walkable AliasMode record if present. Log at debug on
+    # failure rather than swallowing silently so backend quirks are
+    # diagnosable.
+    try:
+        walkable_deleted = await dns_backend.delete_record(domain, walkable_record_name, "SVCB")
+    except Exception as exc:
+        walkable_deleted = False
+        logger.debug(
+            "Walkable AliasMode delete raised; treating as absent",
+            walkable_record_name=walkable_record_name,
+            error=str(exc),
+        )
+
+    # Also clear any leftover draft-01-shape records so operators
+    # upgrading from -01 to -02 can run unpublish() once and have it
+    # remove both shapes. No env flag required — the delete is a
+    # silent no-op when the records don't exist.
+    legacy_svcb_deleted = False
+    legacy_txt_deleted = False
+    try:
+        legacy_svcb_deleted = await dns_backend.delete_record(domain, legacy_record_name, "SVCB")
+        legacy_txt_deleted = await dns_backend.delete_record(domain, legacy_record_name, "TXT")
+    except Exception as exc:
+        logger.debug(
+            "Legacy -01 record delete raised; treating as absent",
+            legacy_record_name=legacy_record_name,
+            error=str(exc),
+        )
+
+    success = (
+        svcb_deleted or txt_deleted or walkable_deleted or legacy_svcb_deleted or legacy_txt_deleted
+    )
 
     if success:
         logger.info("Agent removed from DNS", agent_name=name)

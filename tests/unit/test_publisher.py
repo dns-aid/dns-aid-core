@@ -27,8 +27,9 @@ class TestPublish:
 
         assert result.success is True
         assert result.agent.name == "chat"
-        assert result.agent.fqdn == "_chat._a2a._agents.example.com"
-        assert len(result.records_created) == 2  # SVCB + TXT
+        assert result.agent.fqdn == "chat.example.com"
+        # SVCB primary + TXT companion + walkable AliasMode (draft-02 default)
+        assert len(result.records_created) == 3
 
     @pytest.mark.asyncio
     async def test_publish_with_capabilities(self, mock_backend: MockBackend):
@@ -46,7 +47,7 @@ class TestPublish:
         assert result.agent.capabilities == ["ipam", "dns", "vpn"]
 
         # Check TXT record was created with capabilities
-        txt_values = mock_backend.get_txt_record("example.com", "_network._mcp._agents")
+        txt_values = mock_backend.get_txt_record("example.com", "network")
         assert txt_values is not None
         assert "capabilities=ipam,dns,vpn" in txt_values
 
@@ -62,7 +63,7 @@ class TestPublish:
             backend=mock_backend,
         )
 
-        svcb = mock_backend.get_svcb_record("example.com", "_chat._a2a._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "chat")
 
         assert svcb is not None
         assert svcb["target"] == "chat.example.com."
@@ -115,7 +116,7 @@ class TestPublish:
         assert result.success is True
         assert result.agent.ttl == 300
 
-        svcb = mock_backend.get_svcb_record("example.com", "_chat._a2a._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "chat")
         assert svcb["ttl"] == 300
 
     @pytest.mark.asyncio
@@ -143,7 +144,7 @@ class TestPublish:
         assert result.agent.realm == "production"
 
         # SVCB params should include custom DNS-AID params
-        svcb = mock_backend.get_svcb_record("example.com", "_booking._mcp._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "booking")
         assert svcb is not None
         # keyNNNNN format by default (RFC 9460 compliant)
         assert svcb["params"]["key65400"] == "https://mcp.example.com/.well-known/agent-cap.json"
@@ -170,7 +171,7 @@ class TestPublish:
         assert result.agent.policy_uri is None
         assert result.agent.realm is None
 
-        svcb = mock_backend.get_svcb_record("example.com", "_chat._a2a._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "chat")
         assert svcb is not None
         assert "cap" not in svcb["params"]
         assert "cap-sha256" not in svcb["params"]
@@ -192,7 +193,7 @@ class TestPublish:
         )
 
         assert result.success is True
-        svcb = mock_backend.get_svcb_record("example.com", "_booking._mcp._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "booking")
         assert svcb is not None
         assert svcb["params"]["key65400"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert svcb["params"]["key65404"] == "demo"
@@ -221,7 +222,7 @@ class TestPublish:
         )
         assert result.agent.enroll_uri == "https://overlay.example.com/.well-known/agent-connect"
 
-        svcb = mock_backend.get_svcb_record("example.com", "_overlay._mcp._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "overlay")
         assert svcb is not None
         assert svcb["params"]["key65406"] == "lattice"
         assert (
@@ -248,7 +249,7 @@ class TestPublishWellKnown:
         assert result.success is True
         assert result.agent.well_known_path == "agent-card.json"
 
-        svcb = mock_backend.get_svcb_record("example.com", "_booking._mcp._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "booking")
         assert svcb is not None
         assert svcb["params"]["key65409"] == "agent-card.json"
 
@@ -269,7 +270,7 @@ class TestPublishWellKnown:
         assert result.agent.cap_uri == "urn:example:agent-cap:abc"
         assert result.agent.well_known_path == "agent-card.json"
 
-        svcb = mock_backend.get_svcb_record("example.com", "_booking._mcp._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "booking")
         assert svcb is not None
         assert svcb["params"]["key65400"] == "urn:example:agent-cap:abc"
         assert svcb["params"]["key65401"] == "dGVzdGhhc2g"
@@ -338,7 +339,7 @@ class TestUnpublish:
         )
 
         # Verify records exist
-        assert mock_backend.get_svcb_record("example.com", "_chat._a2a._agents") is not None
+        assert mock_backend.get_svcb_record("example.com", "chat") is not None
 
         # Unpublish
         result = await unpublish(
@@ -349,7 +350,7 @@ class TestUnpublish:
         )
 
         assert result is True
-        assert mock_backend.get_svcb_record("example.com", "_chat._a2a._agents") is None
+        assert mock_backend.get_svcb_record("example.com", "chat") is None
 
     @pytest.mark.asyncio
     async def test_unpublish_nonexistent(self, mock_backend: MockBackend):
@@ -518,3 +519,103 @@ class TestPublishEdgeCases:
             )
             assert result.success is False
             assert "boom" in result.message
+
+
+class TestPublishWalkableAlias:
+    """Tests for the draft-02 walkable AliasMode write."""
+
+    @pytest.mark.asyncio
+    async def test_walkable_alias_written_by_default(self, mock_backend: MockBackend):
+        """publish() emits the walkable record at {name}._agents by default."""
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+        )
+
+        walkable = mock_backend.get_svcb_record("example.com", "chat._agents")
+        assert walkable is not None
+        assert walkable["priority"] == 0  # AliasMode
+        assert walkable["target"] == "chat.example.com."
+
+    @pytest.mark.asyncio
+    async def test_walkable_alias_can_be_suppressed(self, mock_backend: MockBackend):
+        """Setting publish_walkable_alias=False on the AgentRecord skips the walkable write."""
+        from dns_aid.core.models import AgentRecord
+
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.A2A,
+            target_host="chat.example.com",
+            publish_walkable_alias=False,
+        )
+        records = await mock_backend.publish_agent(agent)
+
+        # Only SVCB primary + TXT (no walkable).
+        assert len(records) == 2
+        assert mock_backend.get_svcb_record("example.com", "chat._agents") is None
+        assert mock_backend.get_svcb_record("example.com", "chat") is not None
+
+    @pytest.mark.asyncio
+    async def test_unpublish_removes_walkable(self, mock_backend: MockBackend):
+        """unpublish() removes both the flat owner and the walkable alias."""
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+        )
+        assert mock_backend.get_svcb_record("example.com", "chat") is not None
+        assert mock_backend.get_svcb_record("example.com", "chat._agents") is not None
+
+        result = await unpublish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            backend=mock_backend,
+        )
+        assert result is True
+        assert mock_backend.get_svcb_record("example.com", "chat") is None
+        assert mock_backend.get_svcb_record("example.com", "chat._agents") is None
+
+    @pytest.mark.asyncio
+    async def test_unpublish_also_clears_legacy_01_shape(self, mock_backend: MockBackend):
+        """Migration path: unpublish() cleans up draft-01 records too.
+
+        Operators who published under -01 and then upgraded to a -02
+        dns-aid-core should be able to call unpublish() once and have
+        the SVCB + TXT records at `_{name}._{protocol}._agents.{domain}`
+        deleted alongside the new flat / walkable forms.
+        """
+        # Simulate a pre-existing draft-01 publication by writing records
+        # directly at the legacy name.
+        await mock_backend.create_svcb_record(
+            zone="example.com",
+            name="_legacy._mcp._agents",
+            priority=1,
+            target="legacy.example.com.",
+            params={"alpn": "mcp", "port": "443"},
+            ttl=3600,
+        )
+        await mock_backend.create_txt_record(
+            zone="example.com",
+            name="_legacy._mcp._agents",
+            values=["capabilities=test"],
+            ttl=3600,
+        )
+        assert mock_backend.get_svcb_record("example.com", "_legacy._mcp._agents") is not None
+
+        # unpublish() finds and deletes the legacy records even though
+        # nothing was published at the flat/walkable names.
+        result = await unpublish(
+            name="legacy",
+            domain="example.com",
+            protocol="mcp",
+            backend=mock_backend,
+        )
+        assert result is True
+        assert mock_backend.get_svcb_record("example.com", "_legacy._mcp._agents") is None

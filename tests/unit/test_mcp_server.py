@@ -54,9 +54,10 @@ class TestPublishAgentTool:
         )
 
         assert result["success"] is True
-        assert result["fqdn"] == "_test-agent._mcp._agents.example.com"
+        assert result["fqdn"] == "test-agent.example.com"
         assert result["endpoint_url"] == "https://mcp.example.com:443"
-        assert len(result["records_created"]) == 2
+        # SVCB primary + TXT companion + walkable AliasMode (draft-02 default-on)
+        assert len(result["records_created"]) == 3
 
     def test_publish_default_endpoint(self):
         """Test publishing with default endpoint."""

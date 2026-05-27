@@ -340,6 +340,60 @@ class TestUpdateIndex:
         assert txt is not None
 
 
+class TestUpdateIndexSvcbPrimary:
+    """Tests for draft-02 SVCB-primary org index (opt-in via index_target)."""
+
+    @pytest.mark.asyncio
+    async def test_index_target_writes_svcb_and_txt(self, mock_backend: MockBackend):
+        """When index_target is provided, both SVCB and TXT records are written."""
+        result = await update_index(
+            domain="example.com",
+            backend=mock_backend,
+            add=[IndexEntry(name="chat", protocol="mcp")],
+            index_target="agent-index.example.com",
+        )
+
+        assert result.success is True
+
+        # SVCB primary at _index._agents pointing at the (non-underscored) target
+        svcb = mock_backend.get_svcb_record("example.com", INDEX_RECORD_NAME)
+        assert svcb is not None
+        assert svcb["priority"] == 1  # ServiceMode
+        assert svcb["target"] == "agent-index.example.com."
+
+        # TXT inline-listing still written as the §TXT-fallback form
+        txt = mock_backend.get_txt_record("example.com", INDEX_RECORD_NAME)
+        assert txt is not None
+        assert any("chat:mcp" in v for v in txt)
+
+    @pytest.mark.asyncio
+    async def test_index_target_underscored_rejected(self, mock_backend: MockBackend):
+        """Underscored TargetName fails the validator (no public x.509 cert)."""
+        from dns_aid.utils.validation import ValidationError
+
+        with pytest.raises(ValidationError) as exc:
+            await update_index(
+                domain="example.com",
+                backend=mock_backend,
+                add=[IndexEntry(name="chat", protocol="mcp")],
+                index_target="_internal.example.com",
+            )
+        assert exc.value.field == "target"
+
+    @pytest.mark.asyncio
+    async def test_no_index_target_keeps_txt_only(self, mock_backend: MockBackend):
+        """Without index_target the behavior matches pre-draft-02 (TXT only)."""
+        result = await update_index(
+            domain="example.com",
+            backend=mock_backend,
+            add=[IndexEntry(name="chat", protocol="mcp")],
+        )
+
+        assert result.success is True
+        assert mock_backend.get_svcb_record("example.com", INDEX_RECORD_NAME) is None
+        assert mock_backend.get_txt_record("example.com", INDEX_RECORD_NAME) is not None
+
+
 class TestDeleteIndex:
     """Tests for delete_index function."""
 

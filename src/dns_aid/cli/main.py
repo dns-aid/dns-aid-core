@@ -179,6 +179,16 @@ def publish(
             "Use only when the target is internal-only and not reached over public PKI.",
         ),
     ] = False,
+    no_walkable: Annotated[
+        bool,
+        typer.Option(
+            "--no-walkable",
+            help="Suppress the optional walkable AliasMode SVCB record at "
+            "{name}._agents.{domain}. The walkable record is published by default per "
+            "draft-mozleywilliams-dnsop-dnsaid-02 §Known Agent to support DNS-SD-style "
+            "enumeration crawlers.",
+        ),
+    ] = False,
 ):
     """
     Publish an agent to DNS using DNS-AID protocol.
@@ -254,6 +264,7 @@ def publish(
             sign=sign,
             private_key_path=private_key,
             allow_underscore_target=allow_underscore_target,
+            publish_walkable_alias=not no_walkable,
         )
     )
 
@@ -713,9 +724,7 @@ def search(
 
 @app.command()
 def verify(
-    fqdn: Annotated[
-        str, typer.Argument(help="FQDN to verify (e.g., _chat._a2a._agents.example.com)")
-    ],
+    fqdn: Annotated[str, typer.Argument(help="FQDN to verify (e.g., chat.example.com)")],
 ):
     """
     Verify DNS-AID records for an agent.
@@ -723,7 +732,7 @@ def verify(
     Checks DNS record existence, DNSSEC validation, and endpoint health.
 
     Example:
-        dns-aid verify _chat._a2a._agents.example.com
+        dns-aid verify chat.example.com
     """
     from dns_aid.core.validator import verify as do_verify
 

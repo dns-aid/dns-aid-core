@@ -703,9 +703,11 @@ class TestCloudflarePublishAgentParamDemotion:
         ):
             records = await backend.publish_agent(agent)
 
-        assert len(records) == 2
+        # SVCB primary + TXT companion + walkable AliasMode (default-on per draft-02)
+        assert len(records) == 3
         assert records[0].startswith("SVCB")
         assert records[1].startswith("TXT")
+        assert records[2].startswith("SVCB(AliasMode)")
 
         # SVCB params should NOT contain custom keys
         svcb_params = svcb_calls[0]["params"]

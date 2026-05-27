@@ -28,17 +28,29 @@ from dns_aid.core.models import Protocol
 
 
 class TestParseFqdn:
-    """Tests for _parse_fqdn helper."""
+    """Tests for _parse_fqdn helper across all three draft-02 shapes."""
 
-    def test_valid_fqdn(self):
+    def test_legacy_01_form(self):
         name, proto = _parse_fqdn("_booking._mcp._agents.example.com")
         assert name == "booking"
         assert proto == "mcp"
 
-    def test_a2a_protocol(self):
+    def test_legacy_01_form_a2a(self):
         name, proto = _parse_fqdn("_chat._a2a._agents.example.com")
         assert name == "chat"
         assert proto == "a2a"
+
+    def test_walkable_draft02_form(self):
+        """Walkable AliasMode form: protocol comes from SVCB SvcParams, not FQDN."""
+        name, proto = _parse_fqdn("chat._agents.example.com")
+        assert name == "chat"
+        assert proto is None
+
+    def test_flat_draft02_form(self):
+        """Flat primary owner: protocol comes from SVCB SvcParams, not FQDN."""
+        name, proto = _parse_fqdn("booking.example.com")
+        assert name == "booking"
+        assert proto is None
 
     def test_empty_string(self):
         assert _parse_fqdn("") == (None, None)
@@ -46,14 +58,23 @@ class TestParseFqdn:
     def test_none_value(self):
         assert _parse_fqdn(None) == (None, None)
 
-    def test_no_underscore_prefix(self):
-        assert _parse_fqdn("booking.mcp._agents.example.com") == (None, None)
+    def test_walkable_rejects_underscore_prefix(self):
+        """The walkable parser rejects underscored prefixes (only legacy uses them)."""
+        assert _parse_fqdn("_booking._agents.example.com") == (None, None)
 
     def test_too_short(self):
+        """Inputs without enough labels to be an FQDN return (None, None)."""
         assert _parse_fqdn("_a._b") == (None, None)
+        assert _parse_fqdn("a.b") == (None, None)  # only 2 labels — not a 3-label FQDN
+        assert _parse_fqdn("single") == (None, None)
 
-    def test_second_part_no_underscore(self):
+    def test_legacy_with_malformed_protocol(self):
+        """An underscore-prefixed legacy-looking FQDN with malformed protocol is rejected."""
         assert _parse_fqdn("_booking.mcp._agents.example.com") == (None, None)
+
+    def test_walkable_empty_suffix_rejected(self):
+        """A walkable-shaped input with no domain part ('foo._agents.') is rejected."""
+        assert _parse_fqdn("foo._agents.") == (None, None)
 
 
 class TestDiscover:
@@ -69,7 +90,7 @@ class TestDiscover:
             result = await discover("example.com", protocol="mcp", name="chat")
             mock_query.assert_called_once_with("example.com", "chat", Protocol.MCP)
             assert result.domain == "example.com"
-            assert result.query == "_chat._mcp._agents.example.com"
+            assert result.query == "chat.example.com"
 
     @pytest.mark.asyncio
     async def test_discover_with_protocol_only(self):

@@ -59,7 +59,7 @@ class TestAgentRecord:
             assert agent.endpoint_source == source
 
     def test_fqdn_generation(self):
-        """Test FQDN is generated correctly per DNS-AID spec."""
+        """Test FQDN is generated as the flat draft-02 form."""
         agent = AgentRecord(
             name="network-specialist",
             domain="example.com",
@@ -67,8 +67,28 @@ class TestAgentRecord:
             target_host="mcp.example.com",
         )
 
-        # Format: _{name}._{protocol}._agents.{domain}
-        assert agent.fqdn == "_network-specialist._mcp._agents.example.com"
+        # Flat draft-02 form: {name}.{domain}
+        assert agent.fqdn == "network-specialist.example.com"
+
+    def test_walkable_fqdn_generation(self):
+        """The walkable AliasMode form uses the _agents leaf."""
+        agent = AgentRecord(
+            name="network-specialist",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+        )
+        assert agent.walkable_fqdn == "network-specialist._agents.example.com"
+
+    def test_legacy_fqdn_generation(self):
+        """The legacy -01 form is retained for the legacy-fallback discovery path."""
+        agent = AgentRecord(
+            name="network-specialist",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+        )
+        assert agent.legacy_fqdn == "_network-specialist._mcp._agents.example.com"
 
     def test_endpoint_url(self):
         """Test endpoint URL generation."""

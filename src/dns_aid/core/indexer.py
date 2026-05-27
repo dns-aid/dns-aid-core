@@ -199,27 +199,46 @@ async def update_index(
     add: list[IndexEntry] | None = None,
     remove: list[IndexEntry] | None = None,
     ttl: int = 3600,
+    index_target: str | None = None,
+    index_target_port: int = 443,
 ) -> IndexResult:
     """
     Update the agent index for a domain.
 
     Performs a read-modify-write operation to update the index.
 
+    Under draft-mozleywilliams-dnsop-dnsaid-02 the canonical org index
+    record is SVCB at ``_index._agents.{domain}`` pointing at a
+    non-underscored TargetName. TXT remains a documented fallback
+    (§TXT-fallback) for SVCB-less environments. dns-aid-core writes
+    both when ``index_target`` is supplied (SVCB for spec-compliant
+    consumers + TXT inline-listing for the rest); when ``index_target``
+    is omitted the TXT inline-listing is the only record written.
+
     Args:
-        domain: Domain to update index for
-        backend: DNS backend to use
-        add: Entries to add to the index
-        remove: Entries to remove from the index
-        ttl: TTL for the index record
+        domain: Domain to update index for.
+        backend: DNS backend to use.
+        add: Entries to add to the index.
+        remove: Entries to remove from the index.
+        ttl: TTL for the index record.
+        index_target: Optional host that serves the org's JSON agent
+            index over HTTPS. When provided, dns-aid-core writes an
+            SVCB ServiceMode record at ``_index._agents.{domain}``
+            pointing at this target alongside the TXT inline record.
+            The host MUST NOT contain underscored labels (it carries
+            a public x.509 cert; see draft-02 §Known Organization).
+        index_target_port: Port for the SVCB ServiceMode write
+            (default 443). Only relevant when ``index_target`` is set.
 
     Returns:
-        IndexResult with operation outcome
+        IndexResult with operation outcome.
     """
     logger.info(
         "Updating index",
         domain=domain,
         add=[str(e) for e in (add or [])],
         remove=[str(e) for e in (remove or [])],
+        index_target=index_target,
     )
 
     # Read current index
@@ -243,6 +262,14 @@ async def update_index(
     # Format the TXT value
     txt_value = format_index_txt(new_entries)
 
+    # If the caller wants the draft-02 SVCB-primary form, validate the
+    # TargetName up front (same rule as agent records — no underscores
+    # because the target carries a public x.509 cert).
+    if index_target is not None:
+        from dns_aid.utils.validation import validate_no_underscore_in_target
+
+        validate_no_underscore_in_target(index_target)
+
     try:
         # Check zone exists
         if not await backend.zone_exists(domain):
@@ -253,7 +280,23 @@ async def update_index(
                 message=f"Zone '{domain}' does not exist",
             )
 
-        # Write the updated index (UPSERT)
+        # Write the SVCB primary form first, when an index_target was
+        # supplied. The SVCB record points at the index host; consumers
+        # fetch the actual JSON-bodied index from there over HTTPS.
+        if index_target is not None:
+            svcb_target = index_target if index_target.endswith(".") else f"{index_target}."
+            await backend.create_svcb_record(
+                zone=domain,
+                name=INDEX_RECORD_NAME,
+                priority=1,  # ServiceMode
+                target=svcb_target,
+                params={"alpn": "h2", "port": str(index_target_port)},
+                ttl=ttl,
+            )
+
+        # Write the TXT inline index (always — kept as the §TXT-fallback
+        # form for SVCB-less consumers, and as the carrier for
+        # dns-aid-core's own enumeration of agents).
         await backend.create_txt_record(
             zone=domain,
             name=INDEX_RECORD_NAME,
@@ -266,6 +309,7 @@ async def update_index(
             domain=domain,
             entry_count=len(new_entries),
             was_empty=was_empty,
+            wrote_svcb=index_target is not None,
         )
 
         return IndexResult(
@@ -344,12 +388,44 @@ async def sync_index(
             message=f"Zone '{domain}' does not exist or is not accessible",
         )
 
-    # Pattern to match agent records: _{name}._{protocol}._agents
-    agent_pattern = re.compile(r"^_([a-z0-9-]+)\._([a-z0-9]+)\._agents$", re.IGNORECASE)
+    # Under draft-02 the canonical agent SVCB lives at the flat name
+    # ({name}.{domain}). The walkable AliasMode at {name}._agents is
+    # the reliable enumeration handle. Protocol is no longer in the
+    # FQDN — it lives in the `alpn` (or `bap`) SvcParam on the primary
+    # record, so the indexer resolves the walkable, then reads the
+    # primary record's SvcParams to recover the protocol.
+    walkable_pattern = re.compile(r"^([a-z0-9-]+)\._agents$", re.IGNORECASE)
+    legacy_pattern = re.compile(r"^_([a-z0-9-]+)\._([a-z0-9]+)\._agents$", re.IGNORECASE)
 
     discovered_entries: list[IndexEntry] = []
 
+    def _protocol_from_primary(primary_records: dict[str, dict], name: str) -> str:
+        """Read alpn (and bap when PR 4 lands) off the primary SVCB."""
+        primary = primary_records.get(name)
+        if not primary:
+            return "unknown"
+        params = primary.get("data", {}).get("params", {}) or {}
+        # alpn carries the agent protocol when only one is published
+        # (per draft-02 §Known Agent). bap will become the preferred
+        # carrier in the PR 4 alpn/bap split.
+        alpn = params.get("alpn") or params.get("bap")
+        if alpn:
+            # alpn may be quoted; trim.
+            return alpn.strip('"').split(",")[0].strip() or "unknown"
+        return "unknown"
+
     try:
+        # Pre-scan: collect all SVCB records by relative name so we can
+        # resolve protocol from the primary owner without doing a second
+        # backend round-trip per agent. Single pass, no filter. Inside
+        # the try block so list_records failures are surfaced as a clean
+        # IndexResult rather than propagating.
+        primary_records: dict[str, dict] = {}
+        async for record in backend.list_records(zone=domain, record_type="SVCB"):
+            rname = record.get("name", "")
+            if rname and rname != INDEX_RECORD_NAME:
+                primary_records[rname] = record
+
         # Scan for all _agents.* SVCB records
         async for record in backend.list_records(
             zone=domain,
@@ -362,8 +438,22 @@ async def sync_index(
             if record_name == INDEX_RECORD_NAME:
                 continue
 
-            # Parse the record name
-            match = agent_pattern.match(record_name)
+            # Try the draft-02 walkable AliasMode shape first.
+            walkable_match = walkable_pattern.match(record_name)
+            if walkable_match:
+                name = walkable_match.group(1)
+                protocol = _protocol_from_primary(primary_records, name)
+                discovered_entries.append(IndexEntry(name=name, protocol=protocol))
+
+                logger.debug(
+                    "Discovered agent (draft-02 walkable)",
+                    name=name,
+                    protocol=protocol,
+                )
+                continue
+
+            # Fall back to the legacy -01 shape.
+            match = legacy_pattern.match(record_name)
             if match:
                 name = match.group(1)
                 protocol = match.group(2)

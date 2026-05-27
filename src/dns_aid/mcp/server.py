@@ -249,12 +249,14 @@ def publish_agent_to_dns(
     ipv4_hint: list[str] | None = None,
     ipv6_hint: list[str] | None = None,
     allow_underscore_target: bool = False,
+    publish_walkable_alias: bool = True,
 ) -> dict:
     """
     Publish an AI agent to DNS using DNS-AID protocol.
 
     Creates SVCB and TXT records that allow other agents to discover this agent.
-    The agent will be discoverable at: _{name}._{protocol}._agents.{domain}
+    The agent will be discoverable at the flat draft-02 FQDN ``{name}.{domain}``
+    (with an optional walkable AliasMode at ``{name}._agents.{domain}``).
 
     By default, also updates the domain's index record (_index._agents.{domain})
     to include this agent for efficient discovery.
@@ -302,6 +304,13 @@ def publish_agent_to_dns(
             TargetNames reached over TLS with publicly-issued x.509 certs
             MUST NOT contain underscores. Set this only when the target is
             internal-only and will not be reached over public PKI.
+        publish_walkable_alias: When True (default), additionally write the
+            optional walkable AliasMode SVCB record at
+            ``{name}._agents.{domain}`` pointing at the flat primary
+            owner. Per draft-02 §Known Agent this is operator-optional;
+            the walkable record makes DNS-SD-style enumeration crawlers
+            able to discover the agent. Set False to suppress the
+            walkable write.
 
     Returns:
         dict with:
@@ -362,6 +371,7 @@ def publish_agent_to_dns(
             ipv4_hint=ipv4_hint,
             ipv6_hint=ipv6_hint,
             allow_underscore_target=allow_underscore_target,
+            publish_walkable_alias=publish_walkable_alias,
         )
 
     try:
@@ -494,7 +504,7 @@ def discover_agents_via_dns(
             - realm: Multi-tenant scope identifier (if present in SVCB record)
             - description: Human-readable agent description (if available)
             - fqdn: Fully qualified DNS name for this agent
-              (e.g., "_booking._mcp._agents.example.com")
+              (e.g., "booking.example.com")
         - count: Number of agents found
         - query_time_ms: Total discovery latency in milliseconds
     """
