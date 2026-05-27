@@ -40,7 +40,7 @@ DNS-AID currently has **three maintainers**, all Infoblox-affiliated (bus factor
 - **Conservative architecture** — the codebase deliberately favors stdlib, well-known third-party libraries (`dnspython`, `httpx`), and standard DNS records (RFC 9460 SVCB, RFC 4033-4035 DNSSEC, RFC 6698 DANE) over bespoke abstractions. New maintainers should be productive in days, not months.
 - **Comprehensive automation** — CI runs lint, type-check, unit tests across Python 3.11/3.12/3.13, mock integration tests, CodeQL SAST, Bandit, OpenSSF Scorecard, dependency audit, SBOM generation, and Sigstore-signed releases on every PR. New contributors get fast, machine-checked feedback.
 - **DCO + SPDX** enforced on every commit — keeps provenance unambiguous as the contributor base grows.
-- **Backed by Infoblox** — the project is hosted under the [`infobloxopen`](https://github.com/infobloxopen) organization. Infoblox provides the DNS expertise that motivated DNS-AID and has committed engineering time to its development.
+- **Backed by Infoblox** — the project is hosted under the dedicated [`dns-aid`](https://github.com/dns-aid) organization. Infoblox provides the DNS expertise that motivated DNS-AID and has committed engineering time to its development.
 
 **Goals before LF graduation**
 
@@ -48,7 +48,7 @@ DNS-AID currently has **three maintainers**, all Infoblox-affiliated (bus factor
 - Documented succession process for the project lead role
 - External (non-Infoblox) committer with merge rights on at least one subsystem
 
-If you are interested in contributing in a maintainer capacity, please open a discussion at [dns-aid-core/discussions](https://github.com/infobloxopen/dns-aid-core/discussions) or contact the project lead directly.
+If you are interested in contributing in a maintainer capacity, please open a discussion at [dns-aid-core/discussions](https://github.com/dns-aid/dns-aid-core/discussions) or contact the project lead directly.
 
 ## Release process and namespace ownership
 
@@ -60,5 +60,5 @@ For full transparency:
 
 ## Contact
 
-- GitHub Issues: [dns-aid-core/issues](https://github.com/infobloxopen/dns-aid-core/issues)
-- Discussions: [dns-aid-core/discussions](https://github.com/infobloxopen/dns-aid-core/discussions)
+- GitHub Issues: [dns-aid-core/issues](https://github.com/dns-aid/dns-aid-core/issues)
+- Discussions: [dns-aid-core/discussions](https://github.com/dns-aid/dns-aid-core/discussions)

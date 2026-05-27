@@ -5,12 +5,12 @@
   "description": "DNS-based AI agent discovery. Publish, discover, and verify AI agents via DNS using SVCB records (RFC 9460). No central registry needed.",
   "license": "Apache-2.0",
   "privacy_policies": [
-    "https://github.com/infobloxopen/dns-aid-core/blob/main/PRIVACY.md"
+    "https://github.com/dns-aid/dns-aid-core/blob/main/PRIVACY.md"
   ],
   "author": {
     "name": "Infoblox",
     "email": "iracic@infoblox.com",
-    "url": "https://github.com/infobloxopen/dns-aid-core"
+    "url": "https://github.com/dns-aid/dns-aid-core"
   },
   "user_config": {
     "dns_aid_backend": {

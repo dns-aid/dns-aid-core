@@ -47,4 +47,4 @@ dns, agent-discovery, mcp, a2a, svcb, dnssec, ai-agents, infrastructure
 
 ## Privacy Policy URL
 
-https://github.com/infobloxopen/dns-aid-core/blob/main/PRIVACY.md
+https://github.com/dns-aid/dns-aid-core/blob/main/PRIVACY.md

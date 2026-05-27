@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.infobloxopen/dns-aid",
+  "name": "io.github.dns-aid/dns-aid",
   "description": "Discover and publish AI agents via DNS using SVCB records (RFC 9460)",
   "repository": {
-    "url": "https://github.com/infobloxopen/dns-aid-core",
+    "url": "https://github.com/dns-aid/dns-aid-core",
     "source": "github"
   },
   "version": "0.18.1",
