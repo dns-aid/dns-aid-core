@@ -311,7 +311,7 @@ class TestHttpIndexDiscovery:
                 "agents": {
                     "network": {
                         "location": {
-                            "fqdn": "_network._mcp._agents.example.com",
+                            "fqdn": "network.example.com",
                             "endpoint": "https://mcp.example.com/mcp",
                         },
                         "model-card": {

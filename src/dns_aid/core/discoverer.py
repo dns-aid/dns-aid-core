@@ -927,7 +927,7 @@ async def _process_http_agent(
         return None
 
     dns_agent_name, fqdn_protocol_str = _parse_fqdn(http_agent.fqdn)
-    if not dns_agent_name or not fqdn_protocol_str:
+    if not dns_agent_name:
         logger.debug(
             "Cannot parse FQDN from HTTP index entry",
             agent=http_agent.name,
@@ -935,21 +935,40 @@ async def _process_http_agent(
         )
         return None
 
-    try:
-        agent_protocol = Protocol(fqdn_protocol_str.lower())
-    except ValueError:
-        logger.debug(
-            "Unknown protocol in FQDN",
-            agent=http_agent.name,
-            fqdn=http_agent.fqdn,
-            protocol=fqdn_protocol_str,
-        )
+    # Under draft-02 the flat and walkable FQDN shapes don't carry the
+    # agent protocol — it lives in the SVCB `bap`/`alpn` SvcParam. If
+    # _parse_fqdn returned no protocol, use the caller-supplied protocol
+    # filter when present, otherwise try mcp then a2a (the SVCB params
+    # on the discovered record reveal the actual protocol).
+    candidate_protocols: list[Protocol]
+    if fqdn_protocol_str:
+        try:
+            candidate_protocols = [Protocol(fqdn_protocol_str.lower())]
+        except ValueError:
+            logger.debug(
+                "Unknown protocol in FQDN",
+                agent=http_agent.name,
+                fqdn=http_agent.fqdn,
+                protocol=fqdn_protocol_str,
+            )
+            return None
+    elif protocol is not None:
+        candidate_protocols = [protocol]
+    else:
+        candidate_protocols = [Protocol.MCP, Protocol.A2A]
+
+    # Apply caller-side protocol filter when the FQDN-carried protocol
+    # is known and doesn't match.
+    if fqdn_protocol_str and protocol and candidate_protocols[0] != protocol:
         return None
 
-    if protocol and agent_protocol != protocol:
-        return None
-
-    agent = await _query_single_agent(domain, dns_agent_name, agent_protocol)
+    agent_protocol = candidate_protocols[0]
+    agent = None
+    for proto in candidate_protocols:
+        agent = await _query_single_agent(domain, dns_agent_name, proto)
+        if agent:
+            agent_protocol = proto
+            break
 
     if agent:
         _enrich_from_http_index(agent, http_agent)

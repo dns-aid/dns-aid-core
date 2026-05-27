@@ -169,12 +169,24 @@ that round-trip the same inputs through every surface.
 
 ```
 1. Query TXT _index._agents.{domain} → list of agent:protocol pairs
-2. For each agent: Query SVCB _{name}._{protocol}._agents.{domain}
-   → extract endpoint, port, ALPN + DNS-AID custom params (cap, bap, policy, realm)
-3. For each agent: If cap URI present → fetch capability document (primary)
+2. For each agent: Query SVCB {name}.{domain} (draft-02 flat primary owner)
+   → extract endpoint, port, ALPN + DNS-AID custom params (cap, bap,
+   policy, realm, well-known)
+3. For each agent: If cap URI present → fetch capability document (primary).
+   Otherwise, if well-known is set, construct
+   https://<svcb-target>/.well-known/<well-known-value> and fetch
    → capabilities, version, description, use_cases, category
-4. For each agent: If no cap URI or fetch failed → query TXT for capabilities= (fallback)
+4. For each agent: If no cap/well-known URI or fetch failed → query TXT
+   for capabilities= (fallback)
 ```
+
+Under draft-mozleywilliams-dnsop-dnsaid-02 the agent's primary owner
+name is a flat FQDN `{name}.{domain}` valid as an x.509 SAN dNSName;
+publishers MAY additionally publish a walkable AliasMode record at
+`{name}._agents.{domain}` so DNS-SD-style consumers can enumerate.
+Consumers MUST try the flat form first. Older publishers using the
+legacy `-01` form `_{name}._{protocol}._agents.{domain}` are
+resolvable when consumers set `DNS_AID_LEGACY_01_FALLBACK=1`.
 
 ### HTTP Index Discovery
 
@@ -543,7 +555,7 @@ The JWS payload contains the canonical representation of the DNS record:
 
 ```json
 {
-  "fqdn": "_payment._mcp._agents.example.com",
+  "fqdn": "payment.example.com",
   "target": "payment.example.com",
   "port": 443,
   "alpn": "mcp",

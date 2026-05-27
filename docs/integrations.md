@@ -270,7 +270,7 @@ await publish(
 ```python
 from dns_aid.core.validator import verify
 
-result = await verify("_network-specialist._mcp._agents.example.com")
+result = await verify("network-specialist.example.com")
 print(f"DNSSEC valid: {result.dnssec_valid}")
 print(f"Security rating: {result.security_rating}")
 ```

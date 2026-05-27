@@ -40,13 +40,13 @@ docker exec agent-a dns-aid discover orgb.test
 
 echo
 echo "--- [6] Verify Org A agent record ---"
-docker exec agent-a dns-aid verify _assistant._mcp._agents.orga.test || true
+docker exec agent-a dns-aid verify assistant.orga.test || true
 
 echo
 echo "--- [7] Raw DNS check: SVCB and TXT records exist ---"
-echo "Org A SVCB:"; docker exec agent-a dig @172.28.0.10 _assistant._mcp._agents.orga.test SVCB +short
-echo "Org A TXT:";  docker exec agent-a dig @172.28.0.10 _assistant._mcp._agents.orga.test TXT +short
-echo "Org B SVCB:"; docker exec agent-b dig @172.28.0.11 _assistant._mcp._agents.orgb.test SVCB +short
+echo "Org A SVCB:"; docker exec agent-a dig @172.28.0.10 assistant.orga.test SVCB +short
+echo "Org A TXT:";  docker exec agent-a dig @172.28.0.10 assistant.orga.test TXT +short
+echo "Org B SVCB:"; docker exec agent-b dig @172.28.0.11 assistant.orgb.test SVCB +short
 echo "Org A index:"; docker exec agent-a dig @172.28.0.10 _index._agents.orga.test TXT +short
 
 # ---------------------------------------------------------------------------
