@@ -9,10 +9,10 @@
 * @iracic82
 
 # Core protocol engine — both maintainers
-src/dns_aid/core/ @iracic82 @ivanglabbeek
+src/dns_aid/core/ @iracic82 @IngmarVG-IB
 
 # Policy + standards layer — Ingmar leads
-src/dns_aid/sdk/policy/ @ivanglabbeek @iracic82
+src/dns_aid/sdk/policy/ @IngmarVG-IB @iracic82
 
 # DNS backends
 src/dns_aid/backends/ @iracic82
@@ -24,8 +24,8 @@ src/dns_aid/mcp/ @iracic82
 src/dns_aid/cli/ @iracic82
 
 # CI/CD and governance — both maintainers approve
-.github/ @iracic82 @ivanglabbeek
-GOVERNANCE.md @iracic82 @ivanglabbeek
-MAINTAINERS.md @iracic82 @ivanglabbeek
-SECURITY.md @iracic82 @ivanglabbeek
-TRADEMARKS.md @iracic82 @ivanglabbeek
+.github/ @iracic82 @IngmarVG-IB
+GOVERNANCE.md @iracic82 @IngmarVG-IB
+MAINTAINERS.md @iracic82 @IngmarVG-IB
+SECURITY.md @iracic82 @IngmarVG-IB
+TRADEMARKS.md @iracic82 @IngmarVG-IB
