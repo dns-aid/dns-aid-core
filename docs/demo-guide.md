@@ -86,10 +86,10 @@ dns-aid publish \
 
 # Expected output:
 # ✓ Agent published successfully!
-#   FQDN: _multiagent._a2a._agents.example.com
+#   FQDN: multiagent.example.com
 #   Records created:
-#     • SVCB _multiagent._a2a._agents.example.com  (alpn="a2a")
-#     • TXT _multiagent._a2a._agents.example.com
+#     • SVCB multiagent.example.com  (alpn="a2a")
+#     • TXT multiagent.example.com
 # ✓ Updated index at _index._agents.example.com (1 agent(s))
 ```
 
@@ -105,11 +105,11 @@ dns-aid publish \
 
 ```bash
 # Using dig
-dig _multiagent._a2a._agents.example.com SVCB +short
-dig _multiagent._a2a._agents.example.com TXT +short
+dig multiagent.example.com SVCB +short
+dig multiagent.example.com TXT +short
 
 # Using DNS-AID verify (shows security score)
-dns-aid verify _multiagent._a2a._agents.example.com
+dns-aid verify multiagent.example.com
 
 # Expected:
 #   ✓ DNS record exists
@@ -132,7 +132,7 @@ dns-aid index list example.com
 # ┌────────────┬──────────┬─────────────────────────────────────────────┐
 # │ Name       │ Protocol │ FQDN                                        │
 # ├────────────┼──────────┼─────────────────────────────────────────────┤
-# │ multiagent │ a2a      │ _multiagent._a2a._agents.highvelocity...    │
+# │ multiagent │ a2a      │ multiagent.highvelocity...    │
 # └────────────┴──────────┴─────────────────────────────────────────────┘
 #
 # Total: 1 agent(s) in index
@@ -236,7 +236,7 @@ async def discover_and_connect():
     # === STEP 1: DNS Discovery ===
     print("🔍 Step 1: Querying DNS for agent...")
 
-    fqdn = "_multiagent._a2a._agents.example.com"
+    fqdn = "multiagent.example.com"
 
     # Query SVCB record
     answers = dns.resolver.resolve(fqdn, "SVCB")
@@ -690,7 +690,7 @@ Found 5 flights from NYC to London on March 15:
 │  │                  DNS-AID MCP Server                      │   │
 │  │                                                          │   │
 │  │  1. discover_agents_via_dns("example.com")│   │
-│  │     └─► DNS query for _booking._mcp._agents.*.com       │   │
+│  │     └─► DNS query for booking.*.com       │   │
 │  │     └─► Returns: endpoint_url from SVCB/HTTP index      │   │
 │  │                                                          │   │
 │  │  2. call_agent_tool(endpoint, "search_flights", params)  │   │
@@ -759,13 +759,13 @@ Capabilities are resolved with the following priority, aligned with the DNS-AID 
 
 **SVCB record with cap URI** (per DNS-AID draft):
 ```
-_booking._mcp._agents.example.com. SVCB 1 mcp.example.com. \
+booking.example.com. SVCB 1 mcp.example.com. \
     alpn="mcp" port=443 cap="https://index.aiagents.example.com/cap/booking-agent"
 ```
 
 ### Discovery Transparency
 
-Agent name and protocol are now extracted from the FQDN (e.g., `_booking._mcp._agents.example.com` → name=`booking`, protocol=`mcp`). The HTTP index only needs to provide the FQDN — no separate `protocols` field required.
+Agent name and protocol are now extracted from the FQDN (e.g., `booking.example.com` → name=`booking`, protocol=`mcp`). The HTTP index only needs to provide the FQDN — no separate `protocols` field required.
 
 Each discovered agent includes transparency fields showing how data was resolved:
 
@@ -934,14 +934,14 @@ dns-aid publish \
 dns-aid discover example.com --verify-signature
 
 # Output (valid signature):
-# ✓ Signature verified for _payment._mcp._agents.example.com
+# ✓ Signature verified for payment.example.com
 # Found 1 agent(s):
 # - payment (MCP protocol)
 #   Endpoint: https://mcp.example.com:443
 #   Signature: VALID ✓
 
 # Output (invalid/missing signature):
-# ⚠ Signature verification failed for _payment._mcp._agents.example.com
+# ⚠ Signature verification failed for payment.example.com
 #   Reason: No JWKS found at https://example.com/.well-known/dns-aid-jwks.json
 ```
 
@@ -959,7 +959,7 @@ The JWS payload contains canonical SVCB record data:
 
 ```json
 {
-  "fqdn": "_payment._mcp._agents.example.com",
+  "fqdn": "payment.example.com",
   "target": "mcp.example.com",
   "port": 443,
   "alpn": "mcp",
@@ -979,7 +979,7 @@ private_key, public_key = generate_keypair()
 # Sign a record
 signature = sign_record(
     private_key=private_key,
-    fqdn="_payment._mcp._agents.example.com",
+    fqdn="payment.example.com",
     target="mcp.example.com",
     port=443,
 )
@@ -988,7 +988,7 @@ signature = sign_record(
 is_valid = await verify_signature(
     domain="example.com",
     signature=signature,
-    fqdn="_payment._mcp._agents.example.com",
+    fqdn="payment.example.com",
     target="mcp.example.com",
     port=443,
 )

@@ -37,7 +37,7 @@ agent's span. Total elapsed: under 10 minutes from clone.
 
 ### Spans
 
-- Name: `dns-aid.invoke {agent_fqdn}` (e.g., `dns-aid.invoke _chat._mcp._agents.example.com`)
+- Name: `dns-aid.invoke {agent_fqdn}` (e.g., `dns-aid.invoke chat.example.com`)
 - Kind: `SpanKind.CLIENT`
 - Attributes (set at span open): `dns_aid.agent.name`, `dns_aid.agent.domain`,
   `dns_aid.agent.protocol`, `dns_aid.agent.endpoint` (credentials in URL

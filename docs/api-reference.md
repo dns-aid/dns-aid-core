@@ -78,7 +78,7 @@ async def main():
     discovery = await discover("example.com", protocol=Protocol.MCP)
 
     # Verify an agent's DNS records
-    verification = await verify("_my-agent._mcp._agents.example.com")
+    verification = await verify("my-agent.example.com")
 
 asyncio.run(main())
 ```
@@ -162,8 +162,9 @@ else:
 
 #### DNS Records Created
 
-- **SVCB**: `_{name}._{protocol}._agents.{domain}` → Service binding record
-- **TXT**: `_{name}._{protocol}._agents.{domain}` → Capabilities and metadata
+- **SVCB**: `{name}.{domain}` (draft-02 flat primary owner) → Service binding record
+- **SVCB (AliasMode, optional)**: `{name}._agents.{domain}` → walkable AliasMode pointer at the flat primary owner (suppressible via `publish_walkable_alias=False`)
+- **TXT**: `{name}.{domain}` → Capabilities and metadata (alongside the primary SVCB)
 
 ---
 
@@ -299,7 +300,7 @@ async def verify(fqdn: str) -> VerifyResult
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `fqdn` | `str` | Yes | Fully qualified domain name (e.g., "_chat._mcp._agents.example.com") |
+| `fqdn` | `str` | Yes | Fully qualified domain name (e.g., "chat.example.com") |
 
 #### Returns
 
@@ -310,7 +311,7 @@ async def verify(fqdn: str) -> VerifyResult
 ```python
 from dns_aid import verify
 
-result = await verify("_chat._mcp._agents.example.com")
+result = await verify("chat.example.com")
 
 print(f"Record exists: {result.record_exists}")
 print(f"DNSSEC valid: {result.dnssec_valid}")
@@ -574,7 +575,9 @@ agent = AgentRecord(
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `fqdn` | `str` | Full DNS-AID record name: `_{name}._{protocol}._agents.{domain}` |
+| `fqdn` | `str` | Full DNS-AID record name (draft-02 flat primary owner): `{name}.{domain}` |
+| `walkable_fqdn` | `str` | Optional walkable AliasMode form: `{name}._agents.{domain}` |
+| `legacy_fqdn` | `str` | Legacy -01 form: `_{name}._{protocol}._agents.{domain}` (used only by the back-compat discovery path) |
 | `endpoint_url` | `str` | Full URL: `https://{target_host}:{port}` |
 | `svcb_target` | `str` | SVCB target with trailing dot |
 
@@ -927,7 +930,7 @@ Sign a DNS record payload with a private key.
 from dns_aid.core.jwks import sign_record, RecordPayload
 
 payload = RecordPayload(
-    fqdn="_payment._mcp._agents.example.com",
+    fqdn="payment.example.com",
     target="payment.example.com",
     port=443,
     alpn="mcp",
@@ -1046,7 +1049,7 @@ dns-aid discover example.com --protocol mcp
 dns-aid discover example.com --use-http-index
 
 # Verify an agent
-dns-aid verify _my-agent._mcp._agents.example.com
+dns-aid verify my-agent.example.com
 
 # List all agents in a zone
 dns-aid list example.com
@@ -1070,7 +1073,7 @@ dns-aid index sync example.com           # Sync index with actual DNS records
 ```bash
 # Send a message to an A2A agent (discover-first: DNS → agent card → invoke)
 dns-aid message --domain ai.infoblox.com --name security-analyzer \
-    "Analyze security of _marketing._a2a._agents.ai.infoblox.com"
+    "Analyze security of marketing.ai.infoblox.com"
 
 # Send a message to an A2A agent (direct endpoint)
 dns-aid message --endpoint https://security-analyzer.ai.infoblox.com \
@@ -1515,7 +1518,7 @@ async with AgentClient(config) as client:
 
     # Get rankings for specific agents only
     rankings = await client.fetch_rankings(
-        fqdns=["_booking._mcp._agents.example.com"],
+        fqdns=["booking.example.com"],
         limit=10
     )
 

@@ -59,7 +59,7 @@ Domain owners can request removal of their agents from the directory:
 
 **Option 1: API Request (Verified Domain)**
 ```http
-DELETE /api/v1/agents/_network._mcp._agents.example.com
+DELETE /api/v1/agents/network.example.com
 Authorization: Bearer <domain-verified-token>
 ```
 

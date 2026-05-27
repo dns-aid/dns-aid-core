@@ -22,7 +22,7 @@ SVCB record queries.
 
 ### Prompt 2: Verify an agent's DNS security
 
-> Verify the DNS records for _network._mcp._agents.example.com
+> Verify the DNS records for network.example.com
 > and tell me if DNSSEC is valid
 
 Expected: Returns DNS record validation results including SVCB record

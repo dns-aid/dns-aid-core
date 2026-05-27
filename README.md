@@ -81,7 +81,7 @@ result = await dns_aid.discover(
 )
 
 # Verify an agent's DNS records
-result = await dns_aid.verify("_my-agent._mcp._agents.example.com")
+result = await dns_aid.verify("my-agent.example.com")
 print(f"Security Score: {result.security_score}/100")
 ```
 
@@ -262,7 +262,7 @@ dns-aid discover example.com --use-http-index
 dns-aid discover example.com --json
 
 # Verify DNS records
-dns-aid verify _my-agent._mcp._agents.example.com
+dns-aid verify my-agent.example.com
 
 # List DNS-AID records in a zone
 dns-aid list example.com
@@ -381,7 +381,7 @@ agents = await dns_aid.discover("example.com", use_http_index=True)
 | **DNS (default)** | Maximum decentralization, offline caching, minimal round trips |
 | **HTTP Index** | Rich metadata upfront, ANS compatibility, model cards, capabilities, direct endpoints |
 
-**FQDN as Source of Truth (v0.4.7):** The HTTP index only needs to provide each agent's FQDN (e.g., `_booking._mcp._agents.example.com`). Agent name and protocol are extracted from the FQDN — no separate `protocols` field needed. DNS SVCB lookup then resolves the authoritative endpoint.
+**FQDN as Source of Truth (v0.4.7):** The HTTP index only needs to provide each agent's FQDN (e.g., `booking.example.com`). Agent name and protocol are extracted from the FQDN — no separate `protocols` field needed. DNS SVCB lookup then resolves the authoritative endpoint.
 
 **Discovery Transparency (v0.4.6+):** Each discovered agent includes source fields showing how data was resolved:
 
@@ -475,14 +475,14 @@ Claude will:
 DNS-AID uses SVCB records (RFC 9460) to advertise AI agents:
 
 ```
-_chat._a2a._agents.example.com. 3600 IN SVCB 1 chat.example.com. alpn="a2a" port=443 mandatory="alpn,port"
-_chat._a2a._agents.example.com. 3600 IN TXT "capabilities=chat,assistant" "version=1.0.0"
+chat.example.com. 3600 IN SVCB 1 chat.example.com. alpn="a2a" port=443 mandatory="alpn,port"
+chat.example.com. 3600 IN TXT "capabilities=chat,assistant" "version=1.0.0"
 ```
 
 **DNS-AID Custom SVCB Parameters (v0.4.8+):** Per the IETF draft, SVCB records can carry additional custom parameters for richer agent metadata:
 
 ```
-_booking._mcp._agents.example.com. SVCB 1 mcp.example.com. alpn="mcp" port=443 \
+booking.example.com. SVCB 1 mcp.example.com. alpn="mcp" port=443 \
     cap="https://mcp.example.com/.well-known/agent-cap.json" \
     cap-sha256="dGVzdGhhc2g" bap="mcp/1,a2a/1" \
     policy="https://example.com/agent-policy" realm="production"
@@ -510,7 +510,7 @@ This allows any DNS client to discover agents without proprietary protocols or c
   │  Step 1: Fetch HTTP Index (primary)                             │
   │  ──────────────────────────────────                             │
   │  GET https://index.aiagents.salesforce.com/index-wellknown      │
-  │  Response: [{"fqdn":"_chat._a2a._agents.salesforce.com",...}]   │
+  │  Response: [{"fqdn":"chat.salesforce.com",...}]   │
   │                                                                 │
   │  Fallback: Query TXT Index via DNS                              │
   │  Query: _index._agents.salesforce.com TXT                       │
@@ -520,7 +520,7 @@ This allows any DNS client to discover agents without proprietary protocols or c
   ┌──┴──────────────────────────────────────────────────────────────┐
   │  Step 2: Query SVCB per agent                                   │
   │  ────────────────────────────                                   │
-  │  Query: _chat._a2a._agents.salesforce.com SVCB                  │
+  │  Query: chat.salesforce.com SVCB                  │
   │  Response: SVCB 1 chat.salesforce.com. alpn="a2a" port=443      │
   │            cap="https://chat.salesforce.com/.well-known/cap.json"│
   │  (DNSSEC validated)                                             │
@@ -537,7 +537,7 @@ This allows any DNS client to discover agents without proprietary protocols or c
   ┌──┴──────────────────────────────────────────────────────────────┐
   │  Step 3: TXT Capabilities (fallback if no cap document)         │
   │  ──────────────────────────────────────────────────             │
-  │  Query: _chat._a2a._agents.salesforce.com TXT                   │
+  │  Query: chat.salesforce.com TXT                   │
   │  Response: "capabilities=chat,support" "version=1.0.0"          │
   └──┬──────────────────────────────────────────────────────────────┘
      │                            │                               │
@@ -1065,7 +1065,7 @@ The [Agent Community](https://agentcommunity.org/) is pursuing a `.agent` top-le
 
 **How DNS-AID Works:**
 1. Use your existing domain (you already own `yourcompany.com`)
-2. Add DNS-AID records to your zone (`_myagent._mcp._agents.yourcompany.com`)
+2. Add DNS-AID records to your zone (`myagent.yourcompany.com`)
 3. Start discovering and being discovered immediately
 
 | Factor | .agent gTLD | DNS-AID |
@@ -1075,13 +1075,13 @@ The [Agent Community](https://agentcommunity.org/) is pursuing a `.agent` top-le
 | **Who controls discovery** | Registry operator | You (your domain) |
 | **Works today** | ❌ Pending ICANN approval | ✅ Works now |
 | **Requires new infrastructure** | ✅ Registry, registrars | ❌ Uses existing DNS |
-| **Memorable names** | ✅ `myagent.agent` | `_myagent._mcp._agents.example.com` |
+| **Memorable names** | ✅ `myagent.agent` | `myagent.example.com` |
 
 **The Friendly Take:**
 
 Both approaches share the goal of making AI agents discoverable. The `.agent` gTLD creates a dedicated namespace that's easy to remember (`mycompany.agent`), while DNS-AID leverages existing infrastructure so you can start publishing agents today.
 
-DNS-AID doesn't require waiting for ICANN approval or paying for new domains—it works with the DNS infrastructure your organization already operates. If you own `example.com`, you can publish agents to `_myagent._mcp._agents.example.com` right now.
+DNS-AID doesn't require waiting for ICANN approval or paying for new domains—it works with the DNS infrastructure your organization already operates. If you own `example.com`, you can publish agents to `myagent.example.com` right now.
 
 *Fun fact: When `.agent` domains become available, DNS-AID records will work on them too! The approaches are complementary.*
 

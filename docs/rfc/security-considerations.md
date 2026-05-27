@@ -187,7 +187,7 @@ zone "example.com" {
 
 **Secure SVCB Example:**
 ```
-_network._mcp._agents.example.com. 3600 IN SVCB 1 mcp.example.com. (
+network.example.com. 3600 IN SVCB 1 mcp.example.com. (
     mandatory="alpn"
     alpn="mcp"
     port="443"

@@ -9,9 +9,14 @@ orga.test.		IN SOA	ns1.orga.test. hostmaster.orga.test. (
 			NS	ns1.orga.test.
 $TTL 3600	; 1 hour
 _index._agents.orga.test. TXT	"agents=assistant:mcp"
-_assistant._mcp._agents.orga.test. TXT "version=1.0.0"
+; draft-02 flat primary owner — the form publishers SHOULD support
+; and consumers MUST try first.
+assistant.orga.test.	TXT	"version=1.0.0"
 			TXT	"description=Org A assistant agent"
 			SVCB	1 assistant.orga.test. mandatory=alpn,port alpn="mcp" port=443
+; Optional walkable AliasMode (draft-02 §Known Agent) — operators MAY
+; publish this so DNS-SD-style consumers can enumerate.
+assistant._agents.orga.test.	SVCB	0 assistant.orga.test.
 $TTL 300	; 5 minutes
 ns1.orga.test.		A	172.28.0.10
 test-record.orga.test.	TXT	"hello"

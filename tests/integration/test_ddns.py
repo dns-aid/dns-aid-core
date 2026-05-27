@@ -189,7 +189,7 @@ class TestDDNSBackend:
             resolver.nameservers = [DDNS_SERVER]
             resolver.port = DDNS_PORT
 
-            fqdn = f"_ddns-test-agent._mcp._agents.{DDNS_ZONE}"
+            fqdn = f"ddns-test-agent.{DDNS_ZONE}"
 
             # Check SVCB
             svcb_answers = resolver.resolve(fqdn, "SVCB")

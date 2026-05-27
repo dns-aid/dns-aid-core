@@ -439,10 +439,11 @@ class TestDiscoverViaHttpIndex:
 
     @pytest.mark.asyncio
     async def test_skips_unparseable_fqdn(self):
+        """Single-label fqdn entries are still rejected by _parse_fqdn under draft-02."""
         http_agents = [
             HttpIndexAgent(
                 name="bad",
-                fqdn="no-underscores.example.com",
+                fqdn="bogus",
             ),
         ]
 
@@ -1004,15 +1005,17 @@ class TestProcessHttpAgent:
 
     @pytest.mark.asyncio
     async def test_skips_unparseable_fqdn(self):
+        """Single-label fqdn entries are still rejected by _parse_fqdn under draft-02."""
         http_agent = HttpIndexAgent(
             name="bad",
-            fqdn="no-underscores.example.com",
+            fqdn="bogus",
         )
         result = await _process_http_agent(http_agent, "example.com", None, None)
         assert result is None
 
     @pytest.mark.asyncio
     async def test_skips_unknown_protocol(self):
+        """Legacy form with a protocol not in the Protocol enum is rejected."""
         http_agent = HttpIndexAgent(
             name="weird",
             fqdn="_weird._unknown._agents.example.com",
