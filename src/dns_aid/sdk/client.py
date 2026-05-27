@@ -1269,12 +1269,19 @@ def _adapt_search_payload(raw: dict[str, Any]) -> dict[str, Any]:
                 },
             )
 
-        # ── Adapt agent shape: split comma-separated ``bap`` string into list. ──
-        # Done before the ``_AGENT_FIELDS_STRIP_IF_NONE`` pass so ``bap=None`` still
-        # gets stripped.
+        # ── Adapt agent shape: normalize ``bap`` to its draft-02 scalar form. ──
+        # Under draft-02 §FutureWork (Bulk Agent Protocol), `bap` carries a
+        # single versioned protocol identifier per record (e.g. "mcp2.1").
+        # Pre-PR-4 directory rows may serialize it as a list or as a
+        # comma-separated string; collapse to the first value in either case.
+        # Done before the ``_AGENT_FIELDS_STRIP_IF_NONE`` pass so ``bap=None``
+        # still gets stripped.
         bap = agent.get("bap")
-        if isinstance(bap, str):
-            agent["bap"] = [item.strip() for item in bap.split(",") if item.strip()]
+        if isinstance(bap, list):
+            agent["bap"] = bap[0].strip() if bap and isinstance(bap[0], str) else None
+        elif isinstance(bap, str):
+            first = next((item.strip() for item in bap.split(",") if item.strip()), None)
+            agent["bap"] = first
 
         # ── Adapt agent shape: derive ``target_host`` from ``endpoint_url`` only. ──
         # If neither field is set, drop the record and log — never fabricate. The

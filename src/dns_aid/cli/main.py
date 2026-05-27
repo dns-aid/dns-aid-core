@@ -121,7 +121,10 @@ def publish(
     bap: Annotated[
         str | None,
         typer.Option(
-            "--bap", help="Supported bulk agent protocols (comma-separated, e.g., 'mcp,a2a')"
+            "--bap",
+            help="Bulk Agent Protocol identifier — single versioned protocol per "
+            "record (e.g., 'mcp2.1', 'a2a1.0'). Experimental per draft-02 §FutureWork; "
+            "alpn remains the canonical protocol carrier.",
         ),
     ] = None,
     policy_uri: Annotated[
@@ -230,8 +233,9 @@ def publish(
 
     console.print("\n[bold]Publishing agent to DNS...[/bold]\n")
 
-    # Parse bap comma-separated string into list
-    bap_list = [b.strip() for b in bap.split(",") if b.strip()] if bap else None
+    # bap is a single versioned-protocol identifier per draft-02 §FutureWork
+    # (Bulk Agent Protocol). Pass through unchanged; whitespace-trimmed.
+    bap_value = bap.strip() if bap else None
 
     # Validate sign options
     if sign and not private_key:
@@ -255,7 +259,7 @@ def publish(
             cap_uri=cap_uri,
             cap_sha256=cap_sha256,
             well_known_path=well_known,
-            bap=bap_list,
+            bap=bap_value,
             policy_uri=policy_uri,
             realm=realm,
             connect_class=connect_class,
@@ -458,7 +462,7 @@ def discover(
                     "cap_uri": a.cap_uri,
                     "cap_sha256": a.cap_sha256,
                     "well_known_path": a.well_known_path,
-                    "bap": a.bap if a.bap else None,
+                    "bap": a.bap,
                     "policy_uri": a.policy_uri,
                     "realm": a.realm,
                     "description": a.description,

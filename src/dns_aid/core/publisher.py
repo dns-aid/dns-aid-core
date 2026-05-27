@@ -86,7 +86,7 @@ async def publish(
     cap_uri: str | None = None,
     cap_sha256: str | None = None,
     well_known_path: str | None = None,
-    bap: list[str] | None = None,
+    bap: str | None = None,
     policy_uri: str | None = None,
     realm: str | None = None,
     connect_class: str | None = None,
@@ -127,7 +127,12 @@ async def publish(
             cap_uri; both may be set. Consumers prefer cap_uri when both are
             present and fall back to reconstructing
             https://<svcb-target>/.well-known/<well_known_path>.
-        bap: Supported bulk agent protocols (e.g., ["mcp", "a2a"])
+        bap: Optional single versioned agent-protocol identifier (e.g. "mcp2.1",
+            "a2a1.0") for the Bulk Agent Protocol SvcParamKey. Experimental per
+            draft-02 §FutureWork; alpn remains the canonical protocol carrier.
+            Multi-protocol agents publish multiple AgentRecord instances at the
+            same flat owner name, each with its own alpn and (optionally) bap —
+            NOT as a comma-separated list on a single record.
         policy_uri: URI to agent policy document
         realm: Multi-tenant scope identifier (e.g., "production")
         connect_class: Connection mediation class (e.g., "direct", "lattice", "apphub-psc")
@@ -256,7 +261,7 @@ async def publish(
         cap_uri=cap_uri,
         cap_sha256=cap_sha256,
         well_known_path=well_known_path,
-        bap=bap or [],
+        bap=bap,
         policy_uri=policy_uri,
         realm=realm,
         connect_class=connect_class,

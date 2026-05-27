@@ -469,8 +469,12 @@ async def _query_single_agent(
             cap_uri = custom_params.get("cap")
             cap_sha256 = custom_params.get("cap-sha256")
             well_known_path = custom_params.get("well-known")
-            bap_str = custom_params.get("bap", "")
-            bap = [b.strip() for b in bap_str.split(",") if b.strip()] if bap_str else []
+            # Under draft-02 §FutureWork (Bulk Agent Protocol), `bap` carries
+            # a single versioned protocol identifier per record (e.g., "mcp2.1").
+            # Pre-PR 4 records may have a comma-separated list; in that case we
+            # take the first value to preserve a sensible scalar.
+            bap_raw = custom_params.get("bap")
+            bap = bap_raw.split(",")[0].strip() if bap_raw else None
             policy_uri = custom_params.get("policy")
             realm = custom_params.get("realm")
             connect_class = custom_params.get("connect-class")
@@ -1349,15 +1353,14 @@ async def discover_at_fqdn(fqdn: str) -> AgentRecord | None:
     # DNS query is identical regardless of which Protocol we ask for —
     # only the AgentRecord.protocol field gets stamped from it — so we
     # resolve once and then read the actual protocol from the record's
-    # `bap` list (preferred per draft-02 §Known Agent) or fall back to
-    # the protocol kwarg if neither bap nor alpn names a known value.
+    # ``bap`` scalar (preferred per draft-02 §Known Agent) or fall back
+    # to the protocol kwarg if bap doesn't name a value we model.
     result = await _query_single_agent(domain, name, Protocol.MCP)
     if result is None:
         return None
     # Reconcile the record's protocol with what was actually announced.
-    declared = next(
-        (p for p in result.bap if p.strip() in {pv.value for pv in Protocol}),
-        None,
+    declared = (
+        result.bap if result.bap and result.bap.strip() in {pv.value for pv in Protocol} else None
     )
     if declared is not None:
         # bap may carry a value we don't model (e.g. an extension);
