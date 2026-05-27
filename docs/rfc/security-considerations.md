@@ -1,6 +1,6 @@
 # Security Considerations
 
-This document describes the security considerations for DNS-AID (DNS-based Agent Identification and Discovery) as specified in [draft-mozleywilliams-dnsop-dnsaid-01](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/).
+This document describes the security considerations for DNS-AID (DNS-based Agent Identification and Discovery) as specified in [draft-mozleywilliams-dnsop-dnsaid-02](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/).
 
 ## 1. Threat Model (STRIDE Analysis)
 

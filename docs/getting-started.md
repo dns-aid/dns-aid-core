@@ -292,7 +292,7 @@ asyncio.run(verify_connection())
 ### Infoblox UDDI Limitations & DNS-AID Compliance
 
 > **⚠️ Important**: Infoblox UDDI is **not fully compliant** with the
-> [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/).
+> [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/).
 >
 > Infoblox UDDI SVCB only supports "alias mode" (priority 0) and lacks support for required
 > SVC parameters (`alpn`, `port`, `mandatory`). The DNS-AID draft requires ServiceMode
@@ -1680,4 +1680,4 @@ stable public API. They will be integrated in a future release once the
 
 - Read the [API Reference](api-reference.md)
 - Explore [examples/](../examples/)
-- Review the [IETF draft specification](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/)
+- Review the [IETF draft specification](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/)

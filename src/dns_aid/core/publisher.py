@@ -5,7 +5,7 @@
 DNS-AID Publisher: Create DNS records for AI agent discovery.
 
 This module handles publishing agents to DNS using SVCB and TXT records
-as specified in IETF draft-mozleywilliams-dnsop-dnsaid-01.
+as specified in IETF draft-mozleywilliams-dnsop-dnsaid-02.
 """
 
 from __future__ import annotations

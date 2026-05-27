@@ -5,7 +5,7 @@
 DNS-based Domain Control Validation (DCV) for agent identity assertion.
 
 Implements the challenge-response pattern from:
-- IETF draft-mozleywilliams-dnsop-dnsaid-01  (bnd-req binding extension)
+- IETF draft-mozleywilliams-dnsop-dnsaid-02  (bnd-req binding extension)
 - draft-ietf-dnsop-domain-verification-techniques-12  (TXT record wire format)
 
 Two primary use cases:

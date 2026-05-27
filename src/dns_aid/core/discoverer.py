@@ -5,7 +5,7 @@
 DNS-AID Discoverer: Query DNS to find AI agents.
 
 This module handles discovering agents via DNS queries for SVCB and TXT
-records as specified in IETF draft-mozleywilliams-dnsop-dnsaid-01.
+records as specified in IETF draft-mozleywilliams-dnsop-dnsaid-02.
 """
 
 from __future__ import annotations
