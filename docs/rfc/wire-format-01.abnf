@@ -1,5 +1,5 @@
 ; DNS-AID Wire Format - ABNF Grammar
-; Reference: draft-mozleywilliams-dnsop-dnsaid-02
+; Reference: draft-mozleywilliams-dnsop-dnsaid-01
 ;
 ; This document defines the wire format for DNS-AID records using
 ; Augmented Backus-Naur Form (ABNF) as specified in RFC 5234.
@@ -22,35 +22,23 @@ DQUOTE         = %x22                ; " (double quote)
 VCHAR          = %x21-7E             ; visible (printing) characters
 
 ; ==================================================================
-; DNS-AID FQDN Format (draft-02)
+; DNS-AID FQDN Format
 ; ==================================================================
 
-; The agent's primary owner name is a flat FQDN, valid as an x.509
-; SAN dNSName. Publishers MAY additionally publish a walkable
-; AliasMode record at the _agents leaf so crawlers and DNS-SD-style
-; consumers can enumerate. Consumers MUST try the flat form first.
+; DNS-AID agent FQDN follows the pattern:
+; _{agent-name}._{protocol}._agents.{domain}.
 
-dns-aid-fqdn          = agent-name "." domain "."
-                        ; Flat primary owner — the form publishers
-                        ; SHOULD support and consumers MUST try first
-
-dns-aid-walkable-fqdn = agent-name "._agents." domain "."
-                        ; Optional walkable AliasMode at the
-                        ; _agents leaf; SVCB priority MUST be 0
-                        ; (AliasMode) pointing at the flat owner
+dns-aid-fqdn   = "_" agent-name "._" protocol "._agents." domain "."
 
 agent-name     = 1*63(ALPHA / DIGIT / "-")
                  ; Agent name: alphanumeric with hyphens
                  ; Max 63 characters per DNS label rules
-                 ; The agent protocol is NOT in the FQDN under -02;
-                 ; it lives in the `bap` SvcParamKey (or `alpn` when
-                 ; only one protocol is supported)
 
-protocol       = "mcp" / "a2a" / extension-protocol
-                 ; Agent protocols (values for `bap` and, when only
-                 ; one is supported, `alpn`)
+protocol       = "mcp" / "a2a" / "https" / extension-protocol
+                 ; Supported protocols
                  ; mcp  = Model Context Protocol
                  ; a2a  = Agent-to-Agent Protocol
+                 ; https = Standard HTTPS
 
 extension-protocol = "x-" 1*62(ALPHA / DIGIT / "-")
                      ; Experimental protocols prefixed with "x-"
@@ -90,12 +78,11 @@ svc-param      = mandatory-param
                / port-param
                / ipv4hint-param
                / ipv6hint-param
-               / cap-param           ; DNS-AID: capability descriptor locator
-               / cap-sha256-param    ; DNS-AID: capability descriptor digest
-               / bap-param           ; DNS-AID: bulk agent protocols
-               / policy-param        ; DNS-AID: policy bundle URI
+               / cap-param           ; DNS-AID: capability document URI
+               / capsha256-param     ; DNS-AID: capability document hash
+               / bap-param           ; DNS-AID: application protocols
+               / policy-param        ; DNS-AID: policy document URI
                / realm-param         ; DNS-AID: multi-tenant scope
-               / well-known-param    ; DNS-AID: RFC 8615 well-known path
                / unknown-param
 
 ; ==================================================================
@@ -143,57 +130,38 @@ IPv6-compressed = *1(":" 1*4HEXDIG) "::" *1(1*4HEXDIG ":")
                   ; Simplified - full IPv6 grammar is complex
 
 ; ==================================================================
-; DNS-AID Custom SVCB Parameters (draft-02 §4 IANA Considerations)
+; DNS-AID Custom SVCB Parameters (draft-01 Section 4.4.3)
 ; ==================================================================
 
-; Capability descriptor locator (key 65400)
-cap-param      = "cap=" DQUOTE cap-locator DQUOTE
-cap-locator    = URI / urn / json-ref
-                 ; Capability descriptor locator or inline identifier
-                 ; Per -02: a URI, URN, or compact JSON-Ref
-                 ; e.g., "https://agent.example.com/cap.json" or
-                 ; "urn:example:agent-cap:abc123"
+; Capability document URI (key 65400)
+cap-param      = "cap=" DQUOTE cap-uri DQUOTE
+cap-uri        = URI
+                 ; URI to JSON capability descriptor document
+                 ; e.g., "https://agent.example.com/.well-known/agent-cap.json"
 
-urn            = "urn:" 1*(ALPHA / DIGIT / "-" / ":")
-json-ref       = 1*(ALPHA / DIGIT / "-" / "/" / "#" / ".")
-                 ; Simplified — see https://datatracker.ietf.org/doc/draft-handrews-json-schema-02/
-
-; Capability descriptor integrity digest (key 65401)
-cap-sha256-param = "cap-sha256=" DQUOTE base64url DQUOTE
+; Capability document integrity hash (key 65401)
+capsha256-param = "capsha256=" DQUOTE base64url DQUOTE
 base64url      = 1*43(ALPHA / DIGIT / "-" / "_")
-                 ; Base64url-encoded SHA-256 digest (RFC 4648 §5)
+                 ; Base64url-encoded SHA-256 digest (RFC 4648 Section 5)
                  ; 32 bytes = 43 base64url characters (no padding)
-                 ; Per -02: hash of the canonical capability descriptor
 
-; Bulk agent protocols (key 65402)
+; DNS-AID Application Protocols (key 65402)
 bap-param      = "bap=" DQUOTE bap-list DQUOTE
-bap-list       = protocol *("," protocol)
-                 ; Per -02: agent protocols supported at this endpoint
-                 ; e.g., "mcp" or "mcp,a2a"
-                 ; Version suffixes (e.g. "mcp/1") were proposed as an
-                 ; experimental extension in -02 §FutureWork (Bulk Agent
-                 ; Protocol) and are not normative in the base spec
+bap-list       = bap-entry *("," bap-entry)
+bap-entry      = protocol ["/" version-number]
+version-number = 1*3DIGIT
+                 ; e.g., "mcp/1,a2a/1"
 
-; Policy bundle URI (key 65403)
+; Policy document URI (key 65403)
 policy-param   = "policy=" DQUOTE policy-uri DQUOTE
 policy-uri     = URI
-                 ; URI of an associated policy bundle
-                 ; Payload semantics deferred to a future revision
+                 ; URI to agent policy document (terms of use, data handling)
 
 ; Multi-tenant realm (key 65404)
 realm-param    = "realm=" DQUOTE realm-value DQUOTE
 realm-value    = 1*63(ALPHA / DIGIT / "-" / "_")
-                 ; Opaque token for multi-tenant scoping or authz realm
-                 ; selection during protocol bootstrapping
+                 ; Scope identifier for authorization
                  ; e.g., "production", "staging", "tenant-42"
-
-; Well-known path suffix (key 65409, new in -02)
-well-known-param = "well-known=" DQUOTE wk-path DQUOTE
-wk-path        = 1*(ALPHA / DIGIT / "-" / "." / "_" / "/")
-                 ; RFC 8615 well-known path suffix
-                 ; e.g., "agent-card.json" — consumer constructs
-                 ; https://<svcb-target>/.well-known/<wk-path>
-                 ; Independent of `cap`; both may be present.
 
 ; Generic URI rule (simplified from RFC 3986)
 URI            = scheme "://" authority path-abempty
@@ -205,12 +173,11 @@ segment        = *(ALPHA / DIGIT / "-" / "." / "_" / "~" / "%" / "!" / "@")
 
 ; Wire format note: Until IANA assigns permanent key IDs,
 ; implementations MUST use generic key encoding:
-;   key65400="https://..."          (cap)
-;   key65401="dGVzdGhhc2g"          (cap-sha256)
-;   key65402="mcp"                  (bap)
-;   key65403="https://..."          (policy)
-;   key65404="production"           (realm)
-;   key65409="agent-card.json"      (well-known)
+;   key65400="https://..."   (cap)
+;   key65401="dGVzdGhhc2g"   (capsha256)
+;   key65402="mcp/1,a2a/1"   (bap)
+;   key65403="https://..."   (policy)
+;   key65404="production"    (realm)
 
 ; Unknown/extension parameters
 unknown-param  = key-name "=" param-value
@@ -278,38 +245,22 @@ error-message  = 1*256(VCHAR / SP)
                  ; Human-readable error description
 
 ; ==================================================================
-; DNS-AID Index Record Format (draft-02)
+; DNS-AID Index Record Format
 ; ==================================================================
 
-; Organization-level index for zone enumeration.
+; Optional index record for zone enumeration
 ; Published at _index._agents.{domain}.
-;
-; Under -02 the primary form is SVCB, pointing at a TargetName that
-; serves the index over HTTPS. The TargetName MUST NOT contain
-; underscores (it carries a public x.509 cert).
-;
-; A TXT-fallback form is documented in -02 §TXT-fallback for
-; environments without SVCB support.
 
-index-svcb-record = "_index._agents." domain "." SP "SVCB" SP
-                    svc-priority SP index-target [SP svc-params]
+index-record   = "_index._agents." domain "." SP "TXT" SP index-value
 
-index-target   = label *("." label) "."
-                 ; FQDN of the host serving the agent index
-                 ; MUST NOT contain underscores
-
-; TXT fallback (legacy / SVCB-less deployments)
-index-txt-record = "_index._agents." domain "." SP "TXT" SP index-txt-value
-
-index-txt-value = DQUOTE "agents=" agent-list DQUOTE
+index-value    = DQUOTE "agents=" agent-list DQUOTE
 
 agent-list     = agent-ref *("," agent-ref)
 agent-ref      = agent-name ":" protocol
                  ; Reference to agent by name and protocol
 
-; Examples:
-; _index._agents.example.com. SVCB 1 agent-index.example.com. alpn="h2" port=443
-; _index._agents.example.com. TXT "agents=network:mcp,chat:a2a"
+; Example:
+; _index._agents.example.com. TXT "agents=network:mcp,chat:a2a,assistant:https"
 
 ; ==================================================================
 ; DNS-AID Opt-Out Record Format
@@ -330,7 +281,7 @@ optout-flag    = "true" / "false"
 ; ==================================================================
 
 ; Implements domain control validation per:
-;   draft-mozleywilliams-dnsop-dnsaid-02   (bnd-req binding)
+;   draft-mozleywilliams-dnsop-dnsaid-01   (bnd-req binding)
 ;   draft-ietf-dnsop-domain-verification-techniques-12
 
 ; Challenge owner name:  _agents-challenge.{domain}
@@ -380,98 +331,71 @@ verify-token   = 32*64(ALPHA / DIGIT)
                  ; 32-64 alphanumeric characters
 
 ; ==================================================================
-; Complete Examples (draft-02)
+; Complete Examples
 ; ==================================================================
 
-; Example 1: MCP Agent — flat primary owner
+; Example 1: MCP Agent SVCB Record
 ;
-; network.example.com. 3600 IN SVCB 1 mcp.example.com. (
-;     mandatory="alpn,port"
+; _network._mcp._agents.example.com. 3600 IN SVCB 1 mcp.example.com. (
+;     mandatory="alpn"
 ;     alpn="mcp"
 ;     port="443"
-;     bap="mcp"
 ; )
 
-; Example 2: A2A Agent
+; Example 2: A2A Agent SVCB Record
 ;
-; chat.example.com. 3600 IN SVCB 1 chat.example.com. (
+; _chat._a2a._agents.example.com. 3600 IN SVCB 1 chat.example.com. (
 ;     alpn="a2a"
 ;     port="443"
 ;     ipv4hint="192.0.2.1"
-;     bap="a2a"
 ; )
 
-; Example 3: ServiceMode with DNS-AID custom parameters
+; Example 3: SVCB Record with DNS-AID Custom Parameters (v0.4.8)
 ;
-; booking.example.com. 3600 IN SVCB 1 booking.example.com. (
+; _booking._mcp._agents.example.com. 3600 IN SVCB 1 booking.example.com. (
 ;     mandatory="alpn,port"
-;     alpn="h2"
+;     alpn="mcp"
 ;     port="443"
-;     bap="mcp"
-;     cap="https://booking.example.com/cap.json"
-;     cap-sha256="dGVzdGhhc2g..."
-;     well-known="agent-card.json"
+;     cap="https://booking.example.com/.well-known/agent-cap.json"
+;     bap="mcp/1"
 ;     policy="https://example.com/agent-policy.json"
 ;     realm="production"
 ; )
 ;
-; Wire format (generic keyNNNNN encoding for providers that don't
-; understand the custom names yet):
-; booking.example.com. 3600 IN SVCB 1 booking.example.com. (
+; Wire format (Route 53 compatible with generic keys):
+; _booking._mcp._agents.example.com. 3600 IN SVCB 1 booking.example.com. (
 ;     mandatory="alpn,port"
-;     alpn="h2"
+;     alpn="mcp"
 ;     port="443"
-;     key65400="https://booking.example.com/cap.json"
-;     key65401="dGVzdGhhc2g..."
-;     key65402="mcp"
+;     key65400="https://booking.example.com/.well-known/agent-cap.json"
+;     key65402="mcp/1"
 ;     key65403="https://example.com/agent-policy.json"
 ;     key65404="production"
-;     key65409="agent-card.json"
 ; )
 
-; Example 4: Walkable AliasMode at the _agents leaf (optional)
+; Example 4: TXT Capabilities Record
 ;
-; chat._agents.example.com. 3600 IN SVCB 0 chat.example.com.
-
-; Example 5: TXT capabilities record (optional companion to the SVCB)
-;
-; network.example.com. 3600 IN TXT (
+; _network._mcp._agents.example.com. 3600 IN TXT (
 ;     "capabilities=chat,code,tools"
 ;     "version=1.2.0"
 ;     "model=claude-3"
 ; )
 
-; Example 6: Organization index (SVCB primary form)
+; Example 4: Index Record
 ;
-; _index._agents.example.com. 3600 IN SVCB 1 agent-index.example.com. (
-;     alpn="h2"
-;     port="443"
-; )
-; ; (TargetName "agent-index.example.com" MUST NOT contain underscores)
+; _index._agents.example.com. 3600 IN TXT "agents=network:mcp,chat:a2a"
 
-; Example 7: Opt-Out Record (dns-aid-core convention; not in -02)
+; Example 5: Opt-Out Record
 ;
 ; _dns-aid-optout.private.example.com. 3600 IN TXT "optout=true"
 
 ; ==================================================================
-; Wire Format Notes (draft-02)
+; Wire Format Notes
 ; ==================================================================
 
-; 1. DNSSEC: -02 relaxes the DNSSEC requirement. Records MAY be
-;    DNSSEC-signed for data origin authentication and integrity.
-;    Records MUST be DNSSEC-signed if TLSA records are used (DANE
-;    depends on DNSSEC). Consumers SHOULD validate DNSSEC where
-;    available and SHOULD refuse to act on bogus or unverifiable
-;    records.
-; 2. SVCB records use RFC 9460 wire format (2-byte key, 2-byte length,
-;    value)
+; 1. All DNS-AID records MUST be DNSSEC-signed
+; 2. SVCB records use RFC 9460 wire format (2-byte key, 2-byte length, value)
 ; 3. TXT records use RFC 1035 format (1-byte length prefix per string)
 ; 4. Maximum TXT record size is limited by UDP (typically 512 bytes)
-;    or TCP (up to 65535 bytes); -02 §Operational targets ≤1232 bytes
-;    for the discovery RRset to fit one UDP datagram and avoid
-;    fragmentation
+;    or TCP (up to 65535 bytes)
 ; 5. Character encoding is ASCII for DNS labels, UTF-8 for TXT values
-; 6. SVCB TargetNames reached over TLS with a public x.509 cert MUST
-;    NOT contain underscores (per -02 §Known Organization). This
-;    constraint applies to the index TargetName and to any agent's
-;    SVCB target that needs a publicly-issued cert.
