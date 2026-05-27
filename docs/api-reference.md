@@ -295,7 +295,7 @@ for agent in result.agents:
 
 ### verify()
 
-Verify DNS-AID records for an agent with security validation.
+Verify DNS-AID records as interpreted by this implementation, with security validation.
 
 ```python
 async def verify(fqdn: str) -> VerifyResult

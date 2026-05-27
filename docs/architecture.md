@@ -2,7 +2,7 @@
 
 ## Overview
 
-DNS-AID implements the IETF draft-mozleywilliams-dnsop-dnsaid-01 protocol for
+This implementation follows the IETF draft-mozleywilliams-dnsop-dnsaid protocol for
 DNS-based agent discovery. This document covers the key architectural decisions.
 
 ## Relationship to IETF
@@ -192,9 +192,14 @@ that round-trip the same inputs through every surface.
    - Not found → endpoint_source = "http_index_fallback"
 ```
 
-### Future Enhancement: HTTP Index Fallback in DNS Mode
+## Future Enhancements (Non-Normative)
+
 These are implementation proposals and are not part of the current IETF draft.
+
 Items in this section may inform future versions of the specification but should not be treated as authoritative.
+
+### Future Enhancement: HTTP Index Fallback in DNS Mode
+
 Currently the two discovery modes are independent — pure DNS never consults the
 HTTP index and vice versa. Per the DNS-AID draft, the HTTP well-known endpoint
 is a complementary discovery mechanism. A future enhancement should add an
