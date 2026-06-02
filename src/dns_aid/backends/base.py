@@ -10,6 +10,7 @@ implement this interface.
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -86,6 +87,83 @@ class DNSBackend(ABC):
         Override in subclasses to indicate support level.
         """
         return False
+
+    def _txt_fallback_enabled(self) -> bool:
+        """Return True iff this backend should write TXT-fallback instead of SVCB.
+
+        Requires both:
+        - ``self.supports_svcb`` is ``False`` (backend wraps a DNS system that
+          can't write SVCB)
+        - ``DNS_AID_EXPERIMENTAL_TXT_FALLBACK`` is truthy in the environment
+          (operator opt-in)
+
+        Used by :meth:`publish_agent` to decide whether to take the
+        TXT-fallback write path. Backends that override ``publish_agent``
+        should also consult this helper at the top of their override so the
+        feature behaves consistently across backend implementations.
+        """
+        if self.supports_svcb:
+            return False
+        return os.environ.get("DNS_AID_EXPERIMENTAL_TXT_FALLBACK", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
+    async def _publish_via_txt_fallback(
+        self, agent: AgentRecord, zone: str, name: str
+    ) -> list[str]:
+        """Write a TXT-encoded agent record for SVCB-less DNS deployments.
+
+        Emits a single TXT RR containing the ``v=1 target=... port=...``
+        body produced by :func:`dns_aid.core._txt_fallback.build_txt_fallback`,
+        followed by the companion metadata values from
+        :meth:`AgentRecord.to_txt_values` so downstream readers and ``dig``
+        debuggers still see capability / version / description.
+        """
+        from dns_aid.core._txt_fallback import build_txt_fallback
+
+        logger.info(
+            "Publishing agent via TXT fallback (backend does not support SVCB)",
+            backend=self.name,
+            agent_fqdn=f"{name}.{zone}",
+        )
+        txt_values: list[str] = [build_txt_fallback(agent)]
+        txt_values.extend(agent.to_txt_values())
+        txt_fqdn = await self.create_txt_record(
+            zone=zone,
+            name=name,
+            values=txt_values,
+            ttl=agent.ttl,
+        )
+        records = [f"TXT {txt_fqdn} (fallback v=1)"]
+        logger.info(
+            "Agent published via TXT fallback",
+            backend=self.name,
+            records=records,
+        )
+        return records
+
+    @property
+    def supports_svcb(self) -> bool:
+        """Whether this backend's underlying DNS system supports SVCB records at all.
+
+        This is distinct from :attr:`supports_private_svcb_keys`, which is
+        about *key encoding* inside a SVCB record. ``supports_svcb`` is about
+        whether the backend can write SVCB records of any kind.
+
+        Returns:
+            ``True``  — backend writes SVCB records (default; all currently
+                        bundled backends — Route53, Cloudflare, Google Cloud
+                        DNS, NS1, NIOS, UDDI — return True).
+            ``False`` — backend cannot write SVCB. The publisher will fall
+                        back to a TXT-encoded agent record when the
+                        ``DNS_AID_EXPERIMENTAL_TXT_FALLBACK`` env flag is set.
+
+        Override in subclasses wrapping older DNS appliances, smaller hosted
+        providers, or self-hosted DNS that hasn't adopted SVCB yet.
+        """
+        return True
 
     @abstractmethod
     async def create_svcb_record(
@@ -239,6 +317,16 @@ class DNSBackend(ABC):
         records: list[str] = []
         zone = agent.domain
         name = f"_{agent.name}._{agent.protocol.value}._agents"
+
+        # ── TXT-fallback gate (experimental) ─────────────────────────────
+        # When the underlying DNS system can't write SVCB at all, fall back
+        # to a TXT-encoded agent record so SDK consumers can still discover
+        # this agent. Off by default — operators must opt in via env flag
+        # AND the backend must explicitly signal SVCB-unsupported, both to
+        # avoid surprising publisher behaviour and to keep the experimental
+        # path quiescent for the typical case.
+        if self._txt_fallback_enabled():
+            return await self._publish_via_txt_fallback(agent, zone, name)
 
         all_params = agent.to_svcb_params()
         support = self.supports_private_svcb_keys

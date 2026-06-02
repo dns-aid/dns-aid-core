@@ -177,10 +177,44 @@ that round-trip the same inputs through every surface.
 1. Query TXT _index._agents.{domain} → list of agent:protocol pairs
 2. For each agent: Query SVCB _{name}._{protocol}._agents.{domain}
    → extract endpoint, port, ALPN + DNS-AID custom params (cap, bap, policy, realm)
+   On SVCB NoAnswer → try HTTPS RR (RFC 9460 type 65)
+   On HTTPS NoAnswer → try TXT v=1 fallback (see below)
 3. For each agent: If cap URI present → fetch capability document (primary)
    → capabilities, version, description, use_cases, category
 4. For each agent: If no cap URI or fetch failed → query TXT for capabilities= (fallback)
 ```
+
+#### SVCB → HTTPS → TXT fallback ladder
+
+For DNS deployments that don't expose SVCB records (older managed-DNS
+appliances, smaller hosted providers, self-hosted DNS that hasn't adopted
+SVCB yet), the discoverer falls back to a TXT-encoded representation of the
+same agent endpoint information. The TXT body mirrors the SVCB SvcParam
+names as `key=value` pairs and is distinguished from the existing
+capabilities/metadata TXT by a leading `v=1` discriminator:
+
+```
+_chat._mcp._agents.example.com. 3600 IN TXT (
+    "v=1 target=mcp.example.com port=443 alpn=mcp "
+    "cap=https://example.com/cap/chat-v1.json cap-sha256=..."
+)
+```
+
+Resolution order inside `_query_single_agent`:
+
+1. SVCB — primary, preserves existing behaviour
+2. HTTPS RR (type 65, same SVCB family) — short fallback for clients that
+   prefer the HTTPS-specific record
+3. **TXT `v=1` fallback** — for SVCB-less zones; produces a complete
+   `AgentRecord` with `endpoint_source="dns_txt_fallback"`. Coexists with
+   metadata TXT (`capabilities=...`) on the same FQDN
+
+The publisher side is opt-in: a backend declaring `supports_svcb=False`
+combined with `DNS_AID_EXPERIMENTAL_TXT_FALLBACK=1` writes the fallback
+TXT instead of SVCB. Backends that do support SVCB (every bundled
+backend today) are unaffected. Full grammar in
+[`docs/rfc/wire-format.abnf`](rfc/wire-format.abnf) under
+`dns-aid-txt-fallback`.
 
 ### HTTP Index Discovery
 

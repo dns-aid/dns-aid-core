@@ -351,6 +351,7 @@ class AgentRecord(BaseModel):
         Literal[
             "dns_svcb",
             "dns_svcb_enriched",
+            "dns_txt_fallback",
             "http_index",
             "http_index_fallback",
             "direct",
@@ -361,6 +362,7 @@ class AgentRecord(BaseModel):
         default=None,
         description="Source of endpoint: 'dns_svcb' (from DNS SVCB record), "
         "'dns_svcb_enriched' (DNS + .well-known/agent-card.json path), "
+        "'dns_txt_fallback' (DNS TXT-encoded fallback for SVCB-less zones), "
         "'http_index' (DNS + HTTP index endpoint), "
         "'http_index_fallback' (HTTP index without DNS), 'direct' (explicitly provided), "
         "'directory' (from directory API search, Phase 5.7)",
