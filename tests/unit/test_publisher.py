@@ -293,11 +293,18 @@ class TestPublishTargetUnderscoreValidation:
         assert exc.value.field == "target"
 
     @pytest.mark.asyncio
-    async def test_underscored_endpoint_allowed_with_flag(self, mock_backend: MockBackend, caplog):
-        """allow_underscore_target=True downgrades to a warning and proceeds."""
-        import logging
+    async def test_underscored_endpoint_allowed_with_flag_and_env(
+        self, mock_backend: MockBackend, monkeypatch
+    ):
+        """allow_underscore_target=True now requires the operator to
+        ALSO opt in via the env var. Both together let the publish
+        proceed with a structured WARN; one without the other raises."""
+        from unittest.mock import patch
 
-        with caplog.at_level(logging.WARNING):
+        from dns_aid.utils import validation as validation_module
+
+        monkeypatch.setenv("DNS_AID_ALLOW_UNDERSCORE_TARGET", "1")
+        with patch.object(validation_module, "logger") as mock_logger:
             result = await publish(
                 name="chat",
                 domain="example.com",
@@ -307,7 +314,30 @@ class TestPublishTargetUnderscoreValidation:
                 allow_underscore_target=True,
             )
         assert result.success is True
-        assert any("_chat" in record.message for record in caplog.records)
+        # The warn fires from each enforcement site (publisher entrypoint
+        # + AgentRecord field_validator + SvcbRecord field_validator) —
+        # all carrying the same warning_class, all keyed on the same
+        # target. That's noisy but coherent: every gate sees the bypass.
+        warn_calls = mock_logger.warning.call_args_list
+        assert len(warn_calls) >= 1
+        assert all(c.kwargs.get("warning_class") == "dns_aid.underscore_bypass" for c in warn_calls)
+        assert all("_chat" in c.kwargs.get("target", "") for c in warn_calls)
+
+    @pytest.mark.asyncio
+    async def test_underscored_endpoint_flag_without_env_raises(
+        self, mock_backend: MockBackend, monkeypatch
+    ):
+        """Without the env gate, the per-call flag alone is insufficient."""
+        monkeypatch.delenv("DNS_AID_ALLOW_UNDERSCORE_TARGET", raising=False)
+        with pytest.raises(ValidationError):
+            await publish(
+                name="chat",
+                domain="example.com",
+                protocol="a2a",
+                endpoint="_chat.internal.example",
+                backend=mock_backend,
+                allow_underscore_target=True,
+            )
 
     @pytest.mark.asyncio
     async def test_clean_endpoint_passes(self, mock_backend: MockBackend):

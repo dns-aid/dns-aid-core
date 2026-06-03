@@ -373,14 +373,49 @@ class TestValidateNoUnderscoreInTarget:
         assert "_a" in msg
         assert "_b" in msg
 
-    def test_allow_underscore_downgrades_to_warning(self, caplog):
-        import logging
+    def test_allow_underscore_requires_env_gate(self, monkeypatch):
+        """The bypass is operator-gated. ``allow_underscore=True`` alone
+        is insufficient — ``DNS_AID_ALLOW_UNDERSCORE_TARGET`` must also
+        be set in the environment so a calling LLM or MCP client can't
+        unilaterally downgrade the draft §Known Organization MUST."""
+        monkeypatch.delenv("DNS_AID_ALLOW_UNDERSCORE_TARGET", raising=False)
 
-        with caplog.at_level(logging.WARNING):
+        with pytest.raises(ValidationError):
+            validate_no_underscore_in_target("_index.example.com", allow_underscore=True)
+
+    def test_allow_underscore_with_env_gate_allows(self, monkeypatch):
+        """With env gate set, allow_underscore=True is honoured and
+        emits a structured WARN for log aggregation."""
+        from unittest.mock import patch
+
+        from dns_aid.utils import validation as validation_module
+
+        monkeypatch.setenv("DNS_AID_ALLOW_UNDERSCORE_TARGET", "1")
+        with patch.object(validation_module, "logger") as mock_logger:
             result = validate_no_underscore_in_target("_index.example.com", allow_underscore=True)
         assert result == "_index.example.com"
-        assert any("_index" in record.message for record in caplog.records)
-        assert any(record.levelno == logging.WARNING for record in caplog.records)
+        mock_logger.warning.assert_called_once()
+        kwargs = mock_logger.warning.call_args.kwargs
+        assert kwargs["target"] == "_index.example.com"
+        assert kwargs["warning_class"] == "dns_aid.underscore_bypass"
+        assert kwargs["env_gate"] == "DNS_AID_ALLOW_UNDERSCORE_TARGET"
+
+    def test_allow_underscore_without_env_logs_distinct_warning(self, monkeypatch):
+        """When the caller asks for the bypass but the env gate is
+        unset, surface that with a distinct warning_class so operators
+        can distinguish 'I forgot to set the env' from 'genuine
+        validation error'."""
+        from unittest.mock import patch
+
+        from dns_aid.utils import validation as validation_module
+
+        monkeypatch.delenv("DNS_AID_ALLOW_UNDERSCORE_TARGET", raising=False)
+        with patch.object(validation_module, "logger") as mock_logger:
+            with pytest.raises(ValidationError):
+                validate_no_underscore_in_target("_index.example.com", allow_underscore=True)
+        mock_logger.warning.assert_called_once()
+        kwargs = mock_logger.warning.call_args.kwargs
+        assert kwargs["warning_class"] == "dns_aid.underscore_bypass_env_missing"
 
     def test_allow_underscore_on_clean_target_is_silent(self, caplog):
         import logging
@@ -444,11 +479,40 @@ class TestValidateWellKnownPath:
             with pytest.raises(ValidationError):
                 validate_well_known_path(evil)
 
-    def test_rejects_embedded_slash(self):
+    def test_rejects_embedded_slash_in_bare_suffix(self):
+        """Bare suffixes can't contain slashes — that's the single-segment
+        constraint. Absolute paths starting with '/' are a separate, supported
+        shape (see test_accepts_absolute_paths)."""
         for evil in (
             "agent/card.json",
+            "agent-card.json/extra",  # trailing junk
+            "//double-leading-slash",  # absolute but with empty first segment
+            "/seg//empty",  # empty segment in absolute path
+        ):
+            with pytest.raises(ValidationError):
+                validate_well_known_path(evil)
+
+    def test_accepts_absolute_paths_per_draft_figure_3(self):
+        """Per draft Figure 3, well-known values may be absolute paths —
+        not just bare suffixes under /.well-known/. Examples from the
+        draft itself: `/.well-known/agent-card.json`, `/not-well-known/
+        other-card.json`."""
+        for ok in (
+            "/.well-known/agent-card.json",
+            "/not-well-known/other-card.json",
             "/agent-card.json",
-            "agent-card.json/extra",
+            "/openid-credential-issuer",
+            "/v1/agents/card.json",
+        ):
+            assert validate_well_known_path(ok) == ok
+
+    def test_rejects_absolute_path_with_traversal(self):
+        """`..` segments must still be refused in absolute form."""
+        for evil in (
+            "/.well-known/../etc/passwd",
+            "/..",
+            "/../../etc",
+            "/segment/../escape",
         ):
             with pytest.raises(ValidationError):
                 validate_well_known_path(evil)

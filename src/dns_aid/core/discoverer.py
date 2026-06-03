@@ -382,33 +382,39 @@ async def _query_single_agent(
             connect_meta = custom_params.get("connect-meta")
             enroll_uri = custom_params.get("enroll-uri")
 
-            # Discovery priority per draft-02:
-            #   1. cap (explicit URI/URN/JSON-Ref locator) — preferred
-            #   2. well-known (RFC 8615 path suffix) — reconstructed against the SVCB target
-            #   3. A2A agent-card from cap_uri response
-            #   4. TXT fallback
+            # Descriptor-fetch precedence (local dns-aid-core convention,
+            # NOT spec-mandated — draft §6.1 names only well-known as the
+            # source). When both `cap` and `well-known` are present we
+            # prefer the explicit locator if it's https-fetchable; if it
+            # isn't (URN, JSON-Ref, non-https scheme), we fall back to
+            # the reconstructed well-known URL rather than treating the
+            # non-fetchable `cap` as terminal.
             capabilities: list[str] = []
             capability_source: Literal[
                 "cap_uri", "well_known", "agent_card", "http_index", "txt_fallback", "none"
             ] = "none"
             agent_card = None
+            cap_sha256_applied = False
 
-            # Resolve effective descriptor URL: prefer cap (explicit locator);
-            # fall back to reconstructing https://<target>/.well-known/<wk_path>
-            # when only well-known is set.
             effective_descriptor_url: str | None = None
             descriptor_source_label: Literal["cap_uri", "well_known", "none"] = "none"
-            if cap_uri:
+
+            # Item 3: only treat `cap` as a descriptor when it's
+            # https-fetchable. The fetcher's SSRF guard would reject
+            # other schemes anyway, but routing the decision here lets
+            # well-known still get a chance.
+            cap_is_https = cap_uri is not None and cap_uri.lower().startswith("https://")
+            if cap_is_https:
                 effective_descriptor_url = cap_uri
                 descriptor_source_label = "cap_uri"
-            elif well_known_path:
-                # The well-known value comes from a DNS SVCB SvcParamKey,
-                # which an attacker controls if DNSSEC isn't enforced.
-                # Validate to a single RFC 8615 suffix before interpolating
-                # into a URL — otherwise `..`, `?`, `#`, or embedded
-                # slashes would let a forged record steer the fetch off
-                # the legitimate well-known namespace. validate_fetch_url
-                # pins the host but doesn't constrain the path.
+
+            # Item 4 + path validation: well-known accepts a bare RFC
+            # 8615 suffix (e.g. ``agent-card.json``) or an absolute
+            # origin path (e.g. ``/.well-known/agent-card.json``,
+            # ``/not-well-known/other-card.json``, per draft Figure 3).
+            # The validator constrains the character class on both
+            # shapes so a forged SVCB can't steer the fetch off origin.
+            if effective_descriptor_url is None and well_known_path:
                 from dns_aid.utils.validation import (
                     ValidationError,
                     validate_well_known_path,
@@ -426,11 +432,28 @@ async def _query_single_agent(
                     safe_wk = None
 
                 if safe_wk:
-                    # SVCB target is the host serving the well-known path.
-                    # Strip any trailing dot for URL construction.
+                    # SVCB target is the host serving the well-known
+                    # path. Strip any trailing dot for URL construction.
                     wk_host = target.rstrip(".")
-                    effective_descriptor_url = f"https://{wk_host}/.well-known/{safe_wk}"
+                    if safe_wk.startswith("/"):
+                        # Absolute origin path — use as-is. Draft Figure
+                        # 3 includes values outside ``/.well-known/`` so
+                        # we don't force a prefix here.
+                        effective_descriptor_url = f"https://{wk_host}{safe_wk}"
+                    else:
+                        effective_descriptor_url = f"https://{wk_host}/.well-known/{safe_wk}"
                     descriptor_source_label = "well_known"
+
+            # Non-https `cap` (URN, JSON-Ref, etc.) with no fetchable
+            # well-known is a metadata-only locator: keep it on the
+            # record but don't try to fetch it.
+            if effective_descriptor_url is None and cap_uri is not None and not cap_is_https:
+                logger.debug(
+                    "cap is non-https locator and no well-known fallback — "
+                    "keeping cap on record but skipping descriptor fetch",
+                    fqdn=fqdn,
+                    cap_uri=cap_uri,
+                )
 
             if effective_descriptor_url:
                 cap_doc = await fetch_cap_document(
@@ -439,12 +462,21 @@ async def _query_single_agent(
                 if cap_doc and cap_doc.capabilities:
                     capabilities = cap_doc.capabilities
                     capability_source = descriptor_source_label
+                    # If cap_sha256 was supplied AND the fetcher accepted
+                    # the bytes (didn't raise CapDigestMismatchError —
+                    # see #155 fix), the integrity pin was actually
+                    # applied to these bytes. Record that as a separate
+                    # boolean so downstream consumers don't have to
+                    # guess from the mere presence of cap_sha256.
+                    if cap_sha256 is not None:
+                        cap_sha256_applied = True
                     logger.debug(
                         "Capabilities fetched from descriptor URL",
                         fqdn=fqdn,
                         descriptor_url=effective_descriptor_url,
                         source=descriptor_source_label,
                         capabilities=capabilities,
+                        cap_sha256_applied=cap_sha256_applied,
                     )
 
                 # Reuse raw data as A2AAgentCard (avoids redundant fetch later)
@@ -477,6 +509,25 @@ async def _query_single_agent(
                 if capabilities:
                     capability_source = "txt_fallback"
 
+            # Item 6: dangling cap_sha256. A `cap_sha256` value on the
+            # SVCB combined with capabilities that came from TXT or
+            # nowhere is a footgun — the pin isn't covering the bytes
+            # the caller will see. We keep the SvcParamKey value on the
+            # record for transparency (it tells consumers the operator
+            # *intended* an integrity pin) but the `cap_sha256_verified`
+            # flag clearly marks whether the pin was applied. Surface
+            # the dangling case as a warning for log scrapers.
+            if cap_sha256 is not None and not cap_sha256_applied:
+                logger.warning(
+                    "cap_sha256 declared but not applied — record carries the "
+                    "SvcParamKey value but the integrity pin did not cover the "
+                    "capabilities returned",
+                    fqdn=fqdn,
+                    declared_cap_sha256=cap_sha256,
+                    capability_source=capability_source,
+                    warning_class="dns_aid.dangling_cap_sha256",
+                )
+
             return AgentRecord(
                 name=name,
                 domain=domain,
@@ -488,6 +539,7 @@ async def _query_single_agent(
                 capabilities=capabilities,
                 cap_uri=cap_uri,
                 cap_sha256=cap_sha256,
+                cap_sha256_verified=cap_sha256_applied,
                 well_known_path=well_known_path,
                 bap=bap,
                 policy_uri=policy_uri,
@@ -506,35 +558,29 @@ async def _query_single_agent(
     return None
 
 
+# Derive the recognised DNS-AID SvcParamKey name set from the
+# single source of truth in models.py so adding a new key in one
+# place (DNS_AID_KEY_MAP) automatically updates the parser. Earlier
+# this was a literal set hand-maintained here; adding `well-known`
+# in #154 needed edits in three different files.
+from dns_aid.core.models import DNS_AID_KEY_MAP, DNS_AID_KEY_MAP_REVERSE  # noqa: E402
+
+_DNS_AID_KEY_NAMES: frozenset[str] = frozenset(DNS_AID_KEY_MAP.keys())
+
+
 def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
+    """Parse DNS-AID custom params from an SVCB record's text rendering.
+
+    Accepts both human-readable string names and RFC 9460 keyNNNNN form:
+
+    - String form: ``cap="https://..." bap="mcp,a2a" realm="demo"``
+    - Numeric form: ``key65400="https://..." key65402="mcp,a2a"``
+
+    The recognised name set is derived from
+    ``dns_aid.core.models.DNS_AID_KEY_MAP`` at module load so this
+    stays in lock-step with publishing.
     """
-    Parse DNS-AID custom params from SVCB record text representation.
-
-    Accepts both human-readable string names and RFC 9460 keyNNNNN format:
-        String form: cap="https://..." bap="mcp,a2a" realm="demo"
-        Numeric form: key65400="https://..." key65402="mcp,a2a" key65404="demo"
-
-    Args:
-        svcb_text: String representation of an SVCB rdata.
-
-    Returns:
-        Dict of custom param names (always string form) to their string values.
-    """
-    from dns_aid.core.models import DNS_AID_KEY_MAP_REVERSE
-
     custom_params: dict[str, str] = {}
-    dnsaid_keys = {
-        "cap",
-        "cap-sha256",
-        "bap",
-        "policy",
-        "realm",
-        "sig",
-        "connect-class",
-        "connect-meta",
-        "enroll-uri",
-        "well-known",
-    }
 
     try:
         parts = shlex.split(svcb_text)
@@ -551,7 +597,7 @@ def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
         if key in DNS_AID_KEY_MAP_REVERSE:
             key = DNS_AID_KEY_MAP_REVERSE[key]
 
-        if key in dnsaid_keys:
+        if key in _DNS_AID_KEY_NAMES:
             custom_params[key] = value
 
     return custom_params

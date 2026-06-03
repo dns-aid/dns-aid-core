@@ -6,26 +6,27 @@ DNS-AID Validator: Verify agent DNS records and security.
 
 Handles DNSSEC validation, DANE/TLSA verification, and endpoint health checks.
 
-DNSSEC requirement posture (draft-mozleywilliams-dnsop-dnsaid-02):
+DNSSEC requirement posture (draft-mozleywilliams-dnsop-dnsaid-02 §6.2):
 
-- DNSSEC is ``MAY`` by default. Publishers MAY publish unsigned SVCB
-  records and the validator MUST NOT fail verification solely because
-  DNSSEC was not observed.
-- DNSSEC is ``MUST`` when TLSA records are used to authenticate the TLS
-  endpoint. DANE depends on DNSSEC (RFC 6698 §10.1) and a TLSA record
-  served without a validated chain of trust offers no integrity
-  guarantee. In that case the validator treats DANE-without-DNSSEC as a
-  failure of the DANE check and the consumer SHOULD refuse to trust the
-  endpoint.
+The draft uses the **SHOULD** posture, not MAY/MUST. Verbatim:
 
-The current code path already reflects this: ``_check_dnssec_detail``
-gathers DNSSEC state independently of pass/fail, and only the DANE
-section escalates ``dnssec_valid=False`` into a problem (see the
-``dane_note`` augmentation when DANE is present without DNSSEC).
-Verification of a record set without TLSA continues to pass without
-DNSSEC. No behaviour change in -02; the posture is unchanged from the
-prior implementation, only the spec's prose now matches what the code
-already does.
+    "Consumers SHOULD authenticate the TLS endpoint of a DNS-AID agent
+    using DANE TLSA records (RFC 6698) wherever both DNSSEC and TLSA
+    are available."
+
+DNS-AID records served without DNSSEC continue to verify under this
+module — DNSSEC absence is not in itself a failure. When TLSA records
+ARE present, DNSSEC absence makes the TLSA records untrustworthy
+(RFC 6698 §10.1 — TLSA without DNSSEC offers no integrity guarantee).
+
+This validator on PR #154's branch is advisory only on the
+DANE-without-DNSSEC case: the ``dane_note`` is augmented to flag the
+combination, but ``dane_valid`` is not demoted and ``security_score``
+still credits the +15 for DANE presence. The fail-closed demotion
+(``dane_valid -> None``, ``security_score`` gating) lands separately
+on PR #155 where the broader trust-path tightening happens. The
+docstring earlier overstated the code's current behaviour on this
+branch; this version describes what the code actually does.
 """
 
 from __future__ import annotations

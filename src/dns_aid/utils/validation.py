@@ -15,8 +15,13 @@ Security Note:
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Literal
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 # DNS label constraints (RFC 1035)
 MAX_LABEL_LENGTH = 63
@@ -463,53 +468,48 @@ def validate_backend(
     return backend
 
 
+# Operator opt-in for the underscore-target bypass. A per-call kwarg /
+# MCP tool arg alone would let a calling LLM flip a draft-02 §Known
+# Organization MUST to a warning on its own. The env gate moves that
+# decision to deployment configuration where humans land it.
+_UNDERSCORE_BYPASS_ENV = "DNS_AID_ALLOW_UNDERSCORE_TARGET"
+
+
+def _underscore_bypass_env_enabled() -> bool:
+    return os.environ.get(_UNDERSCORE_BYPASS_ENV, "").lower() in ("1", "true", "yes")
+
+
 def validate_no_underscore_in_target(
     target: str,
     *,
     allow_underscore: bool = False,
 ) -> str:
-    """
-    Validate that an SVCB TargetName contains no underscored DNS labels.
+    """Validate that an SVCB TargetName contains no underscored DNS labels.
 
     Per draft-mozleywilliams-dnsop-dnsaid-02 §Known Organization, the
-    TargetName of an SVCB record that will be reached over TLS with a
-    publicly-issued x.509 certificate MUST NOT contain underscores. The
-    constraint exists because CA/Browser Forum Baseline Requirements and
-    RFC 5280 dNSName SANs both forbid underscored labels.
+    TargetName of an SVCB record reached over TLS with a publicly-issued
+    x.509 certificate MUST NOT contain underscores. CA/Browser Forum
+    Baseline Requirements and RFC 5280 dNSName SANs forbid underscored
+    labels.
 
-    dns-aid-core applies this rule to all SVCB TargetNames on its publish
-    paths by default. Deployments where the target is internal-only and
-    will not be reached via public PKI (for example, a sandbox or
-    inside-the-perimeter service identified by a private CA-issued cert)
-    can pass ``allow_underscore=True`` to downgrade the failure into a
-    warning that is logged but not raised. The validator is still called
-    in that case so the log surfaces the deliberate exception.
+    Detects mid-label underscores too (not just leading ones); the public
+    PKI rule rejects any underscore anywhere in any label of the SAN.
 
-    Args:
-        target: The SVCB TargetName host (e.g. ``"chat.example.com"`` or
-            ``"agent-index.example.com."``). Trailing dots are tolerated.
-        allow_underscore: When True, downgrade a violation to a warning
-            log line and return the (unchanged) target instead of
-            raising.
+    The bypass (``allow_underscore=True``) is operator-gated: it only
+    takes effect when ``DNS_AID_ALLOW_UNDERSCORE_TARGET`` is also set in
+    the environment to a truthy value. Without the env gate the bypass
+    is treated as not-allowed and the violation raises — so a calling
+    LLM, MCP client, or test harness can't unilaterally downgrade the
+    spec MUST. When the env gate is set, the bypass emits a structured
+    WARN with ``warning_class="dns_aid.underscore_bypass"`` so log
+    aggregators can count and alert on deliberate opt-ins per zone.
 
     Returns:
-        The target string, unchanged. (Returns rather than mutating so
-        callers can chain the call into existing pipelines.)
+        The target string, unchanged.
 
     Raises:
-        ValidationError: If ``target`` contains a label starting with or
-            consisting of an underscore and ``allow_underscore`` is
-            False.
-
-    Examples:
-        >>> validate_no_underscore_in_target("agent-index.example.com")
-        'agent-index.example.com'
-        >>> validate_no_underscore_in_target("_index.example.com")
-        Traceback (most recent call last):
-            ...
-        ValidationError: ...
-        >>> validate_no_underscore_in_target("_index.example.com", allow_underscore=True)
-        '_index.example.com'
+        ValidationError: when ``target`` contains an underscored label
+            and the bypass is not both requested AND env-gated.
     """
     if not target:
         raise ValidationError("target", "SVCB TargetName cannot be empty")
@@ -529,15 +529,38 @@ def validate_no_underscore_in_target(
         "underscored labels, so a publicly-issued x.509 cert cannot cover "
         "this name. Per draft-mozleywilliams-dnsop-dnsaid-02 §Known "
         "Organization the TargetName MUST NOT contain underscores. Pass "
-        "allow_underscore=True if this target is internal-only and will "
-        "not be reached via public PKI."
+        "allow_underscore=True AND set "
+        f"{_UNDERSCORE_BYPASS_ENV}=1 in the environment for internal-only "
+        "deployments not behind public PKI."
     )
 
-    if allow_underscore:
-        import logging
-
-        logging.getLogger(__name__).warning(message)
+    if allow_underscore and _underscore_bypass_env_enabled():
+        logger.warning(
+            "SVCB TargetName allowed despite underscored labels — "
+            "internal-only deployment opt-in (allow_underscore=True + "
+            f"{_UNDERSCORE_BYPASS_ENV} set)",
+            target=target,
+            underscored=underscored,
+            cab_forbidden_chars=True,
+            spec_section="draft-02 §Known Organization",
+            warning_class="dns_aid.underscore_bypass",
+            env_gate=_UNDERSCORE_BYPASS_ENV,
+        )
         return target
+
+    if allow_underscore and not _underscore_bypass_env_enabled():
+        # Caller asked for the bypass but the operator hasn't enabled
+        # it in the environment. Surface the refusal distinctly so the
+        # caller can tell "this is an env-gate issue" from "this is a
+        # genuine validation error."
+        logger.warning(
+            "SVCB TargetName underscore bypass requested but env gate "
+            f"({_UNDERSCORE_BYPASS_ENV}) is not set — refusing",
+            target=target,
+            underscored=underscored,
+            env_gate=_UNDERSCORE_BYPASS_ENV,
+            warning_class="dns_aid.underscore_bypass_env_missing",
+        )
 
     raise ValidationError("target", message, target)
 
@@ -556,21 +579,31 @@ _WELL_KNOWN_PATH_MAX_LEN = 128
 
 
 def validate_well_known_path(path: str) -> str:
-    """Validate a `well-known` SvcParamKey value to a safe RFC 8615 suffix.
+    """Validate a `well-known` SvcParamKey value.
 
-    The discoverer reconstructs the descriptor URL as
-    ``https://<svcb-target>/.well-known/<path>`` and fetches it. Without
-    validation, a publisher (or a SVCB-record forger if DNSSEC isn't
-    enforced) could supply a path containing ``..``, ``?``, ``#``, or
-    embedded slashes and steer the fetch away from the legitimate
-    well-known namespace. The SSRF guard at ``validate_fetch_url`` pins
-    the host but doesn't restrict the path.
+    Two value shapes are accepted, matching draft Figure 3:
 
-    Allowed: ``^[A-Za-z0-9._-]+$``, length 1..128, no ``..`` traversal.
+    1. **Bare suffix** — ``agent-card.json`` →
+       reconstructed as ``https://<target>/.well-known/<value>``.
+       Constrained to RFC 8615 single-segment form.
 
-    Args:
-        path: The well-known path suffix (no leading slash, no
-            ``.well-known/`` prefix).
+    2. **Absolute origin path** — ``/.well-known/agent-card.json`` or
+       ``/not-well-known/other-card.json`` →
+       used as-is: ``https://<target><value>``. Each path segment is
+       constrained to the same character class as the bare-suffix form;
+       no ``..`` traversal, no empty segments (no ``//``), no query
+       string / fragment / control characters / percent-encoded
+       escapes.
+
+    The discoverer reconstructs the descriptor URL by interpolating the
+    value into a fetched URL. Without validation a publisher (or a
+    SVCB-record forger if DNSSEC isn't enforced) could supply a value
+    containing ``..``, ``?``, ``#``, or backslash and steer the fetch
+    away from the operator's intended location. ``validate_fetch_url``
+    pins the host but doesn't constrain the path.
+
+    Allowed character class per segment: ``[A-Za-z0-9._-]``. Total
+    length 1..128.
 
     Returns:
         The validated path (unchanged on success).
@@ -590,14 +623,69 @@ def validate_well_known_path(path: str) -> str:
             f"well-known path exceeds {_WELL_KNOWN_PATH_MAX_LEN} characters",
             path,
         )
+
+    # Reject any control / URL-special character before we branch on
+    # absolute vs. suffix. These are the characters that could shape
+    # the reconstructed URL into something other than a path lookup
+    # under the SVCB target's origin.
+    for forbidden in ("?", "#", "\\", "%", " ", "\t", "\r", "\n"):
+        if forbidden in path:
+            raise ValidationError(
+                "well_known_path",
+                (
+                    "well-known path must not contain URL control "
+                    f"characters (found {forbidden!r}); reject any "
+                    "embedded slash, '?', '#', percent-encoded "
+                    "escape, or whitespace"
+                ),
+                path,
+            )
+
+    if path.startswith("/"):
+        # Absolute origin path form. Each segment must be a clean
+        # single-segment token; no ``..``, no empty segments (which
+        # would produce ``//`` in the URL).
+        segments = path[1:].split("/")
+        if not segments or not all(segments):
+            raise ValidationError(
+                "well_known_path",
+                "absolute well-known path must not contain empty segments",
+                path,
+            )
+        for seg in segments:
+            if seg == "..":
+                raise ValidationError(
+                    "well_known_path",
+                    "absolute well-known path must not contain '..' (traversal)",
+                    path,
+                )
+            if not _WELL_KNOWN_PATH_PATTERN.match(seg):
+                raise ValidationError(
+                    "well_known_path",
+                    (
+                        f"absolute well-known path segment {seg!r} must "
+                        "match RFC 8615 single-segment form "
+                        "(allowed: A-Z a-z 0-9 . _ - )"
+                    ),
+                    path,
+                )
+        if not any(c.isalnum() for c in path):
+            raise ValidationError(
+                "well_known_path",
+                "well-known path must contain at least one alphanumeric character",
+                path,
+            )
+        return path
+
+    # Bare-suffix form.
     if not _WELL_KNOWN_PATH_PATTERN.match(path):
         raise ValidationError(
             "well_known_path",
             (
-                "well-known path must match RFC 8615 single-segment "
-                "form (allowed: A-Z a-z 0-9 . _ - ); reject any "
-                "embedded slash, '?', '#', or other URL control "
-                "character"
+                "well-known suffix must match RFC 8615 single-segment "
+                "form (allowed: A-Z a-z 0-9 . _ - ); use an absolute "
+                "path starting with '/' if you need a multi-segment "
+                "origin-relative value"
             ),
             path,
         )

@@ -11,6 +11,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Repository moved to the vendor-neutral `dns-aid` GitHub organization** (`github.com/dns-aid/dns-aid-core`), ahead of Linux Foundation graduation. Previous `infobloxopen/dns-aid-core` URLs redirect automatically, so existing clones, links, and badges continue to work. Contributors should update their git remotes (`git remote set-url <remote> https://github.com/dns-aid/dns-aid-core.git`). The PyPI Trusted Publisher and MCP Registry namespace are being updated to match the new organization.
 
+### Added — `well-known` SvcParamKey and TargetName validator (draft-02)
+
+- **New `well-known` SvcParamKey** at the project's interim private-use
+  code point `key65409` (final IANA assignment deferred per draft §7.1).
+  Carries an RFC 8615 path the discoverer reconstructs as
+  `https://<svcb-target>/.well-known/<value>` and fetches as the
+  capability descriptor. Independent of `cap`; both may be present.
+- **Absolute-path well-known values** (per draft Figure 3) — values
+  starting with `/` (e.g. `/.well-known/agent-card.json`,
+  `/not-well-known/other-card.json`) are used as origin-relative paths
+  without double-prefixing. Bare suffixes still get the `/.well-known/`
+  prefix.
+- **`validate_well_known_path`** constrains the value to a safe
+  character class (`[A-Za-z0-9._-]` per segment, length-bounded, no
+  `..` traversal, no `?` / `#` / control chars). Enforced on both
+  publish and discover; field-validator on `SvcbRecord.well_known_path`
+  and `AgentRecord.well_known_path` so direct model construction can't
+  bypass.
+- **`cap_sha256_verified: bool`** field on `AgentRecord` / `SvcbRecord`.
+  True only when the discoverer actually fetched the descriptor AND
+  the SHA-256 of its bytes matched `cap_sha256`. Consumers keying
+  trust off the integrity pin MUST check this flag — the mere presence
+  of `cap_sha256` is no longer a sufficient signal. Dangling case
+  (pin declared, never applied) logs a structured WARN with
+  `warning_class="dns_aid.dangling_cap_sha256"`.
+- **`validate_no_underscore_in_target`** — TargetName underscore
+  validator with operator-only bypass. The bypass requires both the
+  per-call `allow_underscore=True` flag AND
+  `DNS_AID_ALLOW_UNDERSCORE_TARGET=1` in the environment. Field
+  validators on `SvcbRecord.target` and `AgentRecord.target_host`
+  honour the same env gate so the rule fires at the type boundary.
+
+### Changed — correctness
+
+- **Non-HTTPS `cap` (URN, JSON-Ref) falls back to `well-known`** at
+  fetch time. Earlier `cap` presence was terminal, silently disabling
+  a perfectly good `well-known` and downgrading discovery to
+  unauthenticated TXT.
+- **`cap > well-known` precedence** now proven at fetch time, not
+  just at serialization. When both are set and `cap` is https-fetchable,
+  the cap URL drives the fetch and `capability_source="cap_uri"`.
+- **DNSSEC docstring on `validator.py`** rewritten to quote the
+  draft's actual SHOULD posture (§6.2) instead of the earlier
+  MAY/MUST framing. Also no longer overstates what the code does on
+  this branch — the fail-closed DANE demotion ships separately on
+  #155.
+
+### Security
+
+- **pyjwt 2.12.1 → 2.13.0** clears PYSEC-2026-175 / 177 / 178 / 179.
+
+### Internal
+
+- Validation logger migrated from stdlib `logging` to project-standard
+  `structlog`.
+- `_parse_svcb_custom_params` derives its recognised key set from
+  `DNS_AID_KEY_MAP` (was a hand-maintained literal that needed three-
+  file edits per new key).
+- `to_params()` reads `DNS_AID_SVCB_STRING_KEYS` once per call (was up
+  to 11× per serialization).
+
 ## [0.23.0] - 2026-05-26
 
 ### Added — Production-grade OpenTelemetry integration (spec 005)

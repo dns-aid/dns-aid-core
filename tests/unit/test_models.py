@@ -221,7 +221,12 @@ class TestAgentRecord:
         assert "key65400" not in params
 
     def test_svcb_params_with_well_known_path(self):
-        """Test draft-02 `well-known` SvcParamKey is emitted at key65409."""
+        """Test draft-02 ``well-known`` SvcParamKey is emitted at the
+        project's interim private-use code point ``key65409``.
+
+        Per draft section 7.1 the actual SvcParamKey numbers are
+        deferred to IANA (Standards Action); 65409 is dns-aid-core's
+        private-use placeholder, not draft-assigned."""
         agent = AgentRecord(
             name="booking",
             domain="example.com",

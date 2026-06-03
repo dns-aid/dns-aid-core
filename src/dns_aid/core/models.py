@@ -143,7 +143,17 @@ class SvcbRecord(BaseModel):
         default=None,
         description="Capability document URI mapped to the DNS-AID 'cap' SVCB parameter",
     )
-    cap_sha256: str | None = Field(default=None, description="SHA-256 digest for the cap URI")
+    cap_sha256: str | None = Field(
+        default=None,
+        description="SHA-256 digest for the cap URI. Presence does not imply the digest "
+        "was actually checked against fetched bytes — use ``cap_sha256_verified``.",
+    )
+    cap_sha256_verified: bool = Field(
+        default=False,
+        description="True when the discoverer fetched the descriptor and the SHA-256 of "
+        "its bytes matched ``cap_sha256``. Always False on records that didn't go "
+        "through the fetch path.",
+    )
     bap: list[str] = Field(default_factory=list, description="Bulk application protocols")
     policy_uri: str | None = Field(default=None, description="Agent policy URI")
     realm: str | None = Field(default=None, description="Opaque authz realm identifier")
@@ -175,6 +185,48 @@ class SvcbRecord(BaseModel):
     def normalize_connect_class(cls, v: str | None) -> str | None:
         return _normalize_connect_class(v)
 
+    @field_validator("target", mode="after")
+    @classmethod
+    def _enforce_no_underscore_in_target(cls, v: str) -> str:
+        """Enforce draft-02 §Known Organization at the type boundary.
+
+        Earlier the no-underscore rule fired only inside ``publish()``;
+        anyone constructing an ``SvcbRecord`` directly (or via
+        ``AgentRecord.to_svcb_record()``) bypassed it. The field
+        validator makes the model itself the enforcer so the invariant
+        holds regardless of construction path.
+
+        Honours the operator-level env gate
+        ``DNS_AID_ALLOW_UNDERSCORE_TARGET=1`` — when set, underscored
+        targets construct successfully so the publisher's existing
+        ``allow_underscore_target=True`` path can still emit its
+        structured WARN. Without the env gate, no construction path
+        can produce an underscored target.
+        """
+        from dns_aid.utils.validation import (
+            _underscore_bypass_env_enabled,
+            validate_no_underscore_in_target,
+        )
+
+        validate_no_underscore_in_target(v, allow_underscore=_underscore_bypass_env_enabled())
+        return v
+
+    @field_validator("well_known_path", mode="after")
+    @classmethod
+    def _enforce_safe_well_known_path(cls, v: str | None) -> str | None:
+        """Constrain well-known to a safe RFC 8615 value at the type boundary.
+
+        Same reasoning as ``target`` above: the publisher-side check
+        isn't sufficient when consumers can deserialize SVCB records
+        directly into ``SvcbRecord`` (e.g. through ``to_svcb_record()``
+        round-trips). The field validator catches it.
+        """
+        if v is None:
+            return None
+        from dns_aid.utils.validation import validate_well_known_path
+
+        return validate_well_known_path(v)
+
     @property
     def normalized_target(self) -> str:
         """SVCB targets are emitted with a trailing dot."""
@@ -190,6 +242,16 @@ class SvcbRecord(BaseModel):
                 mandatory.append(normalized)
                 seen_mandatory.add(normalized)
 
+        # Resolve the wire-key style ONCE per to_params() call. Earlier
+        # each line below was calling _svcb_param_key() which re-reads
+        # the DNS_AID_SVCB_STRING_KEYS env var via os.environ.get —
+        # up to 11 env reads per serialization, multiplied by every
+        # publish call. Cache the mapping here so we pay one env read.
+        emit_string = _use_string_keys()
+
+        def _key(name: str) -> str:
+            return name if emit_string else DNS_AID_KEY_MAP.get(name, name)
+
         params = {
             "alpn": self.alpn,
             "port": str(self.port),
@@ -200,25 +262,25 @@ class SvcbRecord(BaseModel):
         if self.ipv6_hint:
             params["ipv6hint"] = self.ipv6_hint
         if self.uri:
-            params[_svcb_param_key("cap")] = self.uri
+            params[_key("cap")] = self.uri
         if self.cap_sha256:
-            params[_svcb_param_key("cap-sha256")] = self.cap_sha256
+            params[_key("cap-sha256")] = self.cap_sha256
         if self.bap:
-            params[_svcb_param_key("bap")] = ",".join(self.bap)
+            params[_key("bap")] = ",".join(self.bap)
         if self.policy_uri:
-            params[_svcb_param_key("policy")] = self.policy_uri
+            params[_key("policy")] = self.policy_uri
         if self.realm:
-            params[_svcb_param_key("realm")] = self.realm
+            params[_key("realm")] = self.realm
         if self.sig:
-            params[_svcb_param_key("sig")] = self.sig
+            params[_key("sig")] = self.sig
         if self.connect_class:
-            params[_svcb_param_key("connect-class")] = self.connect_class
+            params[_key("connect-class")] = self.connect_class
         if self.connect_meta:
-            params[_svcb_param_key("connect-meta")] = self.connect_meta
+            params[_key("connect-meta")] = self.connect_meta
         if self.enroll_uri:
-            params[_svcb_param_key("enroll-uri")] = self.enroll_uri
+            params[_key("enroll-uri")] = self.enroll_uri
         if self.well_known_path:
-            params[_svcb_param_key("well-known")] = self.well_known_path
+            params[_key("well-known")] = self.well_known_path
         return params
 
 
@@ -304,7 +366,19 @@ class AgentRecord(BaseModel):
     cap_sha256: str | None = Field(
         default=None,
         description="Base64url-encoded SHA-256 digest of the canonical capability descriptor "
-        "for integrity checks and cache revalidation (per draft-02 'cap-sha256' SvcParamKey)",
+        "for integrity checks and cache revalidation (per draft-02 'cap-sha256' SvcParamKey). "
+        "Presence on a discovered AgentRecord does NOT imply the digest was checked against "
+        "fetched bytes — see ``cap_sha256_verified`` for that signal.",
+    )
+    cap_sha256_verified: bool = Field(
+        default=False,
+        description="True when the discoverer actually fetched a capability descriptor and "
+        "the SHA-256 of its bytes matched ``cap_sha256``. False when no fetch happened "
+        "(no cap/well-known descriptor URL), the fetch failed for non-mismatch reasons, "
+        "or no ``cap_sha256`` was declared. Consumers keying trust off the integrity pin "
+        "MUST check this flag — relying on the mere presence of ``cap_sha256`` is a false "
+        "integrity signal because the pin only applies to the bytes that produced the "
+        "capabilities, and TXT-fallback / network-failure paths can leave it dangling.",
     )
     well_known_path: str | None = Field(
         default=None,
@@ -461,6 +535,35 @@ class AgentRecord(BaseModel):
     @classmethod
     def validate_connect_class(cls, v: str | None) -> str | None:
         return _normalize_connect_class(v)
+
+    @field_validator("target_host", mode="after")
+    @classmethod
+    def _enforce_no_underscore_in_target_host(cls, v: str) -> str:
+        """Mirror the SvcbRecord.target rule on AgentRecord's target_host.
+
+        Honours the operator env gate
+        ``DNS_AID_ALLOW_UNDERSCORE_TARGET=1`` so the publisher's
+        existing ``allow_underscore_target=True`` path can still pass
+        through. Without the env gate set no construction path can
+        produce an underscored target_host.
+        """
+        from dns_aid.utils.validation import (
+            _underscore_bypass_env_enabled,
+            validate_no_underscore_in_target,
+        )
+
+        validate_no_underscore_in_target(v, allow_underscore=_underscore_bypass_env_enabled())
+        return v
+
+    @field_validator("well_known_path", mode="after")
+    @classmethod
+    def _enforce_safe_well_known_path_on_agent(cls, v: str | None) -> str | None:
+        """Same as SvcbRecord — enforce the safe-value rule at the type."""
+        if v is None:
+            return None
+        from dns_aid.utils.validation import validate_well_known_path
+
+        return validate_well_known_path(v)
 
     @property
     def fqdn(self) -> str:

@@ -1146,3 +1146,232 @@ class TestWellKnownReconstruction:
         )
         # The record is not stamped as well_known (validator skipped the fetch).
         assert result is None or result.capability_source != "well_known"
+
+    @pytest.mark.asyncio
+    async def test_absolute_path_well_known_resolves_origin_relative(self):
+        """Per draft Figure 3, `/.well-known/agent-card.json` and
+        `/not-well-known/other-card.json` are valid values. Earlier the
+        code would double-prefix the first into
+        ``/.well-known/.well-known/agent-card.json`` and treat the
+        second as a single segment. Now they're recognised as absolute
+        origin paths and used as-is."""
+        from dns_aid.core.discoverer import _query_single_agent
+
+        cases = [
+            (
+                "/.well-known/agent-card.json",
+                "https://chat.example.com/.well-known/agent-card.json",
+            ),
+            (
+                "/not-well-known/other-card.json",
+                "https://chat.example.com/not-well-known/other-card.json",
+            ),
+        ]
+
+        async def _run_one_case(wk_value: str) -> list[str]:
+            fake_rdata = MagicMock()
+            fake_rdata.priority = 1
+            fake_rdata.target = MagicMock()
+            fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+            fake_rdata.params = {}
+            fake_rdata.__str__ = MagicMock(
+                return_value=(f'1 chat.example.com. alpn="mcp" port=443 well-known="{wk_value}"')
+            )
+            fake_answers = MagicMock()
+            fake_answers.__iter__ = lambda self: iter([fake_rdata])
+
+            captured: list[str] = []
+
+            async def fake_fetch(url, expected_sha256=None):
+                captured.append(url)
+                return CapabilityDocument(
+                    capabilities=["chat"], raw_data={"capabilities": ["chat"]}
+                )
+
+            with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+                resolver = MagicMock()
+                resolver.resolve = AsyncMock(return_value=fake_answers)
+                mock_mod.Resolver.return_value = resolver
+                with patch(
+                    "dns_aid.core.discoverer.fetch_cap_document",
+                    side_effect=fake_fetch,
+                ):
+                    result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+            assert result is not None
+            return captured
+
+        for wk_value, expected_url in cases:
+            captured = await _run_one_case(wk_value)
+            assert captured == [expected_url], (
+                f"expected {expected_url}, got {captured} for {wk_value}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_https_cap_wins_over_well_known_at_fetch_time(self):
+        """When both `cap` (https-fetchable) and `well-known` are
+        present, the cap URL is the one the discoverer actually fetches.
+
+        Per Igor's #154 review: the precedence had only been proven at
+        serialization (to_params/to_svcb_record) — this asserts it at
+        fetch time, which is the load-bearing path."""
+        from dns_aid.core.discoverer import _query_single_agent
+
+        fake_rdata = MagicMock()
+        fake_rdata.priority = 1
+        fake_rdata.target = MagicMock()
+        fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+        fake_rdata.params = {}
+        fake_rdata.__str__ = MagicMock(
+            return_value=(
+                '1 chat.example.com. alpn="mcp" port=443 '
+                'cap="https://cdn.example.com/cap.json" '
+                'well-known="agent-card.json"'
+            )
+        )
+        fake_answers = MagicMock()
+        fake_answers.__iter__ = lambda self: iter([fake_rdata])
+
+        captured: list[str] = []
+
+        async def fake_fetch(url, expected_sha256=None):
+            captured.append(url)
+            return CapabilityDocument(capabilities=["chat"], raw_data={})
+
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            resolver = MagicMock()
+            resolver.resolve = AsyncMock(return_value=fake_answers)
+            mock_mod.Resolver.return_value = resolver
+            with patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                side_effect=fake_fetch,
+            ):
+                result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert result is not None
+        # cap URL fetched, not the reconstructed well-known URL.
+        assert captured == ["https://cdn.example.com/cap.json"]
+        assert result.capability_source == "cap_uri"
+
+    @pytest.mark.asyncio
+    async def test_non_https_cap_falls_back_to_well_known(self):
+        """When `cap` is a URN or JSON-Ref (non-https), treating it as
+        terminal would silently disable a perfectly good `well-known`
+        and downgrade discovery to unauthenticated TXT. Per Igor's #154
+        review: fall through to well-known on non-https cap, keep the
+        URN cap on the record as a metadata locator."""
+        from dns_aid.core.discoverer import _query_single_agent
+
+        fake_rdata = MagicMock()
+        fake_rdata.priority = 1
+        fake_rdata.target = MagicMock()
+        fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+        fake_rdata.params = {}
+        fake_rdata.__str__ = MagicMock(
+            return_value=(
+                '1 chat.example.com. alpn="mcp" port=443 '
+                'cap="urn:dns-aid:cap:chat:v1" '
+                'well-known="agent-card.json"'
+            )
+        )
+        fake_answers = MagicMock()
+        fake_answers.__iter__ = lambda self: iter([fake_rdata])
+
+        captured: list[str] = []
+
+        async def fake_fetch(url, expected_sha256=None):
+            captured.append(url)
+            return CapabilityDocument(capabilities=["chat"], raw_data={})
+
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            resolver = MagicMock()
+            resolver.resolve = AsyncMock(return_value=fake_answers)
+            mock_mod.Resolver.return_value = resolver
+            with patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                side_effect=fake_fetch,
+            ):
+                result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert result is not None
+        # The well-known URL was used, not the URN cap.
+        assert captured == ["https://chat.example.com/.well-known/agent-card.json"]
+        assert result.capability_source == "well_known"
+        # The cap URN stays on the record as a metadata locator.
+        assert result.cap_uri == "urn:dns-aid:cap:chat:v1"
+
+    @pytest.mark.asyncio
+    async def test_cap_sha256_verified_true_only_when_fetch_succeeds(self):
+        """The `cap_sha256_verified` flag is True only when the digest
+        was actually checked against fetched bytes — distinguishes
+        'integrity pin honoured' from 'pin declared but never applied'."""
+        from dns_aid.core.discoverer import _query_single_agent
+
+        fake_rdata = MagicMock()
+        fake_rdata.priority = 1
+        fake_rdata.target = MagicMock()
+        fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+        fake_rdata.params = {}
+        fake_rdata.__str__ = MagicMock(
+            return_value=(
+                '1 chat.example.com. alpn="mcp" port=443 '
+                'well-known="agent-card.json" cap-sha256="DIGEST_HERE"'
+            )
+        )
+        fake_answers = MagicMock()
+        fake_answers.__iter__ = lambda self: iter([fake_rdata])
+
+        async def fake_fetch(url, expected_sha256=None):
+            return CapabilityDocument(capabilities=["chat"], raw_data={})
+
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            resolver = MagicMock()
+            resolver.resolve = AsyncMock(return_value=fake_answers)
+            mock_mod.Resolver.return_value = resolver
+            with patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                side_effect=fake_fetch,
+            ):
+                result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert result is not None
+        assert result.cap_sha256 == "DIGEST_HERE"
+        assert result.cap_sha256_verified is True
+
+    @pytest.mark.asyncio
+    async def test_cap_sha256_verified_false_when_dangling(self):
+        """When `cap_sha256` is declared but no descriptor URL is
+        constructible (no cap, no well-known), cap_sha256_verified
+        stays False so consumers don't treat the declared pin as
+        integrity-applied."""
+        from dns_aid.core.discoverer import _query_single_agent
+
+        fake_rdata = MagicMock()
+        fake_rdata.priority = 1
+        fake_rdata.target = MagicMock()
+        fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+        fake_rdata.params = {}
+        fake_rdata.__str__ = MagicMock(
+            return_value=('1 chat.example.com. alpn="mcp" port=443 cap-sha256="ORPHANED"')
+        )
+        fake_answers = MagicMock()
+        fake_answers.__iter__ = lambda self: iter([fake_rdata])
+
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            resolver = MagicMock()
+            resolver.resolve = AsyncMock(return_value=fake_answers)
+            mock_mod.Resolver.return_value = resolver
+            with patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                AsyncMock(return_value=None),
+            ):
+                with patch(
+                    "dns_aid.core.discoverer._query_capabilities",
+                    AsyncMock(return_value=[]),
+                ):
+                    result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert result is not None
+        # Pin value present for transparency, but the verified flag is
+        # False so consumers don't treat it as applied.
+        assert result.cap_sha256 == "ORPHANED"
+        assert result.cap_sha256_verified is False
