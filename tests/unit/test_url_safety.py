@@ -185,9 +185,11 @@ class TestCapSha256Verification:
                 assert doc.capabilities == ["test"]
 
     @pytest.mark.asyncio
-    async def test_hash_mismatch_returns_none(self):
-        """Wrong hash should cause fetch to return None."""
-        from dns_aid.core.cap_fetcher import fetch_cap_document
+    async def test_hash_mismatch_raises_digest_error(self):
+        """Wrong hash MUST raise CapDigestMismatchError so the discoverer
+        can distinguish digest mismatch (refuse the record) from network
+        failures (fall back to a lower-priority capability source)."""
+        from dns_aid.core.cap_fetcher import CapDigestMismatchError, fetch_cap_document
 
         content = b'{"capabilities": ["test"]}'
 
@@ -196,11 +198,13 @@ class TestCapSha256Verification:
 
         with patch("dns_aid.utils.url_safety.validate_fetch_url", return_value="https://ok.com"):
             with patch("dns_aid.utils.url_safety.safe_fetch_bytes", side_effect=mock_fetch):
-                doc = await fetch_cap_document(
-                    "https://ok.com/cap.json",
-                    expected_sha256="WRONG_HASH",
-                )
-                assert doc is None
+                with pytest.raises(CapDigestMismatchError) as excinfo:
+                    await fetch_cap_document(
+                        "https://ok.com/cap.json",
+                        expected_sha256="WRONG_HASH",
+                    )
+                assert excinfo.value.expected == "WRONG_HASH"
+                assert excinfo.value.cap_uri == "https://ok.com/cap.json"
 
     @pytest.mark.asyncio
     async def test_no_hash_skips_verification(self):

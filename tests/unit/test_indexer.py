@@ -437,7 +437,14 @@ class TestSyncIndex:
 
     @pytest.mark.asyncio
     async def test_sync_discovers_agents(self, mock_backend: MockBackend):
-        """Test that sync discovers published agents."""
+        """Test that sync discovers published agents.
+
+        sync_index discovers agents via the walkable AliasMode record at
+        {name}._agents.{domain} — which is opt-in under -02. Opt walkable
+        in here to exercise the discovery path. The follow-up Igor
+        cleanup item (iterate flat owners off the SVCB enumeration
+        directly) will let sync work without the walkable record at all.
+        """
         # Publish some agents
         await publish(
             name="chat",
@@ -445,6 +452,7 @@ class TestSyncIndex:
             protocol="mcp",
             endpoint="mcp.example.com",
             backend=mock_backend,
+            publish_walkable_alias=True,
         )
         await publish(
             name="billing",
@@ -452,6 +460,7 @@ class TestSyncIndex:
             protocol="a2a",
             endpoint="a2a.example.com",
             backend=mock_backend,
+            publish_walkable_alias=True,
         )
 
         result = await sync_index("example.com", mock_backend)
@@ -464,13 +473,15 @@ class TestSyncIndex:
     @pytest.mark.asyncio
     async def test_sync_creates_index(self, mock_backend: MockBackend):
         """Test that sync creates index if it doesn't exist."""
-        # Publish an agent (without updating index)
+        # Publish an agent (without updating index). Walkable opt-in so
+        # sync_index can discover it via the AliasMode shape.
         await publish(
             name="chat",
             domain="example.com",
             protocol="mcp",
             endpoint="mcp.example.com",
             backend=mock_backend,
+            publish_walkable_alias=True,
         )
 
         result = await sync_index("example.com", mock_backend)
@@ -490,13 +501,14 @@ class TestSyncIndex:
             ttl=3600,
         )
 
-        # Publish new agent
+        # Publish new agent (walkable opt-in for sync_index discovery).
         await publish(
             name="chat",
             domain="example.com",
             protocol="mcp",
             endpoint="mcp.example.com",
             backend=mock_backend,
+            publish_walkable_alias=True,
         )
 
         result = await sync_index("example.com", mock_backend)

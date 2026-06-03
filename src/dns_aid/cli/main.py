@@ -179,14 +179,16 @@ def publish(
             "Use only when the target is internal-only and not reached over public PKI.",
         ),
     ] = False,
-    no_walkable: Annotated[
+    walkable: Annotated[
         bool,
         typer.Option(
-            "--no-walkable",
-            help="Suppress the optional walkable AliasMode SVCB record at "
-            "{name}._agents.{domain}. The walkable record is published by default per "
-            "draft-mozleywilliams-dnsop-dnsaid-02 §Known Agent to support DNS-SD-style "
-            "enumeration crawlers.",
+            "--walkable",
+            help="Publish the optional walkable AliasMode SVCB record at "
+            "{name}._agents.{domain}. Off by default — the walkable record is "
+            "an enumeration handle (DNS-SD-style consumers can walk _agents.<zone> "
+            "and inventory every agent). Enable only when you actively want the "
+            "agent discoverable through enumeration (internal indexes, intentional "
+            "public catalogs). See docs/privacy-considerations.md.",
         ),
     ] = False,
 ):
@@ -264,7 +266,7 @@ def publish(
             sign=sign,
             private_key_path=private_key,
             allow_underscore_target=allow_underscore_target,
-            publish_walkable_alias=not no_walkable,
+            publish_walkable_alias=walkable,
         )
     )
 

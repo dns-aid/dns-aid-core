@@ -682,6 +682,7 @@ class TestCloudflarePublishAgentParamDemotion:
             port=443,
             capabilities=["testing"],
             realm="demo",
+            publish_walkable_alias=True,
         )
 
         backend = CloudflareBackend(api_token="token", zone_id="Z123")

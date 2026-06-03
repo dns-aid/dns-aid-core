@@ -88,7 +88,9 @@ class TestDiscover:
             return_value=None,
         ) as mock_query:
             result = await discover("example.com", protocol="mcp", name="chat")
-            mock_query.assert_called_once_with("example.com", "chat", Protocol.MCP)
+            mock_query.assert_called_once_with(
+                "example.com", "chat", Protocol.MCP, allow_legacy=None
+            )
             assert result.domain == "example.com"
             assert result.query == "chat.example.com"
 
@@ -364,6 +366,81 @@ class TestDiscoverAtFqdn:
         ) as mock_query:
             await discover_at_fqdn("_chat._mcp._agents.sub.example.com")
             mock_query.assert_called_once_with("sub.example.com", "chat", Protocol.MCP)
+
+    @pytest.mark.asyncio
+    async def test_flat_draft02_shape_resolves_once_with_default_protocol(self):
+        """Under the flat shape the SVCB DNS query is identical for any
+        Protocol — earlier the function tried MCP then A2A back-to-back,
+        firing the same query twice. Verify the single-call refactor."""
+        from dns_aid.core.models import AgentRecord
+
+        fake_record = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+            bap=["mcp"],
+        )
+        with patch(
+            "dns_aid.core.discoverer._query_single_agent",
+            new_callable=AsyncMock,
+            return_value=fake_record,
+        ) as mock_query:
+            result = await discover_at_fqdn("chat.example.com")
+
+        # Single call — no MCP-then-A2A retry pair.
+        mock_query.assert_called_once_with("example.com", "chat", Protocol.MCP)
+        assert result is not None
+        assert result.name == "chat"
+        assert result.protocol == Protocol.MCP
+
+    @pytest.mark.asyncio
+    async def test_flat_shape_reads_protocol_from_bap(self):
+        """When the record's bap announces A2A, the discoverer reflects
+        that on the returned AgentRecord — not the default it queried
+        with."""
+        from dns_aid.core.models import AgentRecord
+
+        fake_record = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,  # default applied during the lookup
+            target_host="chat.example.com",
+            bap=["a2a"],  # but the record itself announces A2A
+        )
+        with patch(
+            "dns_aid.core.discoverer._query_single_agent",
+            new_callable=AsyncMock,
+            return_value=fake_record,
+        ):
+            result = await discover_at_fqdn("chat.example.com")
+
+        assert result is not None
+        assert result.protocol == Protocol.A2A
+
+    @pytest.mark.asyncio
+    async def test_walkable_shape_resolves(self):
+        """The walkable draft-02 shape `{name}._agents.{domain}` parses
+        cleanly and routes to a single _query_single_agent call."""
+        from dns_aid.core.models import AgentRecord
+
+        fake_record = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+            bap=["mcp"],
+        )
+        with patch(
+            "dns_aid.core.discoverer._query_single_agent",
+            new_callable=AsyncMock,
+            return_value=fake_record,
+        ) as mock_query:
+            result = await discover_at_fqdn("chat._agents.example.com")
+
+        mock_query.assert_called_once_with("example.com", "chat", Protocol.MCP)
+        assert result is not None
+        assert result.name == "chat"
 
 
 class TestDiscoverViaHttpIndex:
@@ -1396,6 +1473,266 @@ class TestWellKnownReconstruction:
         # False so consumers don't treat it as applied.
         assert result.cap_sha256 == "ORPHANED"
         assert result.cap_sha256_verified is False
+
+
+class TestLegacyFallback:
+    """Igor: legacy-fallback opt-in semantics are the migration proof.
+
+    Behaviours under test:
+      1. ``allow_legacy=True`` + flat miss → legacy query runs.
+      2. ``allow_legacy=False`` → legacy never queried, even when env flag set.
+      3. ``allow_legacy=None`` + env unset → legacy never queried (default).
+      4. ``allow_legacy=None`` + env set → legacy queried (back-compat path).
+      5. A record served via legacy → ``legacy_resolved=True`` stamped.
+      6. Both flat and legacy miss → empty result.
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_allow_legacy_true_falls_back_on_miss(self, monkeypatch):
+        from dns_aid.core.discoverer import _query_single_agent
+
+        monkeypatch.delenv("DNS_AID_LEGACY_01_FALLBACK", raising=False)
+
+        flat_calls: list[str] = []
+        legacy_calls: list[str] = []
+
+        async def fake_resolve(name, rtype):
+            if "_chat._mcp._agents." in name:
+                legacy_calls.append(name)
+                fake_rdata = MagicMock()
+                fake_rdata.priority = 1
+                fake_rdata.target = MagicMock()
+                fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+                fake_rdata.params = {}
+                fake_rdata.__str__ = MagicMock(
+                    return_value='1 chat.example.com. alpn="mcp" port=443'
+                )
+                fake = MagicMock()
+                fake.__iter__ = lambda self: iter([fake_rdata])
+                return fake
+            flat_calls.append(name)
+            raise dns.resolver.NXDOMAIN()
+
+        resolver = MagicMock()
+        resolver.resolve = fake_resolve
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            mock_mod.Resolver.return_value = resolver
+            result = await _query_single_agent(
+                "example.com", "chat", Protocol.MCP, allow_legacy=True
+            )
+
+        assert flat_calls, "flat FQDN must be queried first"
+        assert legacy_calls, "legacy form must be queried after flat miss"
+        assert result is not None
+        assert result.legacy_resolved is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_allow_legacy_false_overrides_env(self, monkeypatch):
+        from dns_aid.core.discoverer import _query_single_agent
+
+        monkeypatch.setenv("DNS_AID_LEGACY_01_FALLBACK", "1")
+
+        queried: list[str] = []
+
+        async def fake_resolve(name, rtype):
+            queried.append(name)
+            raise dns.resolver.NXDOMAIN()
+
+        resolver = MagicMock()
+        resolver.resolve = fake_resolve
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            mock_mod.Resolver.return_value = resolver
+            result = await _query_single_agent(
+                "example.com", "chat", Protocol.MCP, allow_legacy=False
+            )
+
+        assert result is None
+        assert all("_chat._mcp._agents." not in n for n in queried), (
+            "allow_legacy=False must override the env flag and skip the legacy query"
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_off_without_env_does_not_query_legacy(self, monkeypatch):
+        from dns_aid.core.discoverer import _query_single_agent
+
+        monkeypatch.delenv("DNS_AID_LEGACY_01_FALLBACK", raising=False)
+
+        queried: list[str] = []
+
+        async def fake_resolve(name, rtype):
+            queried.append(name)
+            raise dns.resolver.NXDOMAIN()
+
+        resolver = MagicMock()
+        resolver.resolve = fake_resolve
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            mock_mod.Resolver.return_value = resolver
+            result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert result is None
+        assert all("_chat._mcp._agents." not in n for n in queried)
+
+    @pytest.mark.asyncio
+    async def test_env_var_still_triggers_legacy_for_back_compat(self, monkeypatch):
+        from dns_aid.core.discoverer import _query_single_agent
+
+        monkeypatch.setenv("DNS_AID_LEGACY_01_FALLBACK", "1")
+
+        queried: list[str] = []
+
+        async def fake_resolve(name, rtype):
+            queried.append(name)
+            raise dns.resolver.NXDOMAIN()
+
+        resolver = MagicMock()
+        resolver.resolve = fake_resolve
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_mod:
+            mock_mod.Resolver.return_value = resolver
+            await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert any(n == "chat.example.com" for n in queried)
+        assert any("_chat._mcp._agents." in n for n in queried)
+
+
+class TestPerAgentDnssec:
+    """Under draft-02 each agent has its own flat fqdn, so DNSSEC must
+    be validated per agent — not once for ``agents[0]`` with the result
+    stamped on every record. Two behaviours under test:
+
+      1. ``_apply_post_discovery`` checks each agent independently and
+         stamps ``dnssec_validated`` per-agent.
+      2. The result-level boolean it returns is True only if every
+         agent's owner-name validated. A partial-fail result-level says
+         False, AND raises (since require_dnssec is set in this path).
+    """
+
+    @pytest.mark.asyncio
+    async def test_per_agent_stamps_each_record(self):
+        """Each agent's fqdn is checked; per-agent dnssec_validated reflects own outcome."""
+        from dns_aid.core.discoverer import _apply_post_discovery
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        agent_a = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+        )
+        agent_b = AgentRecord(
+            name="search",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="search.example.com",
+        )
+
+        with patch(
+            "dns_aid.core.validator._check_dnssec",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            result_level = await _apply_post_discovery(
+                [agent_a, agent_b],
+                require_dnssec=True,
+                enrich_endpoints=False,
+                verify_signatures=False,
+                domain="example.com",
+            )
+
+        assert result_level is True
+        assert agent_a.dnssec_validated is True
+        assert agent_b.dnssec_validated is True
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_raises_and_names_failed(self):
+        """One agent validates, the other doesn't → require_dnssec must raise."""
+        from dns_aid.core.discoverer import _apply_post_discovery
+        from dns_aid.core.models import AgentRecord, DNSSECError, Protocol
+
+        agent_a = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+        )
+        agent_b = AgentRecord(
+            name="search",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="search.example.com",
+        )
+
+        async def selective_check(fqdn):
+            return fqdn == "chat.example.com"
+
+        with patch(
+            "dns_aid.core.validator._check_dnssec",
+            new=selective_check,
+        ):
+            with pytest.raises(DNSSECError) as excinfo:
+                await _apply_post_discovery(
+                    [agent_a, agent_b],
+                    require_dnssec=True,
+                    enrich_endpoints=False,
+                    verify_signatures=False,
+                    domain="example.com",
+                )
+
+        import re
+
+        msg = str(excinfo.value)
+        assert re.search(r"\bsearch\.example\.com\b", msg)
+        assert not re.search(r"\bchat\.example\.com\b", msg)
+
+
+class TestCapSha256HardFail:
+    """Draft §6.1: a cap-sha256 digest mismatch MUST cause the consumer
+    to refuse the record. Earlier the discoverer silently downgraded to
+    TXT fallback while still stamping cap_sha256 on the record, letting
+    an attacker swap the descriptor while keeping the SVCB pin intact
+    and have the record look integrity-pinned.
+
+    The cap_sha256_verified field (added in #154's deferred work) is
+    the explicit consumer signal; this test class covers the
+    drop-on-mismatch contract."""
+
+    @pytest.mark.asyncio
+    async def test_digest_mismatch_drops_record(self):
+        """Mismatched cap-sha256 → _query_single_agent returns None."""
+        from dns_aid.core.cap_fetcher import CapDigestMismatchError
+        from dns_aid.core.discoverer import _query_single_agent
+
+        fake_rdata = MagicMock()
+        fake_rdata.priority = 1
+        fake_rdata.target = MagicMock()
+        fake_rdata.target.__str__ = MagicMock(return_value="chat.example.com.")
+        fake_rdata.params = {}
+        fake_rdata.__str__ = MagicMock(
+            return_value=(
+                '1 chat.example.com. alpn="mcp" port=443 '
+                'cap="https://chat.example.com/cap.json" '
+                'cap-sha256="EXPECTED_BUT_WRONG"'
+            )
+        )
+
+        fake_answers = MagicMock()
+        fake_answers.__iter__ = lambda self: iter([fake_rdata])
+
+        with patch("dns_aid.core.discoverer.dns.asyncresolver") as mock_resolver_mod:
+            resolver = MagicMock()
+            resolver.resolve = AsyncMock(return_value=fake_answers)
+            mock_resolver_mod.Resolver.return_value = resolver
+
+            with patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                side_effect=CapDigestMismatchError(
+                    "https://chat.example.com/cap.json",
+                    "EXPECTED_BUT_WRONG",
+                    "actual_digest_value",
+                ),
+            ):
+                result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+        assert result is None, "digest mismatch must cause the record to be refused"
 
 
 class TestCapabilitySourceProvenance:

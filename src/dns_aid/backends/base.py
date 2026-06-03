@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from dns_aid.core.models import SVCB_ALIAS_MODE, SVCB_SERVICE_MODE  # noqa: E402
+
 if TYPE_CHECKING:
     from dns_aid.core.models import AgentRecord
 
@@ -240,7 +242,7 @@ class DNSBackend(ABC):
         zone = agent.domain
         # Under draft-02 the agent's primary owner is the flat name
         # {name}.{domain}; the relative record name under the zone is
-        # just the agent name. PR 3a flips the wire-format default.
+        # just the agent name (no leading underscore, no protocol label).
         name = agent.name
         walkable_name = f"{agent.name}._agents"
 
@@ -266,7 +268,7 @@ class DNSBackend(ABC):
                 svcb_fqdn = await self.create_svcb_record(
                     zone=zone,
                     name=name,
-                    priority=1,
+                    priority=SVCB_SERVICE_MODE,
                     target=agent.svcb_target,
                     params=all_params,
                     ttl=agent.ttl,
@@ -302,7 +304,7 @@ class DNSBackend(ABC):
             svcb_fqdn = await self.create_svcb_record(
                 zone=zone,
                 name=name,
-                priority=1,
+                priority=SVCB_SERVICE_MODE,
                 target=agent.svcb_target,
                 params=svcb_params,
                 ttl=agent.ttl,
@@ -329,11 +331,18 @@ class DNSBackend(ABC):
         # by setting publish_walkable_alias=False on the AgentRecord.
         if agent.publish_walkable_alias:
             try:
+                # AliasMode MUST point at the flat primary owner
+                # (`{name}.{domain}.`) per draft-02 §3.1. agent.svcb_target
+                # is the endpoint host, which only coincides with the
+                # owner when endpoint == fqdn — the normal case has them
+                # distinct, so using svcb_target would point the alias
+                # at a name with no SVCB record.
+                walkable_target = f"{agent.fqdn}."
                 walkable_fqdn = await self.create_svcb_record(
                     zone=zone,
                     name=walkable_name,
-                    priority=0,  # AliasMode
-                    target=agent.svcb_target,
+                    priority=SVCB_ALIAS_MODE,
+                    target=walkable_target,
                     params={},
                     ttl=agent.ttl,
                 )

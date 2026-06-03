@@ -229,57 +229,16 @@ def _sanitize_error_message(msg: str | None) -> str | None:
 def _parse_signal_fqdn(fqdn: str) -> tuple[str | None, str | None]:
     """Parse ``agent_name`` and ``domain`` from a DNS-AID FQDN.
 
-    Handles three shapes:
-
-    1. Flat draft-02 form ``{name}.{domain}`` — splits on the first
-       label. Note that this is ambiguous (the first label could be a
-       hostname under a multi-label domain), so we treat the first
-       label as the agent name and the rest as the domain.
-    2. Walkable draft-02 form ``{name}._agents.{domain}`` — splits on
-       ``._agents.``. Same semantics as the flat form for the name.
-    3. Legacy draft-01 form ``_{name}._{protocol}._agents.{domain}``
-       — splits on ``._agents.``, strips the leading underscore, and
-       takes the first label before ``._``.
-
-    Returns ``(None, None)`` for inputs that don't look like any of
-    these (e.g. single-label strings).
+    Thin projection over :func:`dns_aid.core.fqdn.parse_dnsaid_fqdn`
+    that returns ``(name, domain)``; the SDK telemetry layer doesn't
+    care about the protocol carried in the FQDN.
     """
-    if not fqdn:
+    from dns_aid.core.fqdn import parse_dnsaid_fqdn
+
+    parsed = parse_dnsaid_fqdn(fqdn)
+    if parsed is None:
         return None, None
-
-    # Walkable or legacy: contains ._agents.
-    walkable_parts = fqdn.split("._agents.")
-    if len(walkable_parts) == 2:
-        prefix, domain = walkable_parts
-        # Guard against empty suffix (e.g. "foo._agents.") — that's
-        # not a well-formed FQDN, treat as unparseable.
-        if not domain:
-            return None, None
-        # Legacy form has leading underscore: _name._proto.
-        # Require the protocol label to also start with an underscore
-        # so we don't misparse "_booking.mcp._agents.foo.com" — that's
-        # not legitimate -01 either; treat as unparseable.
-        if prefix.startswith("_"):
-            inner = prefix.lstrip("_")
-            if "._" in inner:
-                name_part, _, proto_part = inner.partition("._")
-                if name_part and proto_part:
-                    return name_part, domain
-            return None, None
-        # Walkable form: {name} (single label, no underscore prefix).
-        if prefix and "." not in prefix:
-            return prefix, domain
-        return None, None
-
-    # Flat form: {name}.{domain} — name is the first label, domain has
-    # at least two labels. Don't match strings that have only one dot
-    # (those are too short to be a real FQDN).
-    if "." in fqdn:
-        first_label, _, rest = fqdn.partition(".")
-        if first_label and rest and "." in rest and not first_label.startswith("_"):
-            return first_label, rest
-
-    return None, None
+    return parsed.name, parsed.domain
 
 
 def _resolve_sampler(config: SDKConfig) -> Sampler | None:

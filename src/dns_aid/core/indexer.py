@@ -24,11 +24,19 @@ import dns.resolver
 import structlog
 
 from dns_aid.backends.base import DNSBackend
+from dns_aid.core.models import SVCB_SERVICE_MODE
+from dns_aid.utils.validation import validate_no_underscore_in_target
 
 logger = structlog.get_logger(__name__)
 
 # Index record name pattern
 INDEX_RECORD_NAME = "_index._agents"
+
+# Sentinel for an index entry whose protocol couldn't be derived from
+# the primary SVCB record (record absent, malformed, or the publisher
+# didn't set alpn/bap). Kept as a named constant so consumers can
+# filter on it without string-matching.
+UNKNOWN_PROTOCOL = "unknown"
 
 
 @dataclass
@@ -266,8 +274,6 @@ async def update_index(
     # TargetName up front (same rule as agent records — no underscores
     # because the target carries a public x.509 cert).
     if index_target is not None:
-        from dns_aid.utils.validation import validate_no_underscore_in_target
-
         validate_no_underscore_in_target(index_target)
 
     try:
@@ -288,7 +294,7 @@ async def update_index(
             await backend.create_svcb_record(
                 zone=domain,
                 name=INDEX_RECORD_NAME,
-                priority=1,  # ServiceMode
+                priority=SVCB_SERVICE_MODE,
                 target=svcb_target,
                 params={"alpn": "h2", "port": str(index_target_port)},
                 ttl=ttl,
@@ -400,43 +406,43 @@ async def sync_index(
     discovered_entries: list[IndexEntry] = []
 
     def _protocol_from_primary(primary_records: dict[str, dict], name: str) -> str:
-        """Read alpn (and bap when PR 4 lands) off the primary SVCB."""
+        """Read the agent protocol off the primary SVCB record.
+
+        draft-02 §Known Agent: ``bap`` is the canonical carrier for the
+        bulk-agent-protocol identifier; ``alpn`` is the back-compat
+        carrier accepted for single-protocol publishers. Read whichever
+        the record uses.
+        """
         primary = primary_records.get(name)
         if not primary:
-            return "unknown"
+            return UNKNOWN_PROTOCOL
         params = primary.get("data", {}).get("params", {}) or {}
-        # alpn carries the agent protocol when only one is published
-        # (per draft-02 §Known Agent). bap will become the preferred
-        # carrier in the PR 4 alpn/bap split.
-        alpn = params.get("alpn") or params.get("bap")
+        alpn = params.get("bap") or params.get("alpn")
         if alpn:
             # alpn may be quoted; trim.
-            return alpn.strip('"').split(",")[0].strip() or "unknown"
-        return "unknown"
+            return alpn.strip('"').split(",")[0].strip() or UNKNOWN_PROTOCOL
+        return UNKNOWN_PROTOCOL
 
     try:
-        # Pre-scan: collect all SVCB records by relative name so we can
-        # resolve protocol from the primary owner without doing a second
-        # backend round-trip per agent. Single pass, no filter. Inside
-        # the try block so list_records failures are surfaced as a clean
-        # IndexResult rather than propagating.
+        # Single backend enumeration. Earlier the function fetched the
+        # zone twice — once with no filter to build primary_records and
+        # once with name_pattern="_agents" to enumerate agents — but the
+        # second call returns a subset of the first. On real backends
+        # (Route53 / Cloudflare / Infoblox) each `list_records` is a
+        # paginated API round-trip, so doubling it doubles latency and
+        # quota burn per sync. Iterate in memory instead.
         primary_records: dict[str, dict] = {}
+        agent_records: list[dict] = []
         async for record in backend.list_records(zone=domain, record_type="SVCB"):
             rname = record.get("name", "")
-            if rname and rname != INDEX_RECORD_NAME:
-                primary_records[rname] = record
-
-        # Scan for all _agents.* SVCB records
-        async for record in backend.list_records(
-            zone=domain,
-            name_pattern="_agents",
-            record_type="SVCB",
-        ):
-            record_name = record.get("name", "")
-
-            # Skip the index record itself
-            if record_name == INDEX_RECORD_NAME:
+            if not rname or rname == INDEX_RECORD_NAME:
                 continue
+            primary_records[rname] = record
+            if "_agents" in rname:
+                agent_records.append(record)
+
+        for record in agent_records:
+            record_name = record.get("name", "")
 
             # Try the draft-02 walkable AliasMode shape first.
             walkable_match = walkable_pattern.match(record_name)

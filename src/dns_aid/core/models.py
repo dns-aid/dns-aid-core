@@ -68,6 +68,14 @@ DNS_AID_KEY_MAP: dict[str, str] = {
 
 DNS_AID_KEY_MAP_REVERSE: dict[str, str] = {v: k for k, v in DNS_AID_KEY_MAP.items()}
 
+# SVCB record priorities per RFC 9460:
+#   priority=0 → AliasMode (the record is an alias to a canonical owner)
+#   priority>0 → ServiceMode (the record carries endpoint data; lower
+#                priorities are preferred when multiple are returned)
+# We use 1 as the default ServiceMode priority for primary-owner writes.
+SVCB_ALIAS_MODE: int = 0
+SVCB_SERVICE_MODE: int = 1
+
 
 def _use_string_keys() -> bool:
     """Check if human-readable string keys should be used instead of keyNNNNN.
@@ -313,9 +321,15 @@ class AgentRecord(BaseModel):
     """
     Represents an AI agent published via DNS-AID.
 
-    Maps to SVCB + TXT records in DNS per the DNS-AID specification:
-    - SVCB: _{name}._{protocol}._agents.{domain} → service binding
+    Maps to SVCB + TXT records in DNS per the DNS-AID specification
+    (draft-mozleywilliams-dnsop-dnsaid-02):
+
+    - SVCB: ``{name}.{domain}`` → service binding (flat primary owner)
     - TXT: capabilities, version, metadata
+
+    The agent protocol is no longer part of the FQDN under -02 — it
+    lives in the ``bap`` SvcParamKey (or ``alpn`` when only one
+    protocol is supported).
 
     Example:
         >>> agent = AgentRecord(
@@ -326,7 +340,7 @@ class AgentRecord(BaseModel):
         ...     capabilities=["ipam", "dns", "vpn"]
         ... )
         >>> agent.fqdn
-        '_network-specialist._mcp._agents.example.com'
+        'network-specialist.example.com'
         >>> agent.endpoint_url
         'https://mcp.example.com:443'
     """
@@ -467,11 +481,15 @@ class AgentRecord(BaseModel):
     ttl: int = Field(default=3600, ge=30, le=86400, description="Time-to-live in seconds")
 
     publish_walkable_alias: bool = Field(
-        default=True,
+        default=False,
         description="Whether to publish the optional walkable AliasMode SVCB record at "
-        "{name}._agents.{domain} pointing at the flat primary owner. Per draft-02 §Known "
-        "Agent, this is operator-optional. dns-aid-core publishes it by default so "
-        "DNS-SD-style enumeration crawlers can discover the agent; set False to suppress.",
+        "{name}._agents.{domain} pointing at the flat primary owner. Per draft-02 §3.1 "
+        "this record is operator-optional and serves DNS-SD-style enumeration "
+        "use cases. Default False because the record is an enumeration handle (a "
+        "crawler can walk _agents.<zone> and inventory every agent), which is "
+        "undesirable for most public deployments — see docs/privacy-considerations.md. "
+        "Set True when you actively want the agent discoverable via enumeration "
+        "(internal indexes, intentional public directories, DNS-SD-style consumers).",
     )
 
     # Optional direct endpoint (overrides target_host:port for HTTP index agents)
@@ -529,6 +547,17 @@ class AgentRecord(BaseModel):
         default=False,
         description="True when the domain hosting this agent presented a DNSSEC-validated "
         "response (AD flag set). False when validation did not occur or did not succeed.",
+    )
+
+    legacy_resolved: bool = Field(
+        default=False,
+        description="True when this agent record was resolved via the legacy "
+        "draft-01 FQDN shape (`_{name}._{protocol}._agents.{domain}`) rather "
+        "than the draft-02 flat form (`{name}.{domain}`). Callers should "
+        "down-weight or refuse legacy-resolved records in environments where "
+        "the publisher has had time to migrate. Set by the discoverer when "
+        "``allow_legacy=True`` (or the env-flag equivalent) lets a flat-FQDN "
+        "miss fall back to the legacy shape.",
     )
 
     # JWS verification result (populated by the discoverer's signature-verification step
@@ -797,7 +826,13 @@ class VerifyResult(BaseModel):
             score += 20
         if self.dnssec_valid:
             score += 30
-        if self.dane_valid:
+        # DANE only contributes when DNSSEC also validated. TLSA without
+        # DNSSEC has no integrity guarantee (RFC 6698 §10.1), so we
+        # don't let it bump the score even if a caller hand-built this
+        # VerifyResult with both flags. The validator.py path already
+        # demotes ``dane_valid`` to None in that case; this is a
+        # second-line guard against bypass.
+        if self.dane_valid and self.dnssec_valid:
             score += 15
         if self.endpoint_reachable:
             score += 15

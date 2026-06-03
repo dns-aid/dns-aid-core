@@ -504,6 +504,46 @@ class TestVerify:
             assert result.dnssec_valid is False
 
     @pytest.mark.asyncio
+    async def test_verify_dane_without_dnssec_demotes_to_unknown(self):
+        """A TLSA record served without DNSSEC has no integrity guarantee.
+
+        Even though ``_check_dane`` would return ``True`` (TLSA found),
+        the absence of a DNSSEC validation means we cannot trust the
+        TLSA record itself. The validator demotes ``dane_valid`` to
+        ``None`` (unknown), and the security_score's gated +15 does
+        not fire.
+        """
+        from dns_aid.core.models import DNSSECDetail, TLSDetail
+
+        with (
+            patch("dns_aid.core.validator._check_svcb_record") as mock_svcb,
+            patch("dns_aid.core.validator._check_dnssec_detail") as mock_dnssec_detail,
+            patch("dns_aid.core.validator._check_dane") as mock_dane,
+            patch("dns_aid.core.validator._check_endpoint") as mock_endpoint,
+            patch("dns_aid.core.validator._check_tls") as mock_tls,
+        ):
+            mock_svcb.return_value = {
+                "target": "agent.example.com",
+                "port": 443,
+                "valid": True,
+            }
+            mock_dnssec_detail.return_value = DNSSECDetail(validated=False)
+            mock_dane.return_value = True  # TLSA record present
+            mock_endpoint.return_value = {"reachable": True, "latency_ms": 50.0}
+            mock_tls.return_value = TLSDetail()
+
+            result = await verify("chat.example.com")
+
+            assert result.dnssec_valid is False
+            assert result.dane_valid is None, (
+                "DANE without DNSSEC must be demoted to unknown, not True"
+            )
+            assert result.dane_note is not None
+            assert "DNSSEC" in result.dane_note
+            # 20 (record) + 20 (svcb) + 0 (dnssec) + 0 (DANE gated) + 15 (endpoint)
+            assert result.security_score == 55
+
+    @pytest.mark.asyncio
     async def test_verify_endpoint_unreachable(self):
         """Test verify when endpoint is unreachable."""
         from dns_aid.core.models import DNSSECDetail, TLSDetail

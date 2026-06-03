@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from dns_aid.backends.base import DNSBackend
+from dns_aid.core.models import SVCB_ALIAS_MODE, SVCB_SERVICE_MODE
 
 if TYPE_CHECKING:
     from dns_aid.core.models import AgentRecord
@@ -31,15 +32,15 @@ class MockBackend(DNSBackend):
         >>> backend = MockBackend()
         >>> await backend.create_svcb_record(
         ...     zone="example.com",
-        ...     name="_chat._a2a._agents",
+        ...     name="chat",
         ...     priority=1,
         ...     target="chat.example.com.",
         ...     params={"alpn": "a2a", "port": "443"}
         ... )
-        '_chat._a2a._agents.example.com'
+        'chat.example.com'
 
-        >>> # Records are stored in memory
-        >>> backend.records["example.com"]["_chat._a2a._agents"]["SVCB"]
+        >>> # Records are stored in memory under the flat draft-02 name
+        >>> backend.records["example.com"]["chat"]["SVCB"]
         [{'priority': 1, 'target': 'chat.example.com.', 'params': {...}, 'ttl': 3600}]
     """
 
@@ -110,15 +111,23 @@ class MockBackend(DNSBackend):
         name: str,
         record_type: str,
     ) -> bool:
-        """Delete record from memory."""
-        if (
-            zone in self.records
-            and name in self.records[zone]
-            and record_type in self.records[zone][name]
-        ):
-            del self.records[zone][name][record_type]
-            return True
-        return False
+        """Delete record from memory.
+
+        Uses ``.get()`` (not the ``in`` keyword) so we never trigger the
+        outer ``defaultdict`` to materialise empty entries for the
+        zone/name/type — that side-effect was causing follow-up calls
+        to see records that didn't exist.
+        """
+        zone_records = self.records.get(zone)
+        if zone_records is None:
+            return False
+        name_records = zone_records.get(name)
+        if name_records is None:
+            return False
+        if record_type not in name_records:
+            return False
+        del name_records[record_type]
+        return True
 
     async def list_records(
         self,
@@ -163,9 +172,22 @@ class MockBackend(DNSBackend):
         name: str,
         record_type: str,
     ) -> dict | None:
-        """Get a specific record from memory."""
+        """Get a specific record from memory.
+
+        Uses ``.get()`` so a probe for a non-existent record doesn't
+        cause the outer ``defaultdict`` to create empty intermediate
+        entries — that side-effect previously fooled follow-up
+        delete_record calls into reporting success on records that
+        had never been written.
+        """
         try:
-            records = self.records[zone][name][record_type]
+            zone_records = self.records.get(zone)
+            if zone_records is None:
+                return None
+            name_records = zone_records.get(name)
+            if name_records is None:
+                return None
+            records = name_records.get(record_type)
             if not records:
                 return None
             record = records[0]
@@ -209,7 +231,7 @@ class MockBackend(DNSBackend):
         svcb_fqdn = await self.create_svcb_record(
             zone=zone,
             name=name,
-            priority=1,
+            priority=SVCB_SERVICE_MODE,
             target=agent.svcb_target,
             params=agent.to_svcb_params(),
             ttl=agent.ttl,
@@ -226,13 +248,15 @@ class MockBackend(DNSBackend):
             )
             records.append(f"TXT {txt_fqdn}")
 
-        # Optional walkable AliasMode at {name}._agents.{domain}.
+        # Optional walkable AliasMode at {name}._agents.{domain} pointing
+        # at the flat primary owner per draft-02 §3.1.
         if agent.publish_walkable_alias:
+            walkable_target = f"{agent.fqdn}."
             walkable_fqdn = await self.create_svcb_record(
                 zone=zone,
                 name=walkable_name,
-                priority=0,  # AliasMode
-                target=agent.svcb_target,
+                priority=SVCB_ALIAS_MODE,
+                target=walkable_target,
                 params={},
                 ttl=agent.ttl,
             )

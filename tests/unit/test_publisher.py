@@ -28,8 +28,9 @@ class TestPublish:
         assert result.success is True
         assert result.agent.name == "chat"
         assert result.agent.fqdn == "chat.example.com"
-        # SVCB primary + TXT companion + walkable AliasMode (draft-02 default)
-        assert len(result.records_created) == 3
+        # SVCB primary + TXT companion. Walkable AliasMode is opt-in
+        # (default off under -02 to avoid an enumeration handle).
+        assert len(result.records_created) == 2
 
     @pytest.mark.asyncio
     async def test_publish_with_capabilities(self, mock_backend: MockBackend):
@@ -597,14 +598,31 @@ class TestPublishWalkableAlias:
     """Tests for the draft-02 walkable AliasMode write."""
 
     @pytest.mark.asyncio
-    async def test_walkable_alias_written_by_default(self, mock_backend: MockBackend):
-        """publish() emits the walkable record at {name}._agents by default."""
+    async def test_walkable_alias_off_by_default(self, mock_backend: MockBackend):
+        """The walkable record is opt-in under -02 to avoid an
+        enumeration handle (crawlers walking _agents.<zone>).
+        Operators who want DNS-SD-style enumeration explicitly enable it."""
         await publish(
             name="chat",
             domain="example.com",
             protocol="a2a",
             endpoint="chat.example.com",
             backend=mock_backend,
+        )
+
+        walkable = mock_backend.get_svcb_record("example.com", "chat._agents")
+        assert walkable is None, "default must be off to avoid enumeration handle"
+
+    @pytest.mark.asyncio
+    async def test_walkable_alias_written_when_opted_in(self, mock_backend: MockBackend):
+        """publish_walkable_alias=True emits the walkable record."""
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+            publish_walkable_alias=True,
         )
 
         walkable = mock_backend.get_svcb_record("example.com", "chat._agents")
@@ -640,6 +658,7 @@ class TestPublishWalkableAlias:
             protocol="a2a",
             endpoint="chat.example.com",
             backend=mock_backend,
+            publish_walkable_alias=True,
         )
         assert mock_backend.get_svcb_record("example.com", "chat") is not None
         assert mock_backend.get_svcb_record("example.com", "chat._agents") is not None

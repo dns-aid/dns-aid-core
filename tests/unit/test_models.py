@@ -504,3 +504,25 @@ class TestVerifyResult:
 
         assert result.security_score == 20
         assert result.security_rating == "Poor"
+
+    def test_dane_without_dnssec_does_not_score(self):
+        """DANE +15 must be gated on DNSSEC.
+
+        A spoofer with no DNSSEC chain can still serve a TLSA record;
+        TLSA without DNSSEC has no integrity guarantee (RFC 6698 §10.1).
+        If a hand-built VerifyResult carries dane_valid=True but
+        dnssec_valid=False, security_score MUST NOT credit the DANE
+        bonus — otherwise a non-DNSSEC spoofer can reach ``Good``.
+        """
+        result = VerifyResult(
+            fqdn="chat.example.com",
+            record_exists=True,
+            svcb_valid=True,
+            dnssec_valid=False,  # NOT validated
+            dane_valid=True,  # claims TLSA present
+            endpoint_reachable=True,
+        )
+
+        # 20 (record) + 20 (svcb) + 0 (dnssec) + 0 (dane gated) + 15 (endpoint)
+        assert result.security_score == 55
+        assert result.security_rating == "Fair"

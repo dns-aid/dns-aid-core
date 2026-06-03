@@ -249,7 +249,7 @@ def publish_agent_to_dns(
     ipv4_hint: list[str] | None = None,
     ipv6_hint: list[str] | None = None,
     allow_underscore_target: bool = False,
-    publish_walkable_alias: bool = True,
+    publish_walkable_alias: bool = False,
 ) -> dict:
     """
     Publish an AI agent to DNS using DNS-AID protocol.
@@ -304,13 +304,16 @@ def publish_agent_to_dns(
             TargetNames reached over TLS with publicly-issued x.509 certs
             MUST NOT contain underscores. Set this only when the target is
             internal-only and will not be reached over public PKI.
-        publish_walkable_alias: When True (default), additionally write the
+        publish_walkable_alias: When True, additionally write the
             optional walkable AliasMode SVCB record at
             ``{name}._agents.{domain}`` pointing at the flat primary
-            owner. Per draft-02 §Known Agent this is operator-optional;
-            the walkable record makes DNS-SD-style enumeration crawlers
-            able to discover the agent. Set False to suppress the
-            walkable write.
+            owner. Default False — the walkable record is an
+            enumeration handle (a crawler can walk ``_agents.<zone>``
+            and inventory every agent the operator publishes), which
+            is undesirable for most deployments. Enable when you
+            actively want the agent discoverable via enumeration:
+            internal directories, intentional public catalogs, or
+            DNS-SD-style consumers.
 
     Returns:
         dict with:

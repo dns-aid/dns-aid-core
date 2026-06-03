@@ -113,10 +113,18 @@ async def verify(fqdn: str, *, verify_dane_cert: bool = False) -> VerifyResult:
                 "use verify_dane_cert=True for full certificate matching)"
             )
 
-        # DANE without DNSSEC is meaningless — per RFC 6698 and IETF draft,
-        # TLSA records MUST be DNSSEC-validated to be trusted.
+        # DANE without DNSSEC carries no integrity guarantee — RFC 6698
+        # §10.1 and draft-02 §Security Considerations both treat TLSA
+        # without a validated chain as untrustworthy. Demote the outcome
+        # to None (DANE state unknown), not just append to the note, so
+        # downstream consumers — including security_score — don't credit
+        # a TLSA record that hasn't been DNSSEC-validated.
         if result.dane_valid is not None and not result.dnssec_valid:
-            result.dane_note += " ⚠ DNSSEC not validated — DANE requires DNSSEC to be trustworthy"
+            result.dane_note += (
+                " ⚠ DNSSEC not validated — DANE requires DNSSEC to be "
+                "trustworthy; demoting DANE outcome to unknown"
+            )
+            result.dane_valid = None
 
     # 4. Check endpoint reachability
     if target and port:

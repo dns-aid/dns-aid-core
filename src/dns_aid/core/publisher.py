@@ -15,6 +15,12 @@ import structlog
 from dns_aid.backends import VALID_BACKEND_NAMES, create_backend
 from dns_aid.backends.base import DNSBackend
 from dns_aid.core.models import AgentRecord, Protocol, PublishResult
+from dns_aid.utils.validation import (
+    _underscore_bypass_env_enabled,
+    validate_agent_name,
+    validate_no_underscore_in_target,
+    validate_well_known_path,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -91,7 +97,7 @@ async def publish(
     sign: bool = False,
     private_key_path: str | None = None,
     allow_underscore_target: bool = False,
-    publish_walkable_alias: bool = True,
+    publish_walkable_alias: bool = False,
 ) -> PublishResult:
     """
     Publish an AI agent to DNS using DNS-AID protocol.
@@ -138,13 +144,18 @@ async def publish(
             MUST NOT contain underscores. dns-aid-core enforces this by
             default; set this flag for internal-only deployments where the
             target is not behind public PKI.
-        publish_walkable_alias: If True (default), additionally write the
+        publish_walkable_alias: When True, additionally write the
             optional walkable AliasMode SVCB record at
-            {name}._agents.{domain} pointing at the flat primary owner.
-            Per draft-02 §Known Agent this is operator-optional; the
-            walkable record makes DNS-SD-style enumeration crawlers able
-            to discover the agent. Set False to suppress the walkable
-            write if your deployment doesn't need enumeration.
+            ``{name}._agents.{domain}`` pointing at the flat primary
+            owner. Per draft-02 §3.1 this record is operator-optional.
+            **Default False**: the walkable record is an enumeration
+            handle — a crawler that knows the zone can walk
+            ``_agents.<zone>`` and inventory every agent the operator
+            publishes. For most deployments that's undesirable (see
+            ``docs/privacy-considerations.md``). Set True when you
+            actively want the agents discoverable by enumeration —
+            internal directories, intentional public catalogs, or
+            DNS-SD-style consumers.
 
     Returns:
         PublishResult with created records
@@ -166,16 +177,19 @@ async def publish(
     if isinstance(protocol, str):
         protocol = Protocol(protocol.lower())
 
-    # Enforce draft-02 §3.2 (Known Organization, Unknown Agent): the SVCB TargetName MUST NOT
-    # contain underscores when reached over TLS with a public x.509 cert.
-    # Strict-by-default; the allow_underscore_target flag downgrades to a
-    # warning for internal-only deployments.
-    from dns_aid.utils.validation import (
-        _underscore_bypass_env_enabled,
-        validate_no_underscore_in_target,
-        validate_well_known_path,
-    )
+    # Validate the agent name BEFORE the rest of the pipeline runs.
+    # The flat draft-02 FQDN is `{name}.{domain}`, which becomes the
+    # x.509 dNSName SAN; CA/Browser Forum + RFC 5280 forbid underscored
+    # labels and the validator's lowercase+hyphenated rule lines up with
+    # what most CAs and DNS providers will actually accept. Without this
+    # check a publisher can land a record whose SAN is unrepresentable.
+    name = validate_agent_name(name)
 
+    # Enforce draft-02 §3.2 (Known Organization, Unknown Agent): the
+    # SVCB TargetName MUST NOT contain underscores when reached over
+    # TLS with a public x.509 cert. Strict-by-default; the
+    # allow_underscore_target flag downgrades to a warning for
+    # internal-only deployments.
     validate_no_underscore_in_target(endpoint, allow_underscore=allow_underscore_target)
 
     # Capture whether the bypass actually fired so we can surface it
@@ -363,6 +377,15 @@ async def unpublish(
         logger.error("Zone does not exist", zone=domain)
         return False
 
+    # Probe the primary records BEFORE deletion so we can later
+    # distinguish "primary was already absent" (migration / re-run case
+    # — fine) from "primary existed and delete silently returned False"
+    # (the masked-failure case Route53 and Cloudflare can produce on
+    # API errors). Both look identical from delete_record's return alone,
+    # but only the latter is dangerous.
+    primary_svcb_existed = (await dns_backend.get_record(domain, record_name, "SVCB")) is not None
+    primary_txt_existed = (await dns_backend.get_record(domain, record_name, "TXT")) is not None
+
     # Delete the primary-owner records (SVCB + companion TXT).
     svcb_deleted = await dns_backend.delete_record(domain, record_name, "SVCB")
     txt_deleted = await dns_backend.delete_record(domain, record_name, "TXT")
@@ -396,12 +419,51 @@ async def unpublish(
             error=str(exc),
         )
 
-    success = (
-        svcb_deleted or txt_deleted or walkable_deleted or legacy_svcb_deleted or legacy_txt_deleted
-    )
+    # Decide success:
+    #
+    #   - "Primary deleted" — record existed and delete returned True.
+    #     Unambiguous success.
+    #   - "Primary already absent" — record didn't exist before the
+    #     call. delete_record reported False but that's expected. If any
+    #     cleanup (walkable / legacy) ran successfully we treat the
+    #     unpublish as a successful migration cleanup; if nothing was
+    #     deleted at all we report no-op.
+    #   - "Primary masked-fail" — record DID exist before the call but
+    #     delete returned False. This is the dangerous case Route53 /
+    #     Cloudflare can produce on API errors. We MUST report False so
+    #     the MCP server doesn't de-index a still-live agent.
+    primary_existed = primary_svcb_existed or primary_txt_existed
+    primary_deleted = svcb_deleted or txt_deleted
+    cleanup_deleted = walkable_deleted or legacy_svcb_deleted or legacy_txt_deleted
+
+    primary_masked_failure = primary_existed and not primary_deleted
+
+    if primary_masked_failure:
+        logger.error(
+            "unpublish: primary SVCB/TXT existed but delete returned False — "
+            "agent may still resolve in DNS; refusing to report success",
+            agent_name=name,
+            primary_svcb_existed=primary_svcb_existed,
+            primary_txt_existed=primary_txt_existed,
+            svcb_deleted=svcb_deleted,
+            txt_deleted=txt_deleted,
+        )
+        return False
+
+    success = primary_deleted or cleanup_deleted
 
     if success:
-        logger.info("Agent removed from DNS", agent_name=name)
+        logger.info(
+            "Agent removed from DNS",
+            agent_name=name,
+            primary_deleted=primary_deleted,
+            cleanup_deleted=cleanup_deleted,
+            svcb_deleted=svcb_deleted,
+            txt_deleted=txt_deleted,
+            walkable_deleted=walkable_deleted,
+            legacy_svcb_deleted=legacy_svcb_deleted,
+            legacy_txt_deleted=legacy_txt_deleted,
+        )
     else:
         logger.warning("No records found to delete", agent_name=name)
 

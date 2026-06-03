@@ -608,6 +608,7 @@ class TestRoute53PublishAgentParamDemotion:
             port=443,
             capabilities=["testing"],
             realm="demo",
+            publish_walkable_alias=True,
         )
 
         backend = Route53Backend(zone_id="Z123")
@@ -653,6 +654,7 @@ class TestRoute53PublishAgentParamDemotion:
             target_host="simple.example.com",
             port=443,
             capabilities=["chat"],
+            publish_walkable_alias=True,
         )
 
         backend = Route53Backend(zone_id="Z123")

@@ -201,10 +201,15 @@ class TestMockBackend:
 
     @pytest.mark.asyncio
     async def test_publish_agent_helper(self, mock_backend: MockBackend, sample_agent):
-        """Test publish_agent convenience method (draft-02 default writes walkable too)."""
+        """Test publish_agent convenience method.
+
+        Default walkable=False under -02 (avoids enumeration handle).
+        Opt into walkable explicitly to verify the AliasMode write.
+        """
+        sample_agent.publish_walkable_alias = True
         records = await mock_backend.publish_agent(sample_agent)
 
-        # SVCB primary + TXT companion + walkable AliasMode (draft-02 default-on)
+        # SVCB primary + TXT companion + walkable AliasMode (opted in).
         assert len(records) == 3
         assert any("SVCB" in r for r in records)
         assert any("TXT" in r for r in records)

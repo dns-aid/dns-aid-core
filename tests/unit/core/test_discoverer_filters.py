@@ -182,7 +182,19 @@ async def test_realm_filter(mocked_pipeline: list[AgentRecord]) -> None:
 async def test_min_dnssec_propagates_from_dnssec_validated(
     mocked_pipeline: list[AgentRecord],
 ) -> None:
-    """When DNSSEC validation succeeds, every agent gets ``dnssec_validated=True``."""
+    """When DNSSEC validation succeeds for every agent, the per-agent
+    ``dnssec_validated`` flag is stamped (now inside _apply_post_discovery
+    under the per-agent model, not via a blanket loop in discover())."""
+
+    async def fake_post_discovery(
+        agents, require_dnssec, enrich_endpoints, verify_signatures, domain
+    ):
+        # Simulate the per-agent stamping that the real function does
+        # when require_dnssec=True and every per-agent check succeeds.
+        for a in agents:
+            a.dnssec_validated = True
+        return True
+
     with (
         patch(
             "dns_aid.core.discoverer._execute_discovery",
@@ -190,7 +202,7 @@ async def test_min_dnssec_propagates_from_dnssec_validated(
         ),
         patch(
             "dns_aid.core.discoverer._apply_post_discovery",
-            new=AsyncMock(return_value=True),  # DNSSEC validated for the domain.
+            new=fake_post_discovery,
         ),
     ):
         result = await discover("example.com", min_dnssec=True)

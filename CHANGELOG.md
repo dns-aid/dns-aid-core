@@ -119,6 +119,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `to_params()` reads `DNS_AID_SVCB_STRING_KEYS` once per call (was up
   to 11× per serialization).
 
+### BREAKING CHANGE — draft-02 flat FQDN + walkable AliasMode
+
+This release flips the wire-format default from
+draft-mozleywilliams-dnsop-dnsaid-01 to -02. The primary agent owner is
+now the flat FQDN `{name}.{domain}` (valid as an x.509 SAN dNSName); the
+agent protocol no longer travels in the FQDN — it lives in the SVCB
+`bap` SvcParamKey (or `alpn` when only one protocol is supported).
+
+Anyone with -01 records in production will need to either republish or
+opt into a per-call legacy fallback. See **Migrating from -01** below.
+
+### Added
+
+- **Flat primary owner record** at `{name}.{domain}`. SVCB + companion
+  TXT are written at this name on every publish.
+- **Optional walkable AliasMode** at `{name}._agents.{domain}` pointing
+  at the flat primary owner. **Off by default** under -02 to avoid an
+  enumeration handle — see `docs/privacy-considerations.md`. Opt in
+  per-publish via `publish_walkable_alias=True`, the CLI `--walkable`
+  flag, or the MCP `publish_walkable_alias=true` kwarg.
+- **Per-call legacy fallback** kwarg `allow_legacy: bool | None` on
+  `discover()` / `discover_at_fqdn()`. When set, a flat-FQDN miss falls
+  back to the -01 shape; the resulting `AgentRecord` is stamped
+  `legacy_resolved=True` so downstream filters can down-weight it.
+  The env-flag form `DNS_AID_LEGACY_01_FALLBACK=1` is preserved as a
+  process-wide back-compat for callers that can't easily thread the
+  kwarg; it now also logs a warning on each use and stamps the result.
+- **Per-agent DNSSEC validation** under flat-FQDN. Each agent's owner
+  is checked independently; the result-level `dnssec_validated` is
+  True only when every agent's check passed.
+- **`legacy_resolved: bool`** field on `AgentRecord` for filter-side
+  visibility into legacy-shape records.
+- **`docs/privacy-considerations.md`** — explains the enumeration vs.
+  discovery trade-off and when to enable the walkable record.
+- **`SVCB_ALIAS_MODE` / `SVCB_SERVICE_MODE`** constants in
+  `dns_aid.core.models` so backend code reads `priority=SVCB_ALIAS_MODE`
+  instead of a bare integer.
+- **`dns_aid.core.fqdn.parse_dnsaid_fqdn`** — a single FQDN parser
+  recognising all three shapes; the discoverer's `_parse_fqdn` and the
+  telemetry's `_parse_signal_fqdn` are thin projections over it.
+
+### Changed — Security
+
+- **JWS signature now binds to the record.** `signature_verified` is
+  True only when the signed `RecordPayload` fields (`fqdn`, `target`,
+  `port`, `alpn`) match the AgentRecord — closing a hole where a
+  validly-signed `sig` could be lifted off one record and pasted onto
+  a spoofed SVCB pointing at an attacker host.
+- **`cap-sha256` mismatch now refuses the record** instead of silently
+  downgrading to TXT fallback. `fetch_cap_document` raises
+  `CapDigestMismatchError` on digest mismatch (distinct from network
+  failure); the discoverer catches it and drops the affected record.
+  TXT-fallback records no longer carry `cap_sha256` because the pin
+  doesn't apply to the data we ended up using.
+- **`well-known` SvcParamKey value is now validated** to a safe
+  RFC 8615 single-segment suffix (`^[A-Za-z0-9._-]+$`, length-bounded,
+  no `..` traversal) on both publish and discover. Prevents path
+  traversal, query-string injection, and fragment injection through
+  the SVCB → URL reconstruction.
+- **Walkable AliasMode target is the flat primary owner.** Was the
+  endpoint host, which only coincided with the flat owner when those
+  names happened to match.
+- **DANE score gates on DNSSEC.** A TLSA record without a DNSSEC chain
+  has no integrity guarantee (RFC 6698 §10.1); the validator now
+  demotes `dane_valid` to `None` in that case, and `security_score`'s
+  +15 for DANE is gated on `dnssec_valid` as a second-line guard.
+- **`unpublish()` reports success only when the primary record was
+  deleted (or was already absent and cleanup ran).** Earlier the
+  success boolean OR'd in walkable / legacy cleanup, so a primary
+  delete that silently failed on Route53 / Cloudflare could be masked
+  by an unrelated cleanup succeeding — the MCP server would then
+  de-index a still-live agent.
+- **Agent name is validated at publish.** `validate_agent_name()` is
+  now called on the publisher path (previously only on the MCP path),
+  so SDK / CLI callers can't land records whose flat-FQDN SAN would
+  be unrepresentable.
+- **Underscore-target bypass log is now structured `WARN`** with a
+  `warning_class="dns_aid.underscore_bypass"` key so log aggregators
+  can count and alert on deliberate opt-ins per zone.
+
+### Changed — Code quality
+
+- `sync_index` performs a single backend enumeration instead of two
+  (the second was a subset of the first; doubled API quota burn on
+  every sync).
+- `discover_at_fqdn` for flat / walkable shapes resolves DNS once and
+  reads the actual protocol from the record's `bap` (preferred) or
+  `alpn` field instead of firing MCP-then-A2A back-to-back.
+- Validation logger migrated from stdlib `logging` to project-standard
+  `structlog`.
+
+### Migrating from -01
+
+1. **Re-publish your agents.** The publisher writes the flat shape by
+   default; nothing else to do for new records.
+2. **Existing -01 records keep resolving** when consumers set
+   `allow_legacy=True` on `discover()` or set the env-flag form
+   `DNS_AID_LEGACY_01_FALLBACK=1`. The returned `AgentRecord` will
+   have `legacy_resolved=True` so filters can down-weight.
+3. **`unpublish()` cleans up both shapes** in one call. No flag needed.
+4. **Walkable record is now opt-in.** Operators relying on
+   DNS-SD-style enumeration need to pass `--walkable` (CLI) /
+   `publish_walkable_alias=True` (SDK/MCP) — see
+   `docs/privacy-considerations.md`.
+
 ## [0.23.0] - 2026-05-26
 
 ### Added — Production-grade OpenTelemetry integration (spec 005)
