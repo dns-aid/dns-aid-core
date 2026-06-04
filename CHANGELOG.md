@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-06-04
+
+### Fixed
+
+- **Restore the `mcp-name` README tag** dropped during the 0.24.0
+  consolidation, so the MCP Registry ownership validation against the
+  published PyPI package succeeds. No functional change from 0.24.0 —
+  the flat-FQDN migration and hardening shipped in 0.24.0.
+
 ## [0.24.0] - 2026-06-04
 
 ### Fixed — flat-FQDN completion

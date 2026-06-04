@@ -1,5 +1,7 @@
 # DNS-AID
 
+<!-- mcp-name: io.github.dns-aid/dns-aid -->
+
 [![CI](https://github.com/infobloxopen/dns-aid-core/actions/workflows/ci.yml/badge.svg)](https://github.com/infobloxopen/dns-aid-core/actions/workflows/ci.yml)
 [![Security](https://github.com/infobloxopen/dns-aid-core/actions/workflows/security.yml/badge.svg)](https://github.com/infobloxopen/dns-aid-core/actions/workflows/security.yml)
 [![CodeQL](https://github.com/infobloxopen/dns-aid-core/actions/workflows/codeql.yml/badge.svg)](https://github.com/infobloxopen/dns-aid-core/actions/workflows/codeql.yml)
