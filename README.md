@@ -17,6 +17,20 @@ Reference implementation for [IETF draft-mozleywilliams-dnsop-dnsaid-02](https:/
 
 DNS-AID enables AI agents to discover each other via DNS, using the internet's existing naming infrastructure instead of centralized registries or hardcoded URLs.
 
+## Relationship to IETF
+
+The DNS-AID specification is being developed within the IETF: https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/.
+
+This repository provides a reference implementation.
+
+This project does not define the specification. The IETF draft is authoritative.
+
+## Scope of this Repository
+
+This project focuses on implementation, tooling, and ecosystem activities.
+
+Changes to protocol behavior should be discussed within the IETF.
+
 > **New to DNS-AID?** Start with the [Getting Started Guide](docs/getting-started.md) for install, first agent publication, and backend setup.
 
 ## Documentation
@@ -1087,6 +1101,10 @@ DNS-AID doesn't require waiting for ICANN approval or paying for new domains—i
 
 *Fun fact: When `.agent` domains become available, DNS-AID records will work on them too! The approaches are complementary.*
 
+## Background and Comparison
+
+For background on how DNS-AID compares to other agent-discovery approaches (ANS, Google A2A+UCP, `.agent` gTLD, AgentDNS, NANDA, Web3, `ai.txt`) and "The Sovereignty Question", see [docs/positioning.md](docs/positioning.md). That content is non-normative — protocol positioning is determined at the IETF.
+
 ## Examples
 
 See the `examples/` directory:
@@ -1134,6 +1152,6 @@ Apache 2.0
 
 ## Contributing
 
-Contributions welcome! This project is intended for contribution to the Linux Foundation Agent AI Foundation.
+Contributions welcome! This project supports an implementation ecosystem with planned hosting in the Linux Foundation. The DNS-AID specification is developed in the IETF.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

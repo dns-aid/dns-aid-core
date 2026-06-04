@@ -130,3 +130,21 @@ jobs:
 
       - name: Mypy
         run: uv run mypy src/dns_aid
+
+  readme-mcp-name:
+    name: README mcp-name tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Verify README carries the MCP Registry mcp-name tag
+        run: |
+          # The MCP Registry validates package ownership against this tag in
+          # the PUBLISHED PyPI README. Dropping it silently breaks the release
+          # MCP Registry publish (it regressed in 0.24.0, fixed in 0.24.1).
+          # Fail loudly here so no PR can drop it again unnoticed.
+          if ! grep -qF 'mcp-name: io.github.dns-aid/dns-aid' README.md; then
+            echo "::error file=README.md::README is missing the required MCP Registry ownership tag '<!-- mcp-name: io.github.dns-aid/dns-aid -->' — the release MCP Registry publish will fail without it."
+            exit 1
+          fi
+          echo "OK: README carries the mcp-name tag."
