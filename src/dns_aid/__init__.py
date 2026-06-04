@@ -4,7 +4,7 @@
 """
 DNS-AID: DNS-based Agent Identification and Discovery
 
-Reference implementation for IETF draft-mozleywilliams-dnsop-dnsaid-01.
+Reference implementation for IETF draft-mozleywilliams-dnsop-dnsaid-02.
 Enables AI agents to discover each other via DNS using SVCB records.
 
 Example:

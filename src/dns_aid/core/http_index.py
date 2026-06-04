@@ -17,6 +17,7 @@ descriptions, model cards, and capability details.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,6 +42,13 @@ HTTP_INDEX_PATTERNS = [
 
 # Default timeout for HTTP requests
 DEFAULT_TIMEOUT = 10.0
+
+# Bounds on an untrusted HTTP index. The index drives a fan-out of one
+# SVCB + cap + JWKS chain per agent, so an unbounded document or agent list
+# is a memory + amplification vector. A real index of a few hundred agents
+# is well under 1 MB.
+_MAX_HTTP_INDEX_BYTES = 1024 * 1024
+_MAX_HTTP_INDEX_AGENTS = 500
 
 
 @dataclass
@@ -228,28 +236,47 @@ async def fetch_http_index(
             logger.debug("Trying HTTP index endpoint", url=url, pattern_type=pattern["type"])
 
             try:
-                response = await client.get(url)
+                # Stream the body with a byte cap so a hostile endpoint can't
+                # force an OOM — the oversized payload never fully lands in
+                # memory.
+                async with client.stream("GET", url) as response:
+                    if response.status_code != 200:
+                        if response.status_code == 404:
+                            errors.append(f"{url}: Not found (404)")
+                            logger.debug("HTTP index not found", url=url)
+                        else:
+                            errors.append(f"{url}: HTTP {response.status_code}")
+                            logger.warning(
+                                "HTTP index request failed",
+                                url=url,
+                                status_code=response.status_code,
+                            )
+                        continue
 
-                if response.status_code == 200:
-                    data = response.json()
-                    agents = parse_http_index(data)
-                    logger.info(
-                        "HTTP index fetched successfully",
-                        url=url,
-                        agent_count=len(agents),
-                    )
-                    return agents
+                    body = bytearray()
+                    too_large = False
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > _MAX_HTTP_INDEX_BYTES:
+                            too_large = True
+                            break
+                    if too_large:
+                        errors.append(f"{url}: response exceeds {_MAX_HTTP_INDEX_BYTES} bytes")
+                        logger.warning(
+                            "HTTP index response too large",
+                            url=url,
+                            cap=_MAX_HTTP_INDEX_BYTES,
+                        )
+                        continue
 
-                elif response.status_code == 404:
-                    errors.append(f"{url}: Not found (404)")
-                    logger.debug("HTTP index not found", url=url)
-                else:
-                    errors.append(f"{url}: HTTP {response.status_code}")
-                    logger.warning(
-                        "HTTP index request failed",
-                        url=url,
-                        status_code=response.status_code,
-                    )
+                data = json.loads(bytes(body))
+                agents = parse_http_index(data)
+                logger.info(
+                    "HTTP index fetched successfully",
+                    url=url,
+                    agent_count=len(agents),
+                )
+                return agents
 
             except httpx.TimeoutException:
                 errors.append(f"{url}: Timeout")
@@ -291,6 +318,15 @@ def parse_http_index(data: dict[str, Any]) -> list[HttpIndexAgent]:
         data = data["agents"]
 
     for name, agent_data in data.items():
+        # Cap the number of agents taken from a single (untrusted) index so a
+        # hostile document can't amplify into an unbounded discovery fan-out.
+        if len(agents) >= _MAX_HTTP_INDEX_AGENTS:
+            logger.warning(
+                "HTTP index truncated — too many agents",
+                cap=_MAX_HTTP_INDEX_AGENTS,
+            )
+            break
+
         # Skip metadata fields (non-dict values)
         if not isinstance(agent_data, dict):
             continue

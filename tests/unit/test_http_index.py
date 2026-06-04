@@ -3,6 +3,7 @@
 
 """Tests for HTTP Index discovery (ANS-style compatibility)."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -17,6 +18,38 @@ from dns_aid.core.http_index import (
     fetch_http_index_or_empty,
     parse_http_index,
 )
+
+
+def _stream_response(payload, status: int = 200):
+    """A mock httpx streaming response (async CM) yielding `payload` as JSON bytes.
+
+    fetch_http_index now streams the body with a size cap instead of calling
+    ``response.json()``, so tests provide the body via ``aiter_bytes``.
+    """
+    body = payload if isinstance(payload, (bytes, bytearray)) else json.dumps(payload).encode()
+
+    async def _aiter_bytes():
+        yield bytes(body)
+
+    resp = MagicMock()
+    resp.status_code = status
+    resp.aiter_bytes = _aiter_bytes
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=resp)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    return cm
+
+
+def _streaming_client(*responses):
+    """Mock httpx.AsyncClient whose .stream() yields each response in order."""
+    mock_client = MagicMock()
+    if len(responses) == 1:
+        mock_client.stream = MagicMock(return_value=responses[0])
+    else:
+        mock_client.stream = MagicMock(side_effect=list(responses))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    return mock_client
 
 
 class TestModelCard:
@@ -228,14 +261,9 @@ class TestFetchHttpIndex:
     @pytest.mark.asyncio
     async def test_fetch_success(self):
         """Test successful fetch."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"booking": {"location": {"fqdn": "booking.example.com"}}}
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client = _streaming_client(
+            _stream_response({"booking": {"location": {"fqdn": "booking.example.com"}}})
+        )
 
         with patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=mock_client):
             agents = await fetch_http_index("example.com")
@@ -246,33 +274,17 @@ class TestFetchHttpIndex:
     @pytest.mark.asyncio
     async def test_fetch_tries_multiple_endpoints(self):
         """Test that multiple URL patterns are tried."""
-        call_count = 0
-
-        async def mock_get(url):
-            nonlocal call_count
-            call_count += 1
-            mock_response = MagicMock()
-            if call_count == 1:
-                # First pattern (ANS-style subdomain) fails
-                mock_response.status_code = 404
-            else:
-                # Second pattern succeeds
-                mock_response.status_code = 200
-                mock_response.json.return_value = {
-                    "agent": {"location": {"fqdn": "agent.example.com"}}
-                }
-            return mock_response
-
-        mock_client = AsyncMock()
-        mock_client.get = mock_get
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
+        # First pattern (ANS-style subdomain) 404s, second pattern succeeds.
+        mock_client = _streaming_client(
+            _stream_response(None, status=404),
+            _stream_response({"agent": {"location": {"fqdn": "agent.example.com"}}}),
+        )
 
         with patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=mock_client):
             agents = await fetch_http_index("example.com")
 
         assert len(agents) == 1
-        assert call_count == 2  # Tried first pattern (failed), second pattern (succeeded)
+        assert mock_client.stream.call_count == 2  # first pattern failed, second succeeded
 
     @pytest.mark.asyncio
     async def test_fetch_all_endpoints_fail(self):
@@ -322,14 +334,9 @@ class TestFetchHttpIndexOrEmpty:
     @pytest.mark.asyncio
     async def test_returns_agents_on_success(self):
         """Test returns agents on success."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"test": {"location": {"fqdn": "test.example.com"}}}
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client = _streaming_client(
+            _stream_response({"test": {"location": {"fqdn": "test.example.com"}}})
+        )
 
         with patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=mock_client):
             agents = await fetch_http_index_or_empty("example.com")
@@ -374,21 +381,18 @@ class TestIntegrationWithDiscoverer:
         """Test discover() with use_http_index=True."""
         from dns_aid.core.discoverer import discover
 
-        # Mock HTTP response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "booking": {
-                "location": {"fqdn": "_booking._mcp._agents.example.com"},
-                "model-card": {"description": "Booking agent"},
-                "capability": {"protocols": ["mcp"]},
-            }
-        }
-
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
+        # Mock HTTP response (streamed body)
+        mock_client = _streaming_client(
+            _stream_response(
+                {
+                    "booking": {
+                        "location": {"fqdn": "_booking._mcp._agents.example.com"},
+                        "model-card": {"description": "Booking agent"},
+                        "capability": {"protocols": ["mcp"]},
+                    }
+                }
+            )
+        )
 
         with patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=mock_client):
             result = await discover("example.com", use_http_index=True)

@@ -7,9 +7,330 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-06-04
+
+### Fixed — flat-FQDN completion
+
+- **MCP `verify_agent_dns` accepts flat FQDNs.** `validate_fqdn` no
+  longer requires the legacy `_agents` label, so verifying an agent at
+  its flat owner `{name}.{domain}` (the draft-02 default) now works
+  consistently across the SDK, CLI, and MCP surfaces.
+- **JWS signature binding is DNS-normalized.** The verifier compares the
+  signed `fqdn`/`target` to the record case-insensitively and ignoring a
+  trailing dot, so a legitimately-signed record with a dotted or
+  mixed-case endpoint is no longer falsely rejected.
+- **CLI/MCP output the flat owner name.** `delete` / `search` output and
+  the MCP unpublish result now show `{name}.{domain}` instead of the
+  legacy nested name.
+- **`index sync` enumerates flat primary owners.** Sync previously
+  discovered agents only via the walkable AliasMode (`{name}._agents`)
+  or the legacy shape, so a flat-only agent — the draft-02 default
+  publish shape — was silently omitted from the `_index._agents` TXT
+  enumeration (sync reported "No agents found to index"). It now detects
+  flat owners by their companion TXT record (publish writes SVCB + TXT
+  at the flat owner), reads the protocol off the SVCB SvcParams, and
+  dedups against any walkable alias for the same agent.
+- **Discovery reconciles the agent protocol from the SVCB record.** Under
+  draft-02 the protocol lives in the record (`bap`, or `alpn` as the
+  canonical carrier), not the FQDN. The discoverer now stamps the
+  record's true protocol on every path — `discover_at_fqdn`, the
+  common-name zone-walk, and the HTTP index — so a default-published
+  `a2a` / `https` agent (which carries `alpn` and no `bap`) is no longer
+  mislabeled `mcp`. The mislabel previously failed the JWS binding check
+  (`payload.alpn == agent.protocol.value`) for a correctly-signed agent
+  and selected the wrong protocol handler at invoke. The common-name
+  fallback now also dedups by `(fqdn, protocol)`, so a flat owner probed
+  once per candidate protocol yields a single record instead of duplicates.
+- **Flat-FQDN parser accepts short/internal zones and normalizes.**
+  `parse_dnsaid_fqdn` now accepts a flat owner in a two-label zone
+  (`agent.internal`) and normalizes case + a trailing dot up front, so
+  every consumer (discoverer, telemetry) sees lowercase, dot-trimmed
+  labels rather than re-implementing it.
+
+### Security — hardening
+
+- **SVCB SvcParam injection closed on every free-form field.** The `bap`
+  field validator already blocked SvcParam quote break-out injection; the
+  same guard now applies to `cap` / `cap-sha256` / `policy` / `realm` /
+  `sig` / `connect-meta` / `enroll-uri` on both `SvcbRecord` and
+  `AgentRecord`. A value containing a double quote, backslash, or control
+  character (which the Route53 / Cloudflare / DDNS presentation-format
+  backends emit verbatim as `key="<value>"`) is rejected at the type
+  boundary, so it cannot inject an attacker-controlled sibling
+  SvcParamKey into the authoritative record.
+- **JWKS fetch is SSRF-guarded, size-capped, and redirect-free.**
+  `fetch_jwks` routes through `validate_fetch_url` + the streaming
+  `safe_fetch_bytes` (64 KB cap, no cross-host redirects) instead of a raw
+  `httpx.get` + unbounded `.json()`, and the per-process JWKS cache is
+  bounded (FIFO eviction) so bulk cross-domain discovery can't grow it
+  without limit. This is the input that stamps `signature_verified`.
+- **JWS verification rejects algorithm and curve confusion.**
+  `verify_signature` now requires the protected-header `alg` to be `ES256`
+  (rejecting `none` / RSA / other), and `import_public_key_from_jwk`
+  requires `kty="EC"`, `crv="P-256"`, a signing `use`, and 32-byte
+  coordinates before any key material is trusted — closing
+  algorithm/curve confusion now that the JWKS source is attacker-influenceable.
+- **HTTP index fetch is bounded.** The agents-index fetch streams the body
+  with a 1 MB cap and processes at most 500 agents from a single index, so
+  a hostile index can't force an OOM or amplify into an unbounded
+  per-agent SVCB + descriptor + JWKS fan-out.
+
+### BREAKING
+
+- **SVCB TargetName underscore validator is strict by default.**
+  `dns_aid.publish()` and direct `SvcbRecord` / `AgentRecord`
+  construction now reject endpoints containing any underscored DNS
+  label, because the CA/Browser Forum Baseline Requirements and
+  RFC 5280 dNSName SANs forbid underscored labels — a publicly-issued
+  x.509 certificate cannot cover such a name. This is a deliberate,
+  versioned tightening per draft-mozleywilliams-dnsop-dnsaid-02
+  §3.2 (Known Organization, Unknown Agent).
+
+  **Migration from 0.23.0** for deployments that intentionally
+  publish underscored internal endpoints (not behind public PKI):
+
+  1. Preferred: rename the endpoint to use only LDH labels (letters,
+     digits, hyphens). This is the long-term spec-conformant path.
+  2. Operator opt-in: set `DNS_AID_ALLOW_UNDERSCORE_TARGET=1` on the
+     publishing process AND pass `allow_underscore_target=True` to
+     `publish()`. Both are required — the env gate prevents a calling
+     LLM or MCP client from unilaterally downgrading the MUST.
+  3. The opt-in surfaces `dns_aid.underscore_bypass` on
+     `PublishResult.warnings` (caller-visible structured signal) and
+     in structlog with `warning_class="dns_aid.underscore_bypass"`,
+     so operators can count and alert per zone.
+
+  Downstream wrappers and controllers that call `publish()` will
+  need to thread the new flag through their own config surface (CRD
+  field, CLI flag, env var) to preserve any intentional
+  underscored-endpoint behaviour. Until that wiring lands, those
+  deployments must rename the endpoint to LDH labels.
+
 ### Changed
 
 - **Repository moved to the vendor-neutral `dns-aid` GitHub organization** (`github.com/dns-aid/dns-aid-core`), ahead of Linux Foundation graduation. Previous `infobloxopen/dns-aid-core` URLs redirect automatically, so existing clones, links, and badges continue to work. Contributors should update their git remotes (`git remote set-url <remote> https://github.com/dns-aid/dns-aid-core.git`). The PyPI Trusted Publisher and MCP Registry namespace are being updated to match the new organization.
+
+### Added — `well-known` SvcParamKey and TargetName validator (draft-02)
+
+- **New `well-known` SvcParamKey** at the project's interim private-use
+  code point `key65409` (final IANA assignment deferred per draft §7.1).
+  Carries an RFC 8615 path the discoverer reconstructs as
+  `https://<svcb-target>/.well-known/<value>` and fetches as the
+  capability descriptor. Independent of `cap`; both may be present.
+- **Absolute-path well-known values** (per draft Figure 3) — values
+  starting with `/` (e.g. `/.well-known/agent-card.json`,
+  `/not-well-known/other-card.json`) are used as origin-relative paths
+  without double-prefixing. Bare suffixes still get the `/.well-known/`
+  prefix.
+- **`validate_well_known_path`** constrains the value to a safe
+  character class (`[A-Za-z0-9._-]` per segment, length-bounded, no
+  `..` traversal, no `?` / `#` / control chars). Enforced on both
+  publish and discover; field-validator on `SvcbRecord.well_known_path`
+  and `AgentRecord.well_known_path` so direct model construction can't
+  bypass.
+- **`cap_sha256_verified: bool`** field on `AgentRecord` / `SvcbRecord`.
+  True only when the discoverer actually fetched the descriptor AND
+  the SHA-256 of its bytes matched `cap_sha256`. Consumers keying
+  trust off the integrity pin MUST check this flag — the mere presence
+  of `cap_sha256` is no longer a sufficient signal. Dangling case
+  (pin declared, never applied) logs a structured WARN with
+  `warning_class="dns_aid.dangling_cap_sha256"`.
+- **`PublishResult.warnings: list[str]`** — non-fatal advisories
+  raised during the publish path, surfaced as stable warning-class
+  identifiers (e.g. `dns_aid.underscore_bypass`) so consumers can
+  match exactly without log-string parsing.
+- **`capability_source="descriptor_unreachable"`** — distinct
+  provenance value when a record declares a `cap` or `well-known`
+  locator but the descriptor fetch fails (timeout, TLS error, 5xx).
+  Lets consumers tell transient outages from mis-configurations
+  without scraping log lines.
+- **`CapabilitySource` `Literal` consolidated in `core.models`** —
+  single source of truth for provenance values; the discoverer,
+  SDK, indexer, and `AgentRecord` all import the same symbol.
+- **Per-agent descriptor-fetch budget** — descriptor fetches are
+  now bounded by `asyncio.wait_for` with a 12-second total budget.
+  A single slow endpoint can no longer stall a bulk-discovery loop;
+  the agent records `capability_source="descriptor_unreachable"`.
+- **`validate_no_underscore_in_target`** — TargetName underscore
+  validator with operator-only bypass. The bypass requires both the
+  per-call `allow_underscore=True` flag AND
+  `DNS_AID_ALLOW_UNDERSCORE_TARGET=1` in the environment. Field
+  validators on `SvcbRecord.target` and `AgentRecord.target_host`
+  honour the same env gate so the rule fires at the type boundary.
+
+### Changed — correctness
+
+- **Non-HTTPS `cap` (URN, JSON-Ref) falls back to `well-known`** at
+  fetch time. Earlier `cap` presence was terminal, silently disabling
+  a perfectly good `well-known` and downgrading discovery to
+  unauthenticated TXT.
+- **`cap > well-known` precedence** now proven at fetch time, not
+  just at serialization. When both are set and `cap` is https-fetchable,
+  the cap URL drives the fetch and `capability_source="cap_uri"`.
+- **DNSSEC docstring on `validator.py`** rewritten to quote the
+  draft's actual SHOULD posture (§6.2) instead of the earlier
+  MAY/MUST framing. Also no longer overstates what the code does on
+  this branch — the fail-closed DANE demotion ships separately on
+  #155.
+
+### Security
+
+- **pyjwt 2.12.1 → 2.13.0** clears PYSEC-2026-175 / 177 / 178 / 179.
+
+### Internal
+
+- Validation logger migrated from stdlib `logging` to project-standard
+  `structlog`.
+- `_parse_svcb_custom_params` derives its recognised key set from
+  `DNS_AID_KEY_MAP` (was a hand-maintained literal that needed three-
+  file edits per new key).
+- `to_params()` reads `DNS_AID_SVCB_STRING_KEYS` once per call (was up
+  to 11× per serialization).
+
+### BREAKING CHANGE — `bap` SvcParamKey is now a single scalar
+
+The `bap` SvcParamKey value type changed from `list[str] | None` to
+`str | None` across the public API: `publish()`, the CLI `--bap`
+flag, the MCP `publish_agent_to_dns` tool, and the `AgentRecord` /
+`SvcbRecord` Pydantic models.
+
+The value form follows draft-02 §5.1: bare (`mcp`, `a2a`) or
+versioned with the draft's `=` delimiter (`mcp=1.0`, `a2a=1.1`).
+
+- `AgentRecord(bap=["mcp"])` now raises `ValidationError`. Field
+  validators on both models reject the list form at the type
+  boundary so the break direction is pinned.
+- `--bap mcp,a2a` no longer auto-splits — the CLI passes the value
+  through verbatim and the validator rejects the comma. Operators
+  who want both protocols publish two SVCB records, one per
+  protocol.
+- The MCP tool's input schema for `bap` changed from `array` to
+  `string`. Clients that bind to the JSON schema need updates.
+- The previous concatenated form (`mcp2.1`, `a2a1.0`) is rejected
+  because it is ambiguous to parse back into protocol and version.
+
+This is experimental territory in the draft (§FutureWork), but the
+public-API shape change still warrants the version bump. A new
+shared `dns_aid.core.bap.normalize_bap` helper coerces legacy
+comma-strings and list inputs into the canonical scalar on the
+discover / SDK / indexer paths so existing wire data on the network
+keeps deserializing without operator intervention.
+
+### Security
+
+- **`bap` field validator closes a SvcParamKey injection
+  vulnerability.** A crafted value such as `mcp" key65500="x` used
+  to round-trip verbatim through `to_params()` and the backend
+  formatters; dnspython would then parse two SvcParamKeys, with the
+  second attacker-controlled. On a multi-tenant publish path that is
+  server-side parameter injection. The new validator rejects
+  quotes, spaces, commas, and any character that could break SVCB
+  SvcParam quoting at every construction path.
+
+### BREAKING CHANGE — draft-02 flat FQDN + walkable AliasMode
+
+This release flips the wire-format default from
+draft-mozleywilliams-dnsop-dnsaid-01 to -02. The primary agent owner is
+now the flat FQDN `{name}.{domain}` (valid as an x.509 SAN dNSName); the
+agent protocol no longer travels in the FQDN — it lives in the SVCB
+`bap` SvcParamKey (or `alpn` when only one protocol is supported).
+
+Anyone with -01 records in production will need to either republish or
+opt into a per-call legacy fallback. See **Migrating from -01** below.
+
+### Added
+
+- **Flat primary owner record** at `{name}.{domain}`. SVCB + companion
+  TXT are written at this name on every publish.
+- **Optional walkable AliasMode** at `{name}._agents.{domain}` pointing
+  at the flat primary owner. **Off by default** under -02 to avoid an
+  enumeration handle — see `docs/privacy-considerations.md`. Opt in
+  per-publish via `publish_walkable_alias=True`, the CLI `--walkable`
+  flag, or the MCP `publish_walkable_alias=true` kwarg.
+- **Per-call legacy fallback** kwarg `allow_legacy: bool | None` on
+  `discover()` / `discover_at_fqdn()`. When set, a flat-FQDN miss falls
+  back to the -01 shape; the resulting `AgentRecord` is stamped
+  `legacy_resolved=True` so downstream filters can down-weight it.
+  The env-flag form `DNS_AID_LEGACY_01_FALLBACK=1` is preserved as a
+  process-wide back-compat for callers that can't easily thread the
+  kwarg; it now also logs a warning on each use and stamps the result.
+- **Per-agent DNSSEC validation** under flat-FQDN. Each agent's owner
+  is checked independently; the result-level `dnssec_validated` is
+  True only when every agent's check passed.
+- **`legacy_resolved: bool`** field on `AgentRecord` for filter-side
+  visibility into legacy-shape records.
+- **`docs/privacy-considerations.md`** — explains the enumeration vs.
+  discovery trade-off and when to enable the walkable record.
+- **`SVCB_ALIAS_MODE` / `SVCB_SERVICE_MODE`** constants in
+  `dns_aid.core.models` so backend code reads `priority=SVCB_ALIAS_MODE`
+  instead of a bare integer.
+- **`dns_aid.core.fqdn.parse_dnsaid_fqdn`** — a single FQDN parser
+  recognising all three shapes; the discoverer's `_parse_fqdn` and the
+  telemetry's `_parse_signal_fqdn` are thin projections over it.
+
+### Changed — Security
+
+- **JWS signature now binds to the record.** `signature_verified` is
+  True only when the signed `RecordPayload` fields (`fqdn`, `target`,
+  `port`, `alpn`) match the AgentRecord — closing a hole where a
+  validly-signed `sig` could be lifted off one record and pasted onto
+  a spoofed SVCB pointing at an attacker host.
+- **`cap-sha256` mismatch now refuses the record** instead of silently
+  downgrading to TXT fallback. `fetch_cap_document` raises
+  `CapDigestMismatchError` on digest mismatch (distinct from network
+  failure); the discoverer catches it and drops the affected record.
+  TXT-fallback records no longer carry `cap_sha256` because the pin
+  doesn't apply to the data we ended up using.
+- **`well-known` SvcParamKey value is now validated** to a safe
+  RFC 8615 single-segment suffix (`^[A-Za-z0-9._-]+$`, length-bounded,
+  no `..` traversal) on both publish and discover. Prevents path
+  traversal, query-string injection, and fragment injection through
+  the SVCB → URL reconstruction.
+- **Walkable AliasMode target is the flat primary owner.** Was the
+  endpoint host, which only coincided with the flat owner when those
+  names happened to match.
+- **DANE score gates on DNSSEC.** A TLSA record without a DNSSEC chain
+  has no integrity guarantee (RFC 6698 §10.1); the validator now
+  demotes `dane_valid` to `None` in that case, and `security_score`'s
+  +15 for DANE is gated on `dnssec_valid` as a second-line guard.
+- **`unpublish()` reports success only when the primary record was
+  deleted (or was already absent and cleanup ran).** Earlier the
+  success boolean OR'd in walkable / legacy cleanup, so a primary
+  delete that silently failed on Route53 / Cloudflare could be masked
+  by an unrelated cleanup succeeding — the MCP server would then
+  de-index a still-live agent.
+- **Agent name is validated at publish.** `validate_agent_name()` is
+  now called on the publisher path (previously only on the MCP path),
+  so SDK / CLI callers can't land records whose flat-FQDN SAN would
+  be unrepresentable.
+- **Underscore-target bypass log is now structured `WARN`** with a
+  `warning_class="dns_aid.underscore_bypass"` key so log aggregators
+  can count and alert on deliberate opt-ins per zone.
+
+### Changed — Code quality
+
+- `sync_index` performs a single backend enumeration instead of two
+  (the second was a subset of the first; doubled API quota burn on
+  every sync).
+- `discover_at_fqdn` for flat / walkable shapes resolves DNS once and
+  reads the actual protocol from the record's `bap` (preferred) or
+  `alpn` field instead of firing MCP-then-A2A back-to-back.
+- Validation logger migrated from stdlib `logging` to project-standard
+  `structlog`.
+
+### Migrating from -01
+
+1. **Re-publish your agents.** The publisher writes the flat shape by
+   default; nothing else to do for new records.
+2. **Existing -01 records keep resolving** when consumers set
+   `allow_legacy=True` on `discover()` or set the env-flag form
+   `DNS_AID_LEGACY_01_FALLBACK=1`. The returned `AgentRecord` will
+   have `legacy_resolved=True` so filters can down-weight.
+3. **`unpublish()` cleans up both shapes** in one call. No flag needed.
+4. **Walkable record is now opt-in.** Operators relying on
+   DNS-SD-style enumeration need to pass `--walkable` (CLI) /
+   `publish_walkable_alias=True` (SDK/MCP) — see
+   `docs/privacy-considerations.md`.
 
 ## [0.23.0] - 2026-05-26
 
@@ -1518,7 +1839,7 @@ Explicit version floors added to our `pyproject.toml` because upstream parents (
 
 ## References
 
-- [IETF draft-mozleywilliams-dnsop-dnsaid-01](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/)
+- [IETF draft-mozleywilliams-dnsop-dnsaid-02](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/)
 - [RFC 9460 - SVCB and HTTPS Resource Records](https://www.rfc-editor.org/rfc/rfc9460.html)
 - [RFC 4033-4035 - DNSSEC](https://www.rfc-editor.org/rfc/rfc4033.html)
 

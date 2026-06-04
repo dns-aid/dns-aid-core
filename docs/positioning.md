@@ -56,7 +56,7 @@ The [Agent Community](https://agentcommunity.org/) is pursuing a `.agent` top-le
 
 **How DNS-AID Works:**
 1. Use your existing domain (you already own `yourcompany.com`)
-2. Add DNS-AID records to your zone (`_myagent._mcp._agents.yourcompany.com`)
+2. Add DNS-AID records to your zone (`myagent.yourcompany.com`)
 3. Start discovering and being discovered immediately
 
 | Factor | .agent gTLD | DNS-AID |
@@ -66,12 +66,12 @@ The [Agent Community](https://agentcommunity.org/) is pursuing a `.agent` top-le
 | **Who controls discovery** | Registry operator | You (your domain) |
 | **Works today** | ❌ Pending ICANN approval | ✅ Works now |
 | **Requires new infrastructure** | ✅ Registry, registrars | ❌ Uses existing DNS |
-| **Memorable names** | ✅ `myagent.agent` | `_myagent._mcp._agents.example.com` |
+| **Memorable names** | ✅ `myagent.agent` | ✅ `myagent.example.com` |
 
 **The Friendly Take:**
 
 Both approaches share the goal of making AI agents discoverable. The `.agent` gTLD creates a dedicated namespace that's easy to remember (`mycompany.agent`), while DNS-AID leverages existing infrastructure so you can start publishing agents today.
 
-DNS-AID doesn't require waiting for ICANN approval or paying for new domains—it works with the DNS infrastructure your organization already operates. If you own `example.com`, you can publish agents to `_myagent._mcp._agents.example.com` right now.
+DNS-AID doesn't require waiting for ICANN approval or paying for new domains—it works with the DNS infrastructure your organization already operates. If you own `example.com`, you can publish agents to `myagent.example.com` right now.
 
 *Fun fact: When `.agent` domains become available, DNS-AID records will work on them too! The approaches are complementary.*

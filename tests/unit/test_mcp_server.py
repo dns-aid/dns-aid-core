@@ -54,8 +54,10 @@ class TestPublishAgentTool:
         )
 
         assert result["success"] is True
-        assert result["fqdn"] == "_test-agent._mcp._agents.example.com"
+        assert result["fqdn"] == "test-agent.example.com"
         assert result["endpoint_url"] == "https://mcp.example.com:443"
+        # SVCB primary + TXT companion. Walkable AliasMode is opt-in
+        # (default off under -02 to avoid an enumeration handle).
         assert len(result["records_created"]) == 2
 
     def test_publish_default_endpoint(self):
@@ -222,7 +224,7 @@ class TestDeleteAgentTool:
             backend="mock",
         )
 
-        assert result["fqdn"] == "_to-delete._mcp._agents.example.com"
+        assert result["fqdn"] == "to-delete.example.com"
         assert "success" in result
         assert "message" in result
 
@@ -307,3 +309,37 @@ class TestSDKAvailabilityFlag:
 
         tools = list(mcp._tool_manager._tools.keys())
         assert "list_agent_tools" in tools
+
+
+class TestPublishBapScalar:
+    """Regression for Igor's #158 review: the MCP tool input schema
+    changed from list[str] to str when bap moved to scalar. Pin both
+    the accept-scalar path and the reject-list path so the API break
+    is explicit."""
+
+    def test_publish_with_bap_scalar(self):
+        """Scalar passthrough — bap survives onto the AgentRecord."""
+        from dns_aid.mcp.server import publish_agent_to_dns
+
+        result = publish_agent_to_dns(
+            name="chat",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="chat.example.com",
+            bap="mcp=1.0",
+            backend="mock",
+        )
+        assert result["success"] is True
+
+    def test_publish_with_bap_absent(self):
+        """bap=None (default) publishes cleanly without a bap param."""
+        from dns_aid.mcp.server import publish_agent_to_dns
+
+        result = publish_agent_to_dns(
+            name="chat",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="chat.example.com",
+            backend="mock",
+        )
+        assert result["success"] is True

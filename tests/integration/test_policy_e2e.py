@@ -73,13 +73,13 @@ def _allow_localhost_http():
 
 POLICY_DOC_ALLOW_ALL = PolicyDocument(
     version="1.0",
-    agent="_test._mcp._agents.example.com",
+    agent="test.example.com",
     rules=PolicyRules(),
 )
 
 POLICY_DOC_STRICT = PolicyDocument(
     version="1.0",
-    agent="_test._mcp._agents.example.com",
+    agent="test.example.com",
     rules=PolicyRules(
         required_auth_types=["oauth2"],
         allowed_caller_domains=["*.infoblox.com"],
@@ -90,7 +90,7 @@ POLICY_DOC_STRICT = PolicyDocument(
 
 POLICY_DOC_GEO_RESTRICTED = PolicyDocument(
     version="1.0",
-    agent="_test._mcp._agents.example.com",
+    agent="test.example.com",
     rules=PolicyRules(
         geo_restrictions=["US", "CA"],
     ),
@@ -277,7 +277,7 @@ class TestE2EMethodFromBody:
         # Policy only allows tools/list
         policy_doc = PolicyDocument(
             version="1.0",
-            agent="_test._mcp._agents.example.com",
+            agent="test.example.com",
             rules=PolicyRules(allowed_methods=["tools/list"]),
         )
         policy_server = PolicyServer(policy_doc)
@@ -308,7 +308,7 @@ class TestE2EMTLSOverride:
     def test_cert_domain_wins(self) -> None:
         policy_doc = PolicyDocument(
             version="1.0",
-            agent="_test._mcp._agents.example.com",
+            agent="test.example.com",
             rules=PolicyRules(allowed_caller_domains=["*.infoblox.com"]),
         )
         policy_server = PolicyServer(policy_doc)
@@ -340,7 +340,7 @@ class TestE2ERateLimiting:
     def test_rate_limit_enforced(self) -> None:
         policy_doc = PolicyDocument(
             version="1.0",
-            agent="_test._mcp._agents.example.com",
+            agent="test.example.com",
             rules=PolicyRules(rate_limits={"max_per_minute": 2}),
         )
         policy_server = PolicyServer(policy_doc)

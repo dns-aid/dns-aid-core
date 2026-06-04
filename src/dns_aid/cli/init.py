@@ -27,7 +27,7 @@ def _discover_quickstart() -> None:
     console.print("You can discover agents without any credentials:\n")
     console.print("  [bold]dns-aid discover example.com[/bold]")
     console.print("  [bold]dns-aid discover example.com --json[/bold]")
-    console.print("  [bold]dns-aid verify _network._mcp._agents.example.com[/bold]")
+    console.print("  [bold]dns-aid verify network.example.com[/bold]")
     console.print(
         "\nTo [bold]publish[/bold] agents, re-run [bold]dns-aid init[/bold] and choose a backend.\n"
     )

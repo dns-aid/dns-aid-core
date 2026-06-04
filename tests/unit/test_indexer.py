@@ -340,6 +340,60 @@ class TestUpdateIndex:
         assert txt is not None
 
 
+class TestUpdateIndexSvcbPrimary:
+    """Tests for draft-02 SVCB-primary org index (opt-in via index_target)."""
+
+    @pytest.mark.asyncio
+    async def test_index_target_writes_svcb_and_txt(self, mock_backend: MockBackend):
+        """When index_target is provided, both SVCB and TXT records are written."""
+        result = await update_index(
+            domain="example.com",
+            backend=mock_backend,
+            add=[IndexEntry(name="chat", protocol="mcp")],
+            index_target="agent-index.example.com",
+        )
+
+        assert result.success is True
+
+        # SVCB primary at _index._agents pointing at the (non-underscored) target
+        svcb = mock_backend.get_svcb_record("example.com", INDEX_RECORD_NAME)
+        assert svcb is not None
+        assert svcb["priority"] == 1  # ServiceMode
+        assert svcb["target"] == "agent-index.example.com."
+
+        # TXT inline-listing still written as the §TXT-fallback form
+        txt = mock_backend.get_txt_record("example.com", INDEX_RECORD_NAME)
+        assert txt is not None
+        assert any("chat:mcp" in v for v in txt)
+
+    @pytest.mark.asyncio
+    async def test_index_target_underscored_rejected(self, mock_backend: MockBackend):
+        """Underscored TargetName fails the validator (no public x.509 cert)."""
+        from dns_aid.utils.validation import ValidationError
+
+        with pytest.raises(ValidationError) as exc:
+            await update_index(
+                domain="example.com",
+                backend=mock_backend,
+                add=[IndexEntry(name="chat", protocol="mcp")],
+                index_target="_internal.example.com",
+            )
+        assert exc.value.field == "target"
+
+    @pytest.mark.asyncio
+    async def test_no_index_target_keeps_txt_only(self, mock_backend: MockBackend):
+        """Without index_target the behavior matches pre-draft-02 (TXT only)."""
+        result = await update_index(
+            domain="example.com",
+            backend=mock_backend,
+            add=[IndexEntry(name="chat", protocol="mcp")],
+        )
+
+        assert result.success is True
+        assert mock_backend.get_svcb_record("example.com", INDEX_RECORD_NAME) is None
+        assert mock_backend.get_txt_record("example.com", INDEX_RECORD_NAME) is not None
+
+
 class TestDeleteIndex:
     """Tests for delete_index function."""
 
@@ -383,7 +437,12 @@ class TestSyncIndex:
 
     @pytest.mark.asyncio
     async def test_sync_discovers_agents(self, mock_backend: MockBackend):
-        """Test that sync discovers published agents."""
+        """Test that sync discovers published agents via the walkable alias.
+
+        This exercises the walkable AliasMode discovery path at
+        {name}._agents.{domain}. Flat-only owners (the draft-02 default
+        publish shape) are covered by test_sync_discovers_flat_only_agent.
+        """
         # Publish some agents
         await publish(
             name="chat",
@@ -391,6 +450,7 @@ class TestSyncIndex:
             protocol="mcp",
             endpoint="mcp.example.com",
             backend=mock_backend,
+            publish_walkable_alias=True,
         )
         await publish(
             name="billing",
@@ -398,6 +458,7 @@ class TestSyncIndex:
             protocol="a2a",
             endpoint="a2a.example.com",
             backend=mock_backend,
+            publish_walkable_alias=True,
         )
 
         result = await sync_index("example.com", mock_backend)
@@ -410,13 +471,15 @@ class TestSyncIndex:
     @pytest.mark.asyncio
     async def test_sync_creates_index(self, mock_backend: MockBackend):
         """Test that sync creates index if it doesn't exist."""
-        # Publish an agent (without updating index)
+        # Publish an agent (without updating index). Walkable opt-in so
+        # sync_index can discover it via the AliasMode shape.
         await publish(
             name="chat",
             domain="example.com",
             protocol="mcp",
             endpoint="mcp.example.com",
             backend=mock_backend,
+            publish_walkable_alias=True,
         )
 
         result = await sync_index("example.com", mock_backend)
@@ -436,13 +499,14 @@ class TestSyncIndex:
             ttl=3600,
         )
 
-        # Publish new agent
+        # Publish new agent (walkable opt-in for sync_index discovery).
         await publish(
             name="chat",
             domain="example.com",
             protocol="mcp",
             endpoint="mcp.example.com",
             backend=mock_backend,
+            publish_walkable_alias=True,
         )
 
         result = await sync_index("example.com", mock_backend)
@@ -466,6 +530,66 @@ class TestSyncIndex:
         result = await sync_index("example.com", mock_backend, ttl=300)
 
         assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_sync_discovers_flat_only_agent(self, mock_backend: MockBackend):
+        """Flat primary owners are indexed without a walkable alias.
+
+        Under draft-02 the flat owner ({name}.{domain}) is the default
+        publish shape and the walkable AliasMode is opt-in. sync_index
+        detects the flat owner via its companion TXT record and indexes
+        it, reading the protocol off the SVCB SvcParams.
+        """
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="mcp.example.com",
+            backend=mock_backend,
+        )  # walkable defaults OFF — the draft-02 default
+
+        result = await sync_index("example.com", mock_backend)
+
+        assert result.success is True
+        assert result.entries == [IndexEntry(name="chat", protocol="mcp")]
+
+    @pytest.mark.asyncio
+    async def test_sync_flat_and_walkable_not_double_counted(self, mock_backend: MockBackend):
+        """An agent published with both flat and walkable shapes is indexed once."""
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="mcp.example.com",
+            backend=mock_backend,
+            publish_walkable_alias=True,
+        )
+
+        result = await sync_index("example.com", mock_backend)
+
+        assert result.success is True
+        assert result.entries == [IndexEntry(name="chat", protocol="mcp")]
+
+    @pytest.mark.asyncio
+    async def test_sync_ignores_svcb_without_companion_txt(self, mock_backend: MockBackend):
+        """A bare SVCB leaf with no companion TXT is not treated as an agent.
+
+        The flat-owner enumeration keys off the DNS-AID publish contract
+        (SVCB + companion TXT at the same owner), so an unrelated SVCB in
+        the zone is not misindexed.
+        """
+        await mock_backend.create_svcb_record(
+            zone="example.com",
+            name="www",
+            priority=1,
+            target="web.example.com",
+            params={"alpn": "h2", "port": "443"},
+        )
+
+        result = await sync_index("example.com", mock_backend)
+
+        assert result.success is True
+        assert result.entries == []
 
 
 class TestIndexResult:

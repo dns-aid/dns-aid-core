@@ -5,14 +5,16 @@
 DNS-AID Discoverer: Query DNS to find AI agents.
 
 This module handles discovering agents via DNS queries for SVCB and TXT
-records as specified in IETF draft-mozleywilliams-dnsop-dnsaid-01.
+records as specified in IETF draft-mozleywilliams-dnsop-dnsaid-02.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
+import os
 import shlex
 import time
 from typing import Any, Literal
@@ -27,9 +29,22 @@ from dns_aid.core.a2a_card import A2AAgentCard, fetch_agent_card
 from dns_aid.core.cap_fetcher import fetch_cap_document
 from dns_aid.core.filters import apply_filters
 from dns_aid.core.http_index import HttpIndexAgent, fetch_http_index_or_empty
-from dns_aid.core.models import AgentRecord, DiscoveryResult, DNSSECError, Protocol
+from dns_aid.core.models import (
+    AgentRecord,
+    CapabilitySource,
+    DiscoveryResult,
+    DNSSECError,
+    Protocol,
+)
 
 logger = structlog.get_logger(__name__)
+
+# Per-agent total-time budget for descriptor (cap / well-known) fetch.
+# Slightly above fetch_cap_document's default 10s HTTP timeout so a
+# normal slow response still completes, but bounds pathological cases
+# (DNS hangs, TLS handshake stalls, redirect chains). Cross-agent
+# bulk discovery would otherwise serialize on the slowest endpoint.
+_DESCRIPTOR_FETCH_BUDGET_SECONDS: float = 12.0
 
 
 def _normalize_protocol(protocol: str | Protocol | None) -> Protocol | None:
@@ -45,16 +60,18 @@ async def _execute_discovery(
     name: str | None,
     use_http_index: bool,
     query: str,
+    *,
+    allow_legacy: bool | None = None,
 ) -> list[AgentRecord]:
     """Execute the appropriate discovery strategy and handle DNS errors."""
     try:
         if use_http_index:
             return await _discover_via_http_index(domain, protocol, name)
         elif name and protocol:
-            agent = await _query_single_agent(domain, name, protocol)
+            agent = await _query_single_agent(domain, name, protocol, allow_legacy=allow_legacy)
             return [agent] if agent else []
         else:
-            return await _discover_agents_in_zone(domain, protocol)
+            return await _discover_agents_in_zone(domain, protocol, allow_legacy=allow_legacy)
     except dns.resolver.NXDOMAIN:
         logger.debug("No DNS-AID records found", query=query)
     except dns.resolver.NoAnswer:
@@ -75,18 +92,32 @@ async def _apply_post_discovery(
 ) -> bool:
     """Apply DNSSEC enforcement, endpoint enrichment, and JWS verification.
 
-    Returns whether DNSSEC was validated.
+    Under draft-02's flat-FQDN model each agent has its own owner name,
+    so DNSSEC is checked per agent rather than once for the zone. The
+    result-level boolean returned here is True only if every agent's
+    fqdn validated; per-agent state lives on ``AgentRecord.dnssec_validated``.
+
+    Returns whether DNSSEC was validated across all agents.
     """
-    dnssec_validated = False
+    per_agent_dnssec: dict[str, bool] = {}
 
     if agents and require_dnssec:
         from dns_aid.core.validator import _check_dnssec
 
-        dnssec_validated = await _check_dnssec(agents[0].fqdn)
-        if not dnssec_validated:
+        results = await asyncio.gather(
+            *[_check_dnssec(a.fqdn) for a in agents],
+            return_exceptions=True,
+        )
+        for agent, outcome in zip(agents, results, strict=True):
+            ok = outcome is True
+            per_agent_dnssec[agent.fqdn] = ok
+            agent.dnssec_validated = ok
+
+        if not all(per_agent_dnssec.values()):
+            failed = sorted(f for f, ok in per_agent_dnssec.items() if not ok)
             raise DNSSECError(
-                f"DNSSEC validation required but DNS response for "
-                f"{agents[0].fqdn} is not authenticated (AD flag not set)"
+                f"DNSSEC validation required but the following agent "
+                f"FQDNs were not authenticated (AD flag not set): {failed}"
             )
 
     if enrich_endpoints and agents:
@@ -96,16 +127,20 @@ async def _apply_post_discovery(
             logger.debug("Endpoint enrichment failed (non-fatal)", exc_info=True)
 
     if verify_signatures and agents:
-        await _verify_agent_signatures(agents, domain, dnssec_validated)
+        await _verify_agent_signatures(agents, domain, dnssec_validated=per_agent_dnssec)
 
-    return dnssec_validated
+    return bool(per_agent_dnssec) and all(per_agent_dnssec.values())
 
 
 async def discover(
     domain: str,
     protocol: str | Protocol | None = None,
     name: str | None = None,
-    require_dnssec: bool = False,  # Default False for now, True in production
+    # draft-02 §6.2 relaxes DNSSEC to MAY by default; MUST applies only when
+    # TLSA / DANE is in use (RFC 6698 §10.1). Default False matches the
+    # baseline SVCB-only deployment posture. Opt-in True when the consumer
+    # wants AD-flag enforcement or when records carry TLSA hints.
+    require_dnssec: bool = False,
     use_http_index: bool = False,
     enrich_endpoints: bool = True,
     verify_signatures: bool = False,
@@ -122,6 +157,7 @@ async def discover(
     text_match: str | None = None,
     require_signed: bool = False,
     require_signature_algorithm: list[str] | None = None,
+    allow_legacy: bool | None = None,
 ) -> DiscoveryResult:
     """
     Discover AI agents at a domain using DNS-AID protocol.
@@ -133,7 +169,11 @@ async def discover(
         domain: Domain to search for agents (e.g., "example.com").
         protocol: Filter by protocol ("a2a", "mcp", or None for all).
         name: Filter by specific agent name (or None for all).
-        require_dnssec: Require DNSSEC validation (raises if invalid).
+        require_dnssec: Require DNSSEC validation (raises if invalid). Per
+            draft-02 §6.2 DNSSEC is MAY by default; consumers SHOULD set this
+            to True for TLSA/DANE-bound deployments, where unsigned records
+            cannot be trusted (RFC 6698 §10.1). SVCB-only deployments may
+            leave this False.
         use_http_index: If True, fetch agent list from HTTP endpoint
             (``/.well-known/agents-index.json``) instead of DNS-only discovery.
         enrich_endpoints: If True (default), fetch ``.well-known/agent-card.json``
@@ -182,9 +222,19 @@ async def discover(
 
     protocol = _normalize_protocol(protocol)
 
-    # Build query based on filters
+    # Build query based on filters. draft-02: the primary owner is a
+    # flat FQDN ({name}.{domain}); protocol is no longer in the
+    # FQDN — it lives in the bap/alpn SvcParam after resolution. The
+    # organization-level index keeps the underscored shape
+    # (_index._agents.{domain}) per draft-02 §Known Organization.
     if name and protocol:
-        query = f"_{name}._{protocol.value}._agents.{domain}"
+        # Known-agent query: flat draft-02 form. Legacy -01 form is
+        # tried as a fallback in _query_single_agent when
+        # allow_legacy=True (or DNS_AID_LEGACY_01_FALLBACK=1 for
+        # callers using the env-flag form). Results that came from the
+        # legacy path are stamped legacy_resolved=True on the returned
+        # AgentRecord.
+        query = f"{name}.{domain}"
     elif protocol:
         query = f"_index._{protocol.value}._agents.{domain}"
     else:
@@ -202,7 +252,9 @@ async def discover(
         use_http_index=use_http_index,
     )
 
-    agents = await _execute_discovery(domain, protocol, name, use_http_index, query)
+    agents = await _execute_discovery(
+        domain, protocol, name, use_http_index, query, allow_legacy=allow_legacy
+    )
 
     # Path A name filter — applied here, *before* enrichment, so we don't fetch
     # cap docs / agent cards / JWKS for agents we're about to discard.
@@ -218,12 +270,8 @@ async def discover(
     dnssec_validated = await _apply_post_discovery(
         agents, require_dnssec, enrich_endpoints, verify_signatures, domain
     )
-
-    # Propagate domain-level DNSSEC outcome onto each agent so per-agent trust filters
-    # (``min_dnssec``) have a record-level signal to evaluate.
-    if dnssec_validated:
-        for agent in agents:
-            agent.dnssec_validated = True
+    # Per-agent `dnssec_validated` is set inside _apply_post_discovery
+    # when require_dnssec=True; no need to re-stamp at this level.
 
     # Apply Path A in-memory filters (FR-002, FR-021..FR-023). When no filter kwargs are
     # set, ``apply_filters`` short-circuits and returns the input list unchanged.
@@ -292,22 +340,69 @@ async def _query_single_agent(
     domain: str,
     name: str,
     protocol: Protocol,
+    *,
+    allow_legacy: bool | None = None,
 ) -> AgentRecord | None:
-    """Query DNS for a specific agent's SVCB record."""
-    fqdn = f"_{name}._{protocol.value}._agents.{domain}"
+    """Query DNS for a specific agent's SVCB record.
+
+    draft-02: tries the flat FQDN ({name}.{domain}) first. If that
+    returns no answer AND the caller permits legacy fallback, also tries
+    the legacy -01 shape (_{name}._{protocol}._agents.{domain}) so
+    consumers can still resolve publishers that haven't migrated.
+
+    Legacy fallback is opt-in per call:
+
+    - ``allow_legacy=True`` — fallback enabled for this call.
+    - ``allow_legacy=False`` — fallback disabled regardless of env.
+    - ``allow_legacy=None`` (default) — defer to the env flag
+      ``DNS_AID_LEGACY_01_FALLBACK`` for backwards compatibility with
+      existing deployments.
+
+    When the legacy path serves an answer, the returned ``AgentRecord``
+    has ``legacy_resolved=True`` and a warning is logged so operators
+    can detect publishers that haven't migrated and downstream filters
+    can down-weight legacy records.
+    """
+    fqdn = f"{name}.{domain}"
+    legacy_fqdn: str | None = None
+    if allow_legacy is True or (
+        allow_legacy is None
+        and os.environ.get("DNS_AID_LEGACY_01_FALLBACK", "").lower() in ("1", "true", "yes")
+    ):
+        legacy_fqdn = f"_{name}._{protocol.value}._agents.{domain}"
+    resolved_via_legacy = False
 
     try:
         resolver = dns.asyncresolver.Resolver()
 
-        # Query SVCB record
-        # Note: dnspython uses type 64 for SVCB
-        try:
-            answers = await resolver.resolve(fqdn, "SVCB")
-        except dns.resolver.NoAnswer:
-            # Try HTTPS record as fallback (type 65)
+        # Query SVCB record. dnspython uses type 64 for SVCB.
+        # draft-02: try the flat FQDN first. On NoAnswer / NXDOMAIN
+        # try the legacy -01 shape if the back-compat env flag is set.
+        async def _try(name_to_query: str) -> dns.resolver.Answer:
             try:
-                answers = await resolver.resolve(fqdn, "HTTPS")
+                return await resolver.resolve(name_to_query, "SVCB")
             except dns.resolver.NoAnswer:
+                # HTTPS record (type 65) is the protocol-specific alias
+                # of SVCB; some publishers may have used it instead.
+                return await resolver.resolve(name_to_query, "HTTPS")
+
+        try:
+            answers = await _try(fqdn)
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+            if legacy_fqdn is None:
+                return None
+            try:
+                logger.warning(
+                    "Flat FQDN returned no answer; serving legacy -01 fallback",
+                    fqdn=fqdn,
+                    legacy_fqdn=legacy_fqdn,
+                    note="caller will receive legacy_resolved=True on this record",
+                )
+                answers = await _try(legacy_fqdn)
+                # Hand the legacy FQDN downstream so logging is accurate.
+                fqdn = legacy_fqdn
+                resolved_via_legacy = True
+            except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
                 return None
 
         for rdata in answers:
@@ -342,8 +437,21 @@ async def _query_single_agent(
             port = 443
             ipv4_hint = None
             ipv6_hint = None
+            alpn_values: list[str] = []
 
             if hasattr(rdata, "params") and rdata.params:
+                # alpn (SvcParamKey 1) — draft-02 carries the agent protocol
+                # here when `bap` is absent (the default publish shape). A
+                # record may advertise several alpn ids, so collect them all
+                # and let _reconcile_protocol pick the one we model. Decode
+                # defensively: a single malformed id must not drop the record.
+                alpn_param = rdata.params.get(1)
+                if alpn_param is not None:
+                    for _id in getattr(alpn_param, "ids", None) or []:
+                        with contextlib.suppress(Exception):
+                            alpn_values.append(
+                                _id.decode() if isinstance(_id, (bytes, bytearray)) else str(_id)
+                            )
                 # Port (SvcParamKey 3)
                 port_param = rdata.params.get(3)
                 if port_param and hasattr(port_param, "port"):
@@ -373,40 +481,187 @@ async def _query_single_agent(
 
             cap_uri = custom_params.get("cap")
             cap_sha256 = custom_params.get("cap-sha256")
-            bap_str = custom_params.get("bap", "")
-            bap = [b.strip() for b in bap_str.split(",") if b.strip()] if bap_str else []
+            well_known_path = custom_params.get("well-known")
+            # draft-02 §5.1 (Bulk Agent Protocol, experimental): `bap`
+            # carries a single agent-protocol identifier per record in
+            # either bare (``mcp``) or versioned (``mcp=1.0``) form.
+            # Pre-draft-02 records may have a comma-separated list; the
+            # shared ``normalize_bap`` helper collapses that to the
+            # first non-empty token and warns so the data loss is
+            # observable. Use the same helper in the SDK and indexer
+            # so all consumers agree on the collapse semantics.
+            from dns_aid.core.bap import normalize_bap
+
+            bap = normalize_bap(custom_params.get("bap"))
+
+            # draft-02: the protocol lives in the SVCB record, not the FQDN.
+            # Stamp the record's true protocol (bap, then alpn) over the query
+            # probe so by-FQDN, zone-walk, and HTTP-index discovery all label
+            # the agent correctly — otherwise a default-published a2a/https
+            # agent (alpn, no bap) is mislabeled with the mcp probe and fails
+            # the JWS binding check (payload.alpn == agent.protocol.value).
+            protocol = _reconcile_protocol(protocol, bap, alpn_values)
+
             policy_uri = custom_params.get("policy")
             realm = custom_params.get("realm")
             connect_class = custom_params.get("connect-class")
             connect_meta = custom_params.get("connect-meta")
             enroll_uri = custom_params.get("enroll-uri")
 
-            # Discovery priority: cap URI first, then TXT fallback
+            # Descriptor-fetch precedence (local dns-aid-core convention,
+            # NOT spec-mandated — draft §6.1 names only well-known as the
+            # source). When both `cap` and `well-known` are present we
+            # prefer the explicit locator if it's https-fetchable; if it
+            # isn't (URN, JSON-Ref, non-https scheme), we fall back to
+            # the reconstructed well-known URL rather than treating the
+            # non-fetchable `cap` as terminal.
             capabilities: list[str] = []
-            capability_source: Literal[
-                "cap_uri", "agent_card", "http_index", "txt_fallback", "none"
-            ] = "none"
+            capability_source: CapabilitySource = "none"
             agent_card = None
+            cap_sha256_applied = False
 
-            if cap_uri:
-                cap_doc = await fetch_cap_document(cap_uri, expected_sha256=cap_sha256)
+            effective_descriptor_url: str | None = None
+            descriptor_source_label: Literal["cap_uri", "well_known", "none"] = "none"
+
+            # Item 3: only treat `cap` as a descriptor when it's
+            # https-fetchable. The fetcher's SSRF guard would reject
+            # other schemes anyway, but routing the decision here lets
+            # well-known still get a chance.
+            cap_is_https = cap_uri is not None and cap_uri.lower().startswith("https://")
+            if cap_is_https:
+                effective_descriptor_url = cap_uri
+                descriptor_source_label = "cap_uri"
+
+            # Item 4 + path validation: well-known accepts a bare RFC
+            # 8615 suffix (e.g. ``agent-card.json``) or an absolute
+            # origin path (e.g. ``/.well-known/agent-card.json``,
+            # ``/not-well-known/other-card.json``, per draft Figure 3).
+            # The validator constrains the character class on both
+            # shapes so a forged SVCB can't steer the fetch off origin.
+            if effective_descriptor_url is None and well_known_path:
+                from dns_aid.utils.validation import (
+                    ValidationError,
+                    validate_well_known_path,
+                )
+
+                try:
+                    safe_wk = validate_well_known_path(well_known_path)
+                except ValidationError as exc:
+                    logger.warning(
+                        "well-known SvcParamKey rejected — skipping descriptor fetch",
+                        fqdn=fqdn,
+                        well_known_path=well_known_path,
+                        reason=str(exc),
+                    )
+                    safe_wk = None
+
+                if safe_wk:
+                    # SVCB target is the host serving the well-known
+                    # path. Strip any trailing dot for URL construction.
+                    wk_host = target.rstrip(".")
+                    if safe_wk.startswith("/"):
+                        # Absolute origin path — use as-is. Draft Figure
+                        # 3 includes values outside ``/.well-known/`` so
+                        # we don't force a prefix here.
+                        effective_descriptor_url = f"https://{wk_host}{safe_wk}"
+                    else:
+                        effective_descriptor_url = f"https://{wk_host}/.well-known/{safe_wk}"
+                    descriptor_source_label = "well_known"
+
+            # Non-https `cap` (URN, JSON-Ref, etc.) with no fetchable
+            # well-known is a metadata-only locator: keep it on the
+            # record but don't try to fetch it.
+            if effective_descriptor_url is None and cap_uri is not None and not cap_is_https:
+                logger.debug(
+                    "cap is non-https locator and no well-known fallback — "
+                    "keeping cap on record but skipping descriptor fetch",
+                    fqdn=fqdn,
+                    cap_uri=cap_uri,
+                )
+
+            if effective_descriptor_url:
+                # Per-agent total-time budget on descriptor fetch.
+                # fetch_cap_document already times out individual HTTP
+                # operations, but a chain of redirects + DNS + TLS can
+                # still pile up; cap the whole fetch so one slow agent
+                # can't stall a bulk-discovery loop.
+                from dns_aid.core.cap_fetcher import CapDigestMismatchError
+
+                cap_doc = None
+                descriptor_reachable = True
+                try:
+                    cap_doc = await asyncio.wait_for(
+                        fetch_cap_document(effective_descriptor_url, expected_sha256=cap_sha256),
+                        timeout=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
+                    )
+                except TimeoutError:
+                    descriptor_reachable = False
+                    logger.warning(
+                        "Descriptor fetch exceeded per-agent budget — "
+                        "recording capability_source=descriptor_unreachable",
+                        fqdn=fqdn,
+                        descriptor_url=effective_descriptor_url,
+                        budget_seconds=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
+                    )
+                except CapDigestMismatchError as exc:
+                    # Per draft §6.1: digest mismatch MUST cause us to
+                    # refuse the record. Don't fall back to TXT — the
+                    # operator pinned a specific document and the host
+                    # served something different. Drop the record so
+                    # callers don't see an integrity-pinned-looking
+                    # AgentRecord whose capabilities came from elsewhere.
+                    logger.warning(
+                        "cap-sha256 digest mismatch — refusing record",
+                        fqdn=fqdn,
+                        descriptor_url=effective_descriptor_url,
+                        expected=exc.expected,
+                        actual=exc.actual,
+                    )
+                    return None
+
+                # Reachability signal: the operator declared a descriptor
+                # locator (cap or well-known) but we couldn't pull bytes
+                # off the wire. Distinct from "no descriptor declared",
+                # so consumers can tell transient outages from
+                # mis-configurations.
+                if cap_doc is None and descriptor_reachable:
+                    descriptor_reachable = False
+                    logger.debug(
+                        "Descriptor fetch returned no document",
+                        fqdn=fqdn,
+                        descriptor_url=effective_descriptor_url,
+                    )
+
                 if cap_doc and cap_doc.capabilities:
                     capabilities = cap_doc.capabilities
-                    capability_source = "cap_uri"
+                    capability_source = descriptor_source_label
+                    # If cap_sha256 was supplied AND the fetcher accepted
+                    # the bytes (it did not raise CapDigestMismatchError),
+                    # the integrity pin was actually applied to these
+                    # bytes. Record that as a separate boolean so
+                    # downstream consumers don't have to guess from the
+                    # mere presence of cap_sha256.
+                    if cap_sha256 is not None:
+                        cap_sha256_applied = True
                     logger.debug(
-                        "Capabilities fetched from cap URI",
+                        "Capabilities fetched from descriptor URL",
                         fqdn=fqdn,
-                        cap_uri=cap_uri,
+                        descriptor_url=effective_descriptor_url,
+                        source=descriptor_source_label,
                         capabilities=capabilities,
+                        cap_sha256_applied=cap_sha256_applied,
                     )
+                elif not descriptor_reachable:
+                    capability_source = "descriptor_unreachable"
 
                 # Reuse raw data as A2AAgentCard (avoids redundant fetch later)
                 if cap_doc and cap_doc.raw_data:
                     try:
                         agent_card = A2AAgentCard.from_dict(cap_doc.raw_data)
                         logger.debug(
-                            "Parsed A2A Agent Card from cap URI response",
+                            "Parsed A2A Agent Card from descriptor response",
                             fqdn=fqdn,
+                            descriptor_source=descriptor_source_label,
                             card_name=agent_card.name,
                             skills_count=len(agent_card.skills),
                         )
@@ -430,6 +685,26 @@ async def _query_single_agent(
                 if capabilities:
                     capability_source = "txt_fallback"
 
+            # Dangling cap_sha256: a
+            # `cap_sha256` value on the SVCB combined with capabilities
+            # that came from TXT or nowhere is a footgun — the pin
+            # isn't covering the bytes the caller will see. We keep the
+            # SvcParamKey value on the record for transparency (it tells
+            # consumers the operator *intended* an integrity pin) but
+            # the `cap_sha256_verified` flag clearly marks whether the
+            # pin was applied. Surface the dangling case as a warning
+            # for log scrapers.
+            if cap_sha256 is not None and not cap_sha256_applied:
+                logger.warning(
+                    "cap_sha256 declared but not applied — record carries the "
+                    "SvcParamKey value but the integrity pin did not cover the "
+                    "capabilities returned",
+                    fqdn=fqdn,
+                    declared_cap_sha256=cap_sha256,
+                    capability_source=capability_source,
+                    warning_class="dns_aid.dangling_cap_sha256",
+                )
+
             return AgentRecord(
                 name=name,
                 domain=domain,
@@ -439,8 +714,11 @@ async def _query_single_agent(
                 ipv4_hint=ipv4_hint,
                 ipv6_hint=ipv6_hint,
                 capabilities=capabilities,
+                legacy_resolved=resolved_via_legacy,
                 cap_uri=cap_uri,
                 cap_sha256=cap_sha256,
+                cap_sha256_verified=cap_sha256_applied,
+                well_known_path=well_known_path,
                 bap=bap,
                 policy_uri=policy_uri,
                 realm=realm,
@@ -458,34 +736,29 @@ async def _query_single_agent(
     return None
 
 
+# Derive the recognised DNS-AID SvcParamKey name set from the
+# single source of truth in models.py so adding a new key in one
+# place (DNS_AID_KEY_MAP) automatically updates the parser. Earlier
+# this was a literal set hand-maintained here, so adding a key meant
+# editing three different files.
+from dns_aid.core.models import DNS_AID_KEY_MAP, DNS_AID_KEY_MAP_REVERSE  # noqa: E402
+
+_DNS_AID_KEY_NAMES: frozenset[str] = frozenset(DNS_AID_KEY_MAP.keys())
+
+
 def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
+    """Parse DNS-AID custom params from an SVCB record's text rendering.
+
+    Accepts both human-readable string names and RFC 9460 keyNNNNN form:
+
+    - String form: ``cap="https://..." bap="mcp=1.0" realm="demo"``
+    - Numeric form: ``key65400="https://..." key65402="mcp=1.0"``
+
+    The recognised name set is derived from
+    ``dns_aid.core.models.DNS_AID_KEY_MAP`` at module load so this
+    stays in lock-step with publishing.
     """
-    Parse DNS-AID custom params from SVCB record text representation.
-
-    Accepts both human-readable string names and RFC 9460 keyNNNNN format:
-        String form: cap="https://..." bap="mcp,a2a" realm="demo"
-        Numeric form: key65400="https://..." key65402="mcp,a2a" key65404="demo"
-
-    Args:
-        svcb_text: String representation of an SVCB rdata.
-
-    Returns:
-        Dict of custom param names (always string form) to their string values.
-    """
-    from dns_aid.core.models import DNS_AID_KEY_MAP_REVERSE
-
     custom_params: dict[str, str] = {}
-    dnsaid_keys = {
-        "cap",
-        "cap-sha256",
-        "bap",
-        "policy",
-        "realm",
-        "sig",
-        "connect-class",
-        "connect-meta",
-        "enroll-uri",
-    }
 
     try:
         parts = shlex.split(svcb_text)
@@ -502,7 +775,7 @@ def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
         if key in DNS_AID_KEY_MAP_REVERSE:
             key = DNS_AID_KEY_MAP_REVERSE[key]
 
-        if key in dnsaid_keys:
+        if key in _DNS_AID_KEY_NAMES:
             custom_params[key] = value
 
     return custom_params
@@ -560,14 +833,72 @@ def _build_index_tasks(
     return tasks
 
 
+def _reconcile_protocol(
+    probe: Protocol, bap: str | None, alpn: str | list[str] | None = None
+) -> Protocol:
+    """Resolve an agent's true protocol from its SVCB record.
+
+    Under draft-02 the protocol lives in the SVCB record, not the FQDN, so
+    ``probe`` (the protocol used to shape the query — the flat-owner SVCB
+    lookup is protocol-independent) is only a placeholder. Prefer the
+    record's own signal in order: the ``bap`` token (draft §5.1), then each
+    ``alpn`` id (dns-aid-core's canonical carrier; a record may list more
+    than one). Return the first candidate that names a protocol we model;
+    fall back to ``probe`` when none do — so a malformed bap, an unknown
+    alpn (e.g. raw ``h2`` / ``h3``), or an empty record never raises and
+    never lets an unparseable bap mask a usable alpn. Mirrors the indexer's
+    ``bap or alpn`` rule and keeps ``AgentRecord.protocol`` consistent with
+    the signed ``alpn`` the JWS binding check compares against.
+    """
+    from dns_aid.core.bap import split_bap_token
+
+    candidates: list[str] = []
+    bap_token = split_bap_token(bap)[0]
+    if bap_token:
+        candidates.append(bap_token)
+    if isinstance(alpn, str):
+        candidates.append(alpn)
+    elif alpn:
+        candidates.extend(alpn)
+
+    for candidate in candidates:
+        if candidate:
+            try:
+                return Protocol(candidate.strip().lower())
+            except ValueError:
+                continue
+    return probe
+
+
 def _collect_agent_results(results: list[Any]) -> list[AgentRecord]:
-    """Filter asyncio.gather results for successful AgentRecord instances."""
-    return [r for r in results if isinstance(r, AgentRecord)]
+    """Filter gather results for AgentRecords, deduped by (FQDN, protocol).
+
+    Under draft-02 the flat-owner SVCB query is protocol-independent, so the
+    common-name fallback probes the same owner once per candidate protocol;
+    after protocol reconciliation those probes return the same agent, which
+    would otherwise appear twice. Dedup on (normalized FQDN, protocol)
+    collapses the duplicates while preserving genuinely distinct agents —
+    including legacy -01 records that share a flat FQDN but carry different
+    protocols in their nested owner name.
+    """
+    seen: set[tuple[str, str]] = set()
+    agents: list[AgentRecord] = []
+    for r in results:
+        if not isinstance(r, AgentRecord):
+            continue
+        key = (r.fqdn.rstrip(".").lower(), r.protocol.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        agents.append(r)
+    return agents
 
 
 async def _discover_agents_in_zone(
     domain: str,
     protocol: Protocol | None = None,
+    *,
+    allow_legacy: bool | None = None,
 ) -> list[AgentRecord]:
     """
     Discover all agents in a domain's _agents zone.
@@ -583,7 +914,7 @@ async def _discover_agents_in_zone(
 
     async def _query_with_sem(name: str, proto: Protocol) -> AgentRecord | None:
         async with sem:
-            return await _query_single_agent(domain, name, proto)
+            return await _query_single_agent(domain, name, proto, allow_legacy=allow_legacy)
 
     if index_entries:
         logger.debug(
@@ -626,25 +957,16 @@ def _parse_fqdn(fqdn: str) -> tuple[str | None, str | None]:
     """
     Parse agent name and protocol from a DNS-AID FQDN.
 
-    FQDN format: _{name}._{protocol}._agents.{domain}
-
-    Returns:
-        (name, protocol_str) or (None, None) if parsing fails.
+    Thin projection over :func:`dns_aid.core.fqdn.parse_dnsaid_fqdn`
+    that drops the domain component; callers needing the domain too
+    should use the parent function directly.
     """
-    if not fqdn or not fqdn.startswith("_"):
+    from dns_aid.core.fqdn import parse_dnsaid_fqdn
+
+    parsed = parse_dnsaid_fqdn(fqdn)
+    if parsed is None:
         return None, None
-
-    parts = fqdn.split(".")
-    if len(parts) < 3:
-        return None, None
-
-    name_part = parts[0]  # _name
-    protocol_part = parts[1]  # _protocol
-
-    if not name_part.startswith("_") or not protocol_part.startswith("_"):
-        return None, None
-
-    return name_part[1:], protocol_part[1:]
+    return parsed.name, parsed.protocol
 
 
 def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> None:
@@ -691,7 +1013,7 @@ async def _process_http_agent(
         return None
 
     dns_agent_name, fqdn_protocol_str = _parse_fqdn(http_agent.fqdn)
-    if not dns_agent_name or not fqdn_protocol_str:
+    if not dns_agent_name:
         logger.debug(
             "Cannot parse FQDN from HTTP index entry",
             agent=http_agent.name,
@@ -699,21 +1021,40 @@ async def _process_http_agent(
         )
         return None
 
-    try:
-        agent_protocol = Protocol(fqdn_protocol_str.lower())
-    except ValueError:
-        logger.debug(
-            "Unknown protocol in FQDN",
-            agent=http_agent.name,
-            fqdn=http_agent.fqdn,
-            protocol=fqdn_protocol_str,
-        )
+    # Under draft-02 the flat and walkable FQDN shapes don't carry the
+    # agent protocol — it lives in the SVCB `bap`/`alpn` SvcParam. If
+    # _parse_fqdn returned no protocol, use the caller-supplied protocol
+    # filter when present, otherwise try mcp then a2a (the SVCB params
+    # on the discovered record reveal the actual protocol).
+    candidate_protocols: list[Protocol]
+    if fqdn_protocol_str:
+        try:
+            candidate_protocols = [Protocol(fqdn_protocol_str.lower())]
+        except ValueError:
+            logger.debug(
+                "Unknown protocol in FQDN",
+                agent=http_agent.name,
+                fqdn=http_agent.fqdn,
+                protocol=fqdn_protocol_str,
+            )
+            return None
+    elif protocol is not None:
+        candidate_protocols = [protocol]
+    else:
+        candidate_protocols = [Protocol.MCP, Protocol.A2A]
+
+    # Apply caller-side protocol filter when the FQDN-carried protocol
+    # is known and doesn't match.
+    if fqdn_protocol_str and protocol and candidate_protocols[0] != protocol:
         return None
 
-    if protocol and agent_protocol != protocol:
-        return None
-
-    agent = await _query_single_agent(domain, dns_agent_name, agent_protocol)
+    agent_protocol = candidate_protocols[0]
+    agent = None
+    for proto in candidate_protocols:
+        agent = await _query_single_agent(domain, dns_agent_name, proto)
+        if agent:
+            agent_protocol = proto
+            break
 
     if agent:
         _enrich_from_http_index(agent, http_agent)
@@ -825,7 +1166,7 @@ def _http_agent_to_record(
 
     # Extract capabilities from HTTP index if available
     http_capabilities: list[str] = []
-    cap_source: Literal["cap_uri", "agent_card", "http_index", "txt_fallback", "none"] = "none"
+    cap_source: CapabilitySource = "none"
     if http_agent.capability and http_agent.capability.capabilities:
         http_capabilities = http_agent.capability.capabilities
         cap_source = "http_index"
@@ -853,10 +1194,13 @@ def _apply_agent_card(agent: AgentRecord, card: A2AAgentCard) -> None:
     """
     agent.agent_card = card
 
-    # Wire agent card skills → capabilities
-    # agent_card is higher priority than txt_fallback and http_index,
-    # so override those sources. Only cap_uri takes precedence.
-    if card.skills and agent.capability_source not in ("cap_uri",):
+    # Wire agent card skills → capabilities. Preserve higher-trust
+    # provenance: cap_uri (draft §6.1 normative locator) and well_known
+    # (RFC 8615 locator, also normative in -02) both record the actual
+    # descriptor source. Overwriting them with "agent_card" here would
+    # erase the fact that the operator declared a specific fetch path —
+    # downstream consumers use capability_source for trust/audit calls.
+    if card.skills and agent.capability_source not in ("cap_uri", "well_known"):
         agent.capabilities = card.to_capabilities()
         agent.capability_source = "agent_card"
         logger.debug(
@@ -1047,72 +1391,76 @@ async def discover_at_fqdn(fqdn: str) -> AgentRecord | None:
     """
     Discover agent at a specific FQDN.
 
+    Accepts any of the three DNS-AID FQDN shapes (draft-02 flat,
+    draft-02 walkable, or legacy -01) and resolves the agent at it.
+    When the input doesn't carry a protocol (the two draft-02 shapes),
+    the discoverer attempts mcp first, then a2a.
+
     Args:
-        fqdn: Full DNS-AID record name (e.g., "_chat._a2a._agents.example.com")
+        fqdn: Full DNS-AID record name. Examples:
+            - ``"chat.example.com"`` (draft-02 flat)
+            - ``"chat._agents.example.com"`` (draft-02 walkable)
+            - ``"_chat._a2a._agents.example.com"`` (legacy -01)
 
     Returns:
-        AgentRecord if found, None otherwise
+        AgentRecord if found, None otherwise.
     """
-    # Parse FQDN to extract components
-    # Format: _{name}._{protocol}._agents.{domain}
-    parts = fqdn.split(".")
+    from dns_aid.core.fqdn import parse_dnsaid_fqdn
 
-    if len(parts) < 4:
+    parsed = parse_dnsaid_fqdn(fqdn)
+    if parsed is None or not parsed.name or not parsed.domain:
         logger.error("Invalid DNS-AID FQDN format", fqdn=fqdn)
         return None
+    name, protocol_str, domain = parsed.name, parsed.protocol, parsed.domain
 
-    # Extract components
-    name_part = parts[0]  # _name
-    protocol_part = parts[1]  # _protocol
+    # Legacy -01 carries the protocol in the FQDN; the two draft-02 shapes
+    # don't. Either way _query_single_agent resolves the SVCB and reconciles
+    # the record's true protocol from bap/alpn (see _reconcile_protocol), so
+    # the probe below is only a placeholder used to shape the query.
+    probe = Protocol.MCP
+    if protocol_str:
+        try:
+            probe = Protocol(protocol_str)
+        except ValueError:
+            logger.error("Unknown protocol", protocol=protocol_str)
+            return None
+    return await _query_single_agent(domain, name, probe)
 
-    if not name_part.startswith("_") or not protocol_part.startswith("_"):
-        logger.error("Invalid DNS-AID FQDN format", fqdn=fqdn)
-        return None
 
-    name = name_part[1:]  # Remove leading underscore
-    protocol_str = protocol_part[1:]  # Remove leading underscore
-
-    # Find _agents marker to determine domain
-    try:
-        agents_idx = parts.index("_agents")
-        domain = ".".join(parts[agents_idx + 1 :])
-    except ValueError:
-        logger.error("Missing _agents in FQDN", fqdn=fqdn)
-        return None
-
-    try:
-        protocol = Protocol(protocol_str)
-    except ValueError:
-        logger.error("Unknown protocol", protocol=protocol_str)
-        return None
-
-    return await _query_single_agent(domain, name, protocol)
+def _dns_name_eq(a: str, b: str) -> bool:
+    """Compare two DNS names case-insensitively, ignoring a trailing dot."""
+    return a.rstrip(".").lower() == b.rstrip(".").lower()
 
 
 async def _verify_agent_signatures(
     agents: list[AgentRecord],
     domain: str,
-    dnssec_validated: bool,
+    dnssec_validated: dict[str, bool] | bool,
 ) -> None:
     """
     Verify JWS signatures on agents that have sig parameter but no DNSSEC.
 
-    For each agent:
-    - If DNSSEC validated: skip (stronger verification already done)
-    - If has sig parameter: verify against domain's JWKS
-    - Log warnings for invalid/missing signatures but don't remove agents
+    Under draft-02 each agent has its own flat fqdn, so DNSSEC validation
+    is also per-agent. JWS verification runs as the per-agent fallback:
+    if a specific agent's owner-name validated under DNSSEC we skip JWS
+    for that agent (stronger guarantee already in place); otherwise we
+    fall through to JWS.
 
     Args:
         agents: List of agents to verify (modified in place with verification status)
         domain: Domain to fetch JWKS from
-        dnssec_validated: Whether DNSSEC validation passed
+        dnssec_validated: Either a mapping of ``agent.fqdn → bool``
+            (per-agent DNSSEC outcome) or a plain bool treated as a
+            uniform answer for every agent. The plain-bool form is kept
+            for callers that haven't migrated to the per-agent map yet.
     """
-    if dnssec_validated:
-        logger.debug("DNSSEC validated, skipping JWS verification")
-        return
+    # Normalize: plain bool → uniform-per-agent dict.
+    if isinstance(dnssec_validated, bool):
+        uniform = dnssec_validated
+        dnssec_validated = {a.fqdn: uniform for a in agents}
 
-    # Find agents with signatures to verify
-    agents_with_sig = [a for a in agents if a.sig]
+    # Find agents with signatures to verify AND no DNSSEC pass.
+    agents_with_sig = [a for a in agents if a.sig and not dnssec_validated.get(a.fqdn, False)]
 
     if not agents_with_sig:
         logger.debug("No agents with JWS signatures to verify")
@@ -1130,16 +1478,56 @@ async def _verify_agent_signatures(
         if agent.sig is None:
             continue
         try:
-            is_valid, _payload = await verify_record_signature(domain, agent.sig)
-            agent.signature_verified = is_valid
-            agent.signature_algorithm = _extract_jws_algorithm(agent.sig) if is_valid else None
+            is_valid, payload = await verify_record_signature(domain, agent.sig)
 
-            if is_valid:
+            # A valid signature alone is insufficient. The signed payload
+            # binds to a specific (fqdn, target, port, alpn) tuple — we
+            # MUST corroborate that the record we're about to trust is
+            # the one those bytes describe. Without this check an attacker
+            # who lifts a legit `sig` value can paste it onto a spoofed
+            # SVCB pointing at their own host and the discoverer would
+            # still stamp signature_verified=True.
+            #
+            # Publisher-side reference: core/publisher.py builds the
+            # payload from name+domain (flat fqdn), endpoint (= target_host),
+            # port, and protocol.value. Compare to the same fields here.
+            # Compare on DNS-normalized values — hostnames are
+            # case-insensitive and may carry a trailing dot, so a
+            # legitimately-signed record must not be rejected over those
+            # cosmetic differences.
+            payload_matches = (
+                is_valid
+                and payload is not None
+                and _dns_name_eq(payload.fqdn, agent.fqdn)
+                and _dns_name_eq(payload.target, agent.target_host)
+                and payload.port == agent.port
+                and payload.alpn == agent.protocol.value
+            )
+
+            agent.signature_verified = payload_matches
+            agent.signature_algorithm = (
+                _extract_jws_algorithm(agent.sig) if payload_matches else None
+            )
+
+            if payload_matches:
                 logger.info(
                     "JWS signature verified",
                     agent=agent.name,
                     fqdn=agent.fqdn,
                     algorithm=agent.signature_algorithm,
+                )
+            elif is_valid:
+                logger.warning(
+                    "JWS signature cryptographically valid but does not bind to record",
+                    agent=agent.name,
+                    fqdn=agent.fqdn,
+                    payload_fqdn=getattr(payload, "fqdn", None),
+                    payload_target=getattr(payload, "target", None),
+                    payload_port=getattr(payload, "port", None),
+                    payload_alpn=getattr(payload, "alpn", None),
+                    record_target=agent.target_host,
+                    record_port=agent.port,
+                    record_alpn=agent.protocol.value,
                 )
             else:
                 logger.warning(

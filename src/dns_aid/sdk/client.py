@@ -1162,8 +1162,12 @@ def _parse_retry_after(value: str | None) -> int | None:
 #
 #   * ``agent.target_host`` is absent — the directory only emits ``endpoint_url``;
 #     the SDK's :class:`AgentRecord` requires ``target_host``.
-#   * ``agent.bap`` is a comma-separated string (e.g. ``"mcp/1,a2a/1"``); the SDK
-#     types it as ``list[str]``.
+#   * ``agent.bap`` may arrive in either of three legacy shapes — a list, a
+#     comma-separated string, or the canonical draft-02 scalar form
+#     (``"mcp"`` or ``"mcp=1.0"``). The adapter routes all three through
+#     ``dns_aid.core.bap.normalize_bap`` so the wire-shape knowledge lives
+#     in core, not here, and the discoverer + indexer agree with the
+#     adapter on the collapse semantics.
 #   * Trust signals (``security_score``, ``trust_score``, ``popularity_score``,
 #     ``trust_tier``, ``safety_status``, ``dnssec_valid``, ``dane_valid``,
 #     ``svcb_valid``, ``endpoint_reachable``, ``protocol_verified``,
@@ -1204,8 +1208,9 @@ def _adapt_search_payload(raw: dict[str, Any]) -> dict[str, Any]:
     Three independent concerns:
 
     1. **Lift flat trust + provenance signals** off the agent into nested objects.
-    2. **Coerce wire-shape quirks**: ``bap`` string → list, ``target_host`` from
-       ``endpoint_url``.
+    2. **Coerce wire-shape quirks**: normalize ``bap`` via
+       ``dns_aid.core.bap.normalize_bap`` (accepts list, comma-string, or
+       the canonical scalar), derive ``target_host`` from ``endpoint_url``.
     3. **Strip explicit nulls** for AgentRecord fields where the directory writes
        ``None`` but the SDK type is non-Optional. Pydantic will then use the
        declared default (e.g. ``capabilities: list = []``, ``version: str = "1.0.0"``).
@@ -1269,12 +1274,19 @@ def _adapt_search_payload(raw: dict[str, Any]) -> dict[str, Any]:
                 },
             )
 
-        # ── Adapt agent shape: split comma-separated ``bap`` string into list. ──
-        # Done before the ``_AGENT_FIELDS_STRIP_IF_NONE`` pass so ``bap=None`` still
-        # gets stripped.
-        bap = agent.get("bap")
-        if isinstance(bap, str):
-            agent["bap"] = [item.strip() for item in bap.split(",") if item.strip()]
+        # ── Adapt agent shape: normalize ``bap`` to its draft-02 scalar form. ──
+        # draft-02 §5.1 (Bulk Agent Protocol, experimental): `bap`
+        # carries a single agent-protocol identifier per record, bare
+        # (``mcp``) or versioned (``mcp=1.0``). Pre-draft-02 directory
+        # rows may serialize it as a list or as a comma-separated
+        # string; the shared ``normalize_bap`` helper in core collapses
+        # both to a scalar (or None) and logs when later tokens are
+        # dropped. Routing through the same helper as the discoverer
+        # and indexer keeps the three collapse paths from diverging.
+        from dns_aid.core.bap import normalize_bap
+
+        if "bap" in agent:
+            agent["bap"] = normalize_bap(agent.get("bap"))
 
         # ── Adapt agent shape: derive ``target_host`` from ``endpoint_url`` only. ──
         # If neither field is set, drop the record and log — never fabricate. The

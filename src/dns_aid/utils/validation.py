@@ -15,8 +15,13 @@ Security Note:
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Literal
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 # DNS label constraints (RFC 1035)
 MAX_LABEL_LENGTH = 63
@@ -38,6 +43,11 @@ KNOWN_CONNECT_CLASSES = frozenset({"direct", "lattice", "apphub-psc"})
 
 # Version pattern (semver-like, supports pre-release and build metadata)
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9._+-]*)?$")
+
+# DNS label for a DNS-AID FQDN: a normal DNS label with an optional leading
+# underscore so DNS-SD/underscore-prefixed forms (``_agents``, ``_index``,
+# ``_mcp``) validate alongside the flat draft-02 owner (``chat``).
+FQDN_LABEL_PATTERN = re.compile(r"^_?[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 
 class ValidationError(ValueError):
@@ -395,18 +405,24 @@ def validate_version(version: str) -> str:
 
 def validate_fqdn(fqdn: str) -> str:
     """
-    Validate a fully qualified domain name for DNS-AID records.
+    Validate a fully qualified domain name for DNS-AID verification.
 
-    DNS-AID FQDNs follow the pattern: _{agent}._{protocol}._agents.{domain}
+    Accepts any well-formed DNS FQDN. Under draft-02 an agent's primary
+    record lives at the flat owner ``{name}.{domain}`` (no ``_agents``
+    label). The optional walkable AliasMode (``{name}._agents.{domain}``),
+    the organization index (``_index._agents.{domain}``), and legacy -01
+    records (``_{name}._{protocol}._agents.{domain}``) use underscored
+    DNS-SD labels. All of these are valid inputs to ``verify``.
 
     Args:
         fqdn: The FQDN to validate
 
     Returns:
-        Normalized FQDN
+        Normalized FQDN (lowercased, trailing dot removed)
 
     Raises:
-        ValidationError: If FQDN is invalid
+        ValidationError: If the FQDN is empty, too long, or not a
+            well-formed multi-label DNS name
     """
     if not fqdn:
         raise ValidationError("fqdn", "FQDN cannot be empty")
@@ -420,13 +436,27 @@ def validate_fqdn(fqdn: str) -> str:
             fqdn,
         )
 
-    # DNS-AID records should contain _agents
-    if "_agents" not in fqdn:
+    labels = fqdn.split(".")
+    if len(labels) < 2:
         raise ValidationError(
             "fqdn",
-            "Invalid DNS-AID FQDN: must contain '_agents'",
+            "FQDN must have at least two labels (e.g., chat.example.com)",
             fqdn,
         )
+    for label in labels:
+        if len(label) > MAX_LABEL_LENGTH:
+            raise ValidationError(
+                "fqdn",
+                f"FQDN label '{label}' exceeds {MAX_LABEL_LENGTH} characters",
+                fqdn,
+            )
+        if not FQDN_LABEL_PATTERN.match(label):
+            raise ValidationError(
+                "fqdn",
+                f"Invalid FQDN label '{label}': must be a DNS label "
+                "(alphanumeric with hyphens, optional leading underscore)",
+                fqdn,
+            )
 
     return fqdn
 
@@ -461,3 +491,293 @@ def validate_backend(
         )
 
     return backend
+
+
+# Operator opt-in for the underscore-target bypass. A per-call kwarg /
+# MCP tool arg alone would let a calling LLM flip a draft-02 §Known
+# Organization MUST to a warning on its own. The env gate moves that
+# decision to deployment configuration where humans land it.
+_UNDERSCORE_BYPASS_ENV = "DNS_AID_ALLOW_UNDERSCORE_TARGET"
+
+
+def _underscore_bypass_env_enabled() -> bool:
+    return os.environ.get(_UNDERSCORE_BYPASS_ENV, "").lower() in ("1", "true", "yes")
+
+
+def validate_no_underscore_in_target(
+    target: str,
+    *,
+    allow_underscore: bool = False,
+) -> str:
+    """Validate that an SVCB TargetName contains no underscored DNS labels.
+
+    Per draft-mozleywilliams-dnsop-dnsaid-02 §3.2 (Known Organization, Unknown Agent), the
+    TargetName of an SVCB record reached over TLS with a publicly-issued
+    x.509 certificate MUST NOT contain underscores. CA/Browser Forum
+    Baseline Requirements and RFC 5280 dNSName SANs forbid underscored
+    labels.
+
+    Detects mid-label underscores too (not just leading ones); the public
+    PKI rule rejects any underscore anywhere in any label of the SAN.
+
+    The bypass (``allow_underscore=True``) is operator-gated: it only
+    takes effect when ``DNS_AID_ALLOW_UNDERSCORE_TARGET`` is also set in
+    the environment to a truthy value. Without the env gate the bypass
+    is treated as not-allowed and the violation raises — so a calling
+    LLM, MCP client, or test harness can't unilaterally downgrade the
+    spec MUST. When the env gate is set, the bypass emits a structured
+    WARN with ``warning_class="dns_aid.underscore_bypass"`` so log
+    aggregators can count and alert on deliberate opt-ins per zone.
+
+    Returns:
+        The target string, unchanged.
+
+    Raises:
+        ValidationError: when ``target`` contains an underscored label
+            and the bypass is not both requested AND env-gated.
+    """
+    if not target:
+        raise ValidationError("target", "SVCB TargetName cannot be empty")
+
+    # Strip a trailing dot if present — the constraint applies to labels,
+    # not to the FQDN root marker.
+    candidate = target.rstrip(".")
+    labels = candidate.split(".")
+    underscored = [label for label in labels if "_" in label]
+
+    if not underscored:
+        return target
+
+    message = (
+        f"SVCB TargetName '{target}' contains underscored label(s) "
+        f"{underscored!r}. CA/Browser Forum and RFC 5280 dNSName SANs forbid "
+        "underscored labels, so a publicly-issued x.509 cert cannot cover "
+        "this name. Per draft-mozleywilliams-dnsop-dnsaid-02 §Known "
+        "Organization the TargetName MUST NOT contain underscores. Pass "
+        "allow_underscore=True AND set "
+        f"{_UNDERSCORE_BYPASS_ENV}=1 in the environment for internal-only "
+        "deployments not behind public PKI."
+    )
+
+    if allow_underscore and _underscore_bypass_env_enabled():
+        logger.warning(
+            "SVCB TargetName allowed despite underscored labels — "
+            "internal-only deployment opt-in (allow_underscore=True + "
+            f"{_UNDERSCORE_BYPASS_ENV} set)",
+            target=target,
+            underscored=underscored,
+            cab_forbidden_chars=True,
+            spec_section="draft-02 §3.2 (Known Organization, Unknown Agent)",
+            warning_class="dns_aid.underscore_bypass",
+            env_gate=_UNDERSCORE_BYPASS_ENV,
+        )
+        return target
+
+    if allow_underscore and not _underscore_bypass_env_enabled():
+        # Caller asked for the bypass but the operator hasn't enabled
+        # it in the environment. Surface the refusal distinctly so the
+        # caller can tell "this is an env-gate issue" from "this is a
+        # genuine validation error."
+        logger.warning(
+            "SVCB TargetName underscore bypass requested but env gate "
+            f"({_UNDERSCORE_BYPASS_ENV}) is not set — refusing",
+            target=target,
+            underscored=underscored,
+            env_gate=_UNDERSCORE_BYPASS_ENV,
+            warning_class="dns_aid.underscore_bypass_env_missing",
+        )
+
+    raise ValidationError("target", message, target)
+
+
+# RFC 8615 well-known URI names are a single path segment under
+# /.well-known/<name>. The IANA registry shows examples like
+# ``agent-card.json``, ``oauth-authorization-server``,
+# ``did-configuration``, ``change-password`` — short, ASCII-safe,
+# unambiguous strings. We constrain to that class to prevent path
+# traversal (`..`), query-string injection (`?`), fragment injection
+# (`#`), embedded slashes, percent-encoded escapes, and any other
+# character that would let an attacker steer the reconstructed URL
+# off of the SVCB target host's `/.well-known/` namespace.
+_WELL_KNOWN_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_WELL_KNOWN_PATH_MAX_LEN = 128
+
+
+def validate_well_known_path(path: str) -> str:
+    """Validate a `well-known` SvcParamKey value.
+
+    Two value shapes are accepted, matching draft Figure 3:
+
+    1. **Bare suffix** — ``agent-card.json`` →
+       reconstructed as ``https://<target>/.well-known/<value>``.
+       Constrained to RFC 8615 single-segment form.
+
+    2. **Absolute origin path** — ``/.well-known/agent-card.json`` or
+       ``/not-well-known/other-card.json`` →
+       used as-is: ``https://<target><value>``. Each path segment is
+       constrained to the same character class as the bare-suffix form;
+       no ``..`` traversal, no empty segments (no ``//``), no query
+       string / fragment / control characters / percent-encoded
+       escapes.
+
+    The discoverer reconstructs the descriptor URL by interpolating the
+    value into a fetched URL. Without validation a publisher (or a
+    SVCB-record forger if DNSSEC isn't enforced) could supply a value
+    containing ``..``, ``?``, ``#``, or backslash and steer the fetch
+    away from the operator's intended location. ``validate_fetch_url``
+    pins the host but doesn't constrain the path.
+
+    Allowed character class per segment: ``[A-Za-z0-9._-]``. Total
+    length 1..128.
+
+    Returns:
+        The validated path (unchanged on success).
+
+    Raises:
+        ValidationError: On empty, oversize, or pattern-mismatched input.
+    """
+    if not isinstance(path, str) or not path:
+        raise ValidationError(
+            "well_known_path",
+            "well-known path must be a non-empty string",
+            path,
+        )
+    if len(path) > _WELL_KNOWN_PATH_MAX_LEN:
+        raise ValidationError(
+            "well_known_path",
+            f"well-known path exceeds {_WELL_KNOWN_PATH_MAX_LEN} characters",
+            path,
+        )
+
+    # Reject any control / URL-special character before we branch on
+    # absolute vs. suffix. These are the characters that could shape
+    # the reconstructed URL into something other than a path lookup
+    # under the SVCB target's origin.
+    for forbidden in ("?", "#", "\\", "%", " ", "\t", "\r", "\n"):
+        if forbidden in path:
+            raise ValidationError(
+                "well_known_path",
+                (
+                    "well-known path must not contain URL control "
+                    f"characters (found {forbidden!r}); reject any "
+                    "embedded slash, '?', '#', percent-encoded "
+                    "escape, or whitespace"
+                ),
+                path,
+            )
+
+    if path.startswith("/"):
+        # Absolute origin path form. Each segment must be a clean
+        # single-segment token; no ``..``, no empty segments (which
+        # would produce ``//`` in the URL).
+        segments = path[1:].split("/")
+        if not segments or not all(segments):
+            raise ValidationError(
+                "well_known_path",
+                "absolute well-known path must not contain empty segments",
+                path,
+            )
+        for seg in segments:
+            if seg == "..":
+                raise ValidationError(
+                    "well_known_path",
+                    "absolute well-known path must not contain '..' (traversal)",
+                    path,
+                )
+            if not _WELL_KNOWN_PATH_PATTERN.match(seg):
+                raise ValidationError(
+                    "well_known_path",
+                    (
+                        f"absolute well-known path segment {seg!r} must "
+                        "match RFC 8615 single-segment form "
+                        "(allowed: A-Z a-z 0-9 . _ - )"
+                    ),
+                    path,
+                )
+        if not any(c.isalnum() for c in path):
+            raise ValidationError(
+                "well_known_path",
+                "well-known path must contain at least one alphanumeric character",
+                path,
+            )
+        return path
+
+    # Bare-suffix form.
+    if not _WELL_KNOWN_PATH_PATTERN.match(path):
+        raise ValidationError(
+            "well_known_path",
+            (
+                "well-known suffix must match RFC 8615 single-segment "
+                "form (allowed: A-Z a-z 0-9 . _ - ); use an absolute "
+                "path starting with '/' if you need a multi-segment "
+                "origin-relative value"
+            ),
+            path,
+        )
+    # `.` is in the allowed character class (needed for names like
+    # `agent-card.json`), but two consecutive dots produce a path
+    # traversal token. Reject explicitly. A path made entirely of
+    # dots / underscores / hyphens with no alphanumeric content is
+    # also nonsense and we refuse it.
+    if ".." in path:
+        raise ValidationError(
+            "well_known_path",
+            "well-known path must not contain '..' (path traversal)",
+            path,
+        )
+    if not any(c.isalnum() for c in path):
+        raise ValidationError(
+            "well_known_path",
+            "well-known path must contain at least one alphanumeric character",
+            path,
+        )
+    return path
+
+
+# Free-form SVCB SvcParam string fields that lack a stricter validator of
+# their own: cap / cap-sha256 / policy / realm / sig / connect-meta /
+# enroll-uri. The presentation-format backends emit each as key="<value>"
+# verbatim, so a double quote, backslash, or control character in the value
+# could break out of the quoting and inject an attacker-controlled sibling
+# SvcParamKey into the authoritative record. These fields are free-form
+# URIs / digests / opaque strings, so (unlike `bap`) we don't pin a shape —
+# we reject only the quote-breakout character class.
+_SVCPARAM_FORBIDDEN = re.compile(r'["\\\x00-\x1f\x7f]')
+_SVCPARAM_MAX_LEN = 2048
+
+
+def validate_svcparam_value(value: str, *, field: str = "svcparam") -> str:
+    """Reject characters that could break SVCB SvcParam quoting.
+
+    Applied to the free-form SvcParam string fields (cap, cap-sha256,
+    policy, realm, sig, connect-meta, enroll-uri) that have no stricter
+    validator. The backends serialize each as ``key="<value>"``, so a
+    double quote, backslash, or control character could break out of the
+    quoting and inject an attacker-controlled sibling SvcParamKey — the
+    same server-side parameter injection that :func:`validate_bap` closes
+    for ``bap``. Enforced at the model boundary so it fires on every
+    construction path (publish, ``to_svcb_record()``, and discovery, where
+    it also drops a forged inbound record).
+
+    Returns the value unchanged on success.
+
+    Raises:
+        ValidationError: on a non-string, oversize, or forbidden-character
+            value.
+    """
+    if not isinstance(value, str):
+        raise ValidationError(field, f"{field} must be a string", value)
+    if len(value) > _SVCPARAM_MAX_LEN:
+        raise ValidationError(field, f"{field} exceeds {_SVCPARAM_MAX_LEN} characters", value)
+    match = _SVCPARAM_FORBIDDEN.search(value)
+    if match:
+        raise ValidationError(
+            field,
+            (
+                f"{field} contains a character that could break SVCB SvcParam "
+                f"quoting ({match.group()!r}); reject double quotes, backslashes, "
+                "and control characters"
+            ),
+            value,
+        )
+    return value

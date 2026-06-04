@@ -4,7 +4,7 @@
 """
 Fetch agent capability document from cap URI (IETF draft-compliant).
 
-Per IETF draft-mozleywilliams-dnsop-dnsaid-01, the SVCB record may contain
+Per IETF draft-mozleywilliams-dnsop-dnsaid-02, the SVCB record may contain
 a `cap` parameter with a URI pointing to a JSON capability document. This module
 fetches and parses that document.
 
@@ -36,6 +36,23 @@ logger = structlog.get_logger(__name__)
 _MAX_CAP_RESPONSE_BYTES = 256_000
 
 
+class CapDigestMismatchError(Exception):
+    """Raised when a fetched cap document's SHA-256 disagrees with the pin.
+
+    Per draft-mozleywilliams-dnsop-dnsaid-02 §6.1, a digest mismatch MUST
+    cause the consumer to refuse to use the record — distinct from a
+    network/parse failure where falling back to a lower-priority source
+    is acceptable. The discoverer catches this explicitly and drops the
+    affected record, rather than silently downgrading to TXT.
+    """
+
+    def __init__(self, cap_uri: str, expected: str, actual: str) -> None:
+        super().__init__(f"cap digest mismatch for {cap_uri}: expected={expected} actual={actual}")
+        self.cap_uri = cap_uri
+        self.expected = expected
+        self.actual = actual
+
+
 @dataclass
 class CapabilityDocument:
     """Parsed capability document from a cap URI."""
@@ -48,10 +65,12 @@ class CapabilityDocument:
     raw_data: dict[str, Any] = field(default_factory=dict)
 
 
-def _verify_cap_digest(content: bytes, expected_sha256: str, cap_uri: str) -> bool:
+def _verify_cap_digest(content: bytes, expected_sha256: str, cap_uri: str) -> None:
     """Verify SHA-256 digest of capability document content.
 
-    Returns True if digest matches, False otherwise.
+    Raises CapDigestMismatchError on mismatch so callers can distinguish
+    a digest failure (MUST refuse, per draft §6.1) from a network/parse
+    failure (fall back to a lower-priority capability source).
     """
     import base64
     import hashlib
@@ -66,8 +85,7 @@ def _verify_cap_digest(content: bytes, expected_sha256: str, cap_uri: str) -> bo
             expected=expected_sha256,
             actual=actual_digest,
         )
-        return False
-    return True
+        raise CapDigestMismatchError(cap_uri, expected_sha256, actual_digest)
 
 
 def _extract_string_list(data: dict[str, Any], key: str) -> list[str]:
@@ -134,7 +152,9 @@ async def fetch_cap_document(
         timeout: HTTP request timeout in seconds.
         expected_sha256: Base64url-encoded SHA-256 digest to verify against
             the fetched content. If provided and the digest doesn't match,
-            returns None. If None, skips integrity verification.
+            raises CapDigestMismatchError (per draft-02 §6.1 the record MUST
+            be refused — distinct from network/parse failures, which return
+            None). If None, skips integrity verification.
 
     Returns:
         CapabilityDocument if successfully fetched and parsed, None otherwise.
@@ -164,8 +184,11 @@ async def fetch_cap_document(
             logger.debug("Cap document fetch failed (non-200)", cap_uri=cap_uri)
             return None
 
-        if expected_sha256 and not _verify_cap_digest(body, expected_sha256, cap_uri):
-            return None
+        # Integrity check — raises CapDigestMismatchError on mismatch.
+        # We let it propagate so the discoverer can refuse the record
+        # rather than silently downgrading to TXT fallback (§6.1).
+        if expected_sha256:
+            _verify_cap_digest(body, expected_sha256, cap_uri)
 
         import json
 
@@ -197,6 +220,10 @@ async def fetch_cap_document(
         )
         return doc
 
+    except CapDigestMismatchError:
+        # Re-raise so the caller can distinguish digest mismatch (MUST
+        # refuse the record per §6.1) from network failures (fall back).
+        raise
     except ResponseTooLargeError:
         logger.warning(
             "Cap document response too large — skipping",

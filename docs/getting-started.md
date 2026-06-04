@@ -292,7 +292,7 @@ asyncio.run(verify_connection())
 ### Infoblox UDDI Limitations & DNS-AID Compliance
 
 > **⚠️ Important**: Infoblox UDDI is **not fully compliant** with the
-> [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/).
+> [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/).
 >
 > Infoblox UDDI SVCB only supports "alias mode" (priority 0) and lacks support for required
 > SVC parameters (`alpn`, `port`, `mandatory`). The DNS-AID draft requires ServiceMode
@@ -560,7 +560,7 @@ dns-aid publish \
     --backend cloudflare
 
 # Verify it was created
-dig _test-agent._mcp._agents.$DNS_AID_TEST_ZONE TXT +short
+dig test-agent.$DNS_AID_TEST_ZONE TXT +short
 
 # View the agent index
 dns-aid index list $DNS_AID_TEST_ZONE --backend cloudflare
@@ -683,27 +683,27 @@ Publishing agent to DNS...
 
 ✓ Agent published successfully!
 
-  FQDN: _test-agent._mcp._agents.yourdomain.com
+  FQDN: test-agent.yourdomain.com
   Endpoint: https://mcp.yourdomain.com:443
 
   Records created:
-    • SVCB _test-agent._mcp._agents.yourdomain.com
-    • TXT _test-agent._mcp._agents.yourdomain.com
+    • SVCB test-agent.yourdomain.com
+    • TXT test-agent.yourdomain.com
 
 Verify with:
-  dig _test-agent._mcp._agents.yourdomain.com SVCB
-  dig _test-agent._mcp._agents.yourdomain.com TXT
+  dig test-agent.yourdomain.com SVCB
+  dig test-agent.yourdomain.com TXT
 ```
 
 ### Step 2: Verify DNS Records
 
 ```bash
 # Using DNS-AID
-dns-aid verify _test-agent._mcp._agents.$DNS_AID_TEST_ZONE
+dns-aid verify test-agent.$DNS_AID_TEST_ZONE
 
 # Using dig (external verification)
-dig _test-agent._mcp._agents.$DNS_AID_TEST_ZONE SVCB +short
-dig _test-agent._mcp._agents.$DNS_AID_TEST_ZONE TXT +short
+dig test-agent.$DNS_AID_TEST_ZONE SVCB +short
+dig test-agent.$DNS_AID_TEST_ZONE TXT +short
 ```
 
 ### Step 3: Discover Agents
@@ -751,7 +751,7 @@ Agent index for yourdomain.com:
 ┌────────────┬──────────┬─────────────────────────────────────────────┐
 │ Name       │ Protocol │ FQDN                                        │
 ├────────────┼──────────┼─────────────────────────────────────────────┤
-│ test-agent │ mcp      │ _test-agent._mcp._agents.yourdomain.com     │
+│ test-agent │ mcp      │ test-agent.yourdomain.com     │
 └────────────┴──────────┴─────────────────────────────────────────────┘
 
 Total: 1 agent(s) in index
@@ -885,7 +885,7 @@ async def main():
         print(f"Found: {agent.name} at {agent.endpoint_url}")
 
     # Verify an agent
-    verification = await verify("_my-agent._mcp._agents.yourdomain.com")
+    verification = await verify("my-agent.yourdomain.com")
     print(f"Security Score: {verification.security_score}/100")
 
 asyncio.run(main())
@@ -902,7 +902,7 @@ enforcing agent access control at the DNS layer.
 ```json
 {
   "version": "1.0",
-  "agent": "_inventory._mcp._agents.example.com",
+  "agent": "inventory.example.com",
   "rules": {
     "allowed_caller_domains": ["ai-platform.example.com"],
     "blocked_caller_domains": ["*.sandbox.example.com"],
@@ -1000,7 +1000,7 @@ private_key, public_key = generate_keypair()
 # Sign a record
 signature = sign_record(
     private_key=private_key,
-    fqdn="_payment._mcp._agents.example.com",
+    fqdn="payment.example.com",
     target="mcp.example.com",
     port=443,
 )
@@ -1009,7 +1009,7 @@ signature = sign_record(
 is_valid = await verify_signature(
     domain="example.com",
     signature=signature,
-    fqdn="_payment._mcp._agents.example.com",
+    fqdn="payment.example.com",
     target="mcp.example.com",
     port=443,
 )
@@ -1040,7 +1040,7 @@ async def main():
     result = await send_a2a_message(
         domain="ai.infoblox.com",
         name="security-analyzer",
-        message="Analyze security of _marketing._a2a._agents.ai.infoblox.com",
+        message="Analyze security of marketing.ai.infoblox.com",
         timeout=60.0,
     )
     if result.success:
@@ -1053,7 +1053,7 @@ asyncio.run(main())
 ```
 
 The discover-first flow:
-1. Queries DNS for `_security-analyzer._a2a._agents.ai.infoblox.com` SVCB record
+1. Queries DNS for `security-analyzer.ai.infoblox.com` SVCB record
 2. Fetches `/.well-known/agent-card.json` for canonical URL and metadata
 3. Validates card URL hostname matches DNS endpoint (prevents internal URL leakage)
 4. Sends the A2A JSON-RPC 2.0 `message/send` request
@@ -1680,4 +1680,4 @@ stable public API. They will be integrated in a future release once the
 
 - Read the [API Reference](api-reference.md)
 - Explore [examples/](../examples/)
-- Review the [IETF draft specification](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/)
+- Review the [IETF draft specification](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/)

@@ -157,7 +157,7 @@ class TestInfobloxNIOSSvcParameters:
             "mandatory": "alpn,port,cap,connect-class",
             "alpn": "h2,h3",
             "port": "443",
-            "bap": "mcp/1,a2a/1",
+            "bap": "mcp=1.0",
             "cap": "https://example.com/.well-known/agent-cap.json",
             "sig": "abc123",
             "connect-class": "lattice",
@@ -168,7 +168,10 @@ class TestInfobloxNIOSSvcParameters:
         as_map = {item["svc_key"]: item for item in converted}
         assert as_map["alpn"]["svc_value"] == ["h2", "h3"]
         assert as_map["alpn"]["mandatory"] is True
-        assert as_map["key65402"]["svc_value"] == ["mcp/1", "a2a/1"]
+        # bap is no longer in _SPLIT_VALUE_KEYS (draft-02 §5.1 makes it
+        # a single scalar) — NIOS wraps non-split values in a 1-element
+        # list for the API shape regardless.
+        assert as_map["key65402"]["svc_value"] == ["mcp=1.0"]
         assert as_map["port"]["svc_value"] == ["443"]
         assert as_map["key65400"]["mandatory"] is True
         assert as_map["key65405"]["svc_value"] == ["abc123"]
@@ -177,12 +180,12 @@ class TestInfobloxNIOSSvcParameters:
 
     def test_svc_parameters_preserves_numeric_keys(self) -> None:
         converted = InfobloxNIOSBackend._svc_parameters_from_params(
-            {"mandatory": "key65402,port", "key65402": "mcp/1,a2a/1", "port": "443"}
+            {"mandatory": "key65402,port", "key65402": "mcp=1.0", "port": "443"}
         )
         as_map = {item["svc_key"]: item for item in converted}
 
         assert as_map["key65402"]["mandatory"] is True
-        assert as_map["key65402"]["svc_value"] == ["mcp/1", "a2a/1"]
+        assert as_map["key65402"]["svc_value"] == ["mcp=1.0"]
         assert as_map["port"]["mandatory"] is True
 
     def test_format_svc_parameters_for_value(self) -> None:

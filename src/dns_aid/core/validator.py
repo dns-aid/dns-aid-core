@@ -5,6 +5,25 @@
 DNS-AID Validator: Verify agent DNS records and security.
 
 Handles DNSSEC validation, DANE/TLSA verification, and endpoint health checks.
+
+DNSSEC requirement posture (draft-mozleywilliams-dnsop-dnsaid-02 §6.2):
+
+The draft uses the **SHOULD** posture, not MAY/MUST. Verbatim:
+
+    "Consumers SHOULD authenticate the TLS endpoint of a DNS-AID agent
+    using DANE TLSA records (RFC 6698) wherever both DNSSEC and TLSA
+    are available."
+
+DNS-AID records served without DNSSEC continue to verify under this
+module — DNSSEC absence is not in itself a failure. When TLSA records
+ARE present, DNSSEC absence makes the TLSA records untrustworthy
+(RFC 6698 §10.1 — TLSA without DNSSEC offers no integrity guarantee).
+
+When TLSA records are present without a validated DNSSEC chain the
+validator treats DANE as untrustworthy: ``dane_valid`` is demoted to
+``None`` and the +15 ``security_score`` credit is gated on
+``dnssec_valid``, so an unsigned TLSA record cannot inflate the trust
+score.
 """
 
 from __future__ import annotations
@@ -41,7 +60,7 @@ async def verify(fqdn: str, *, verify_dane_cert: bool = False) -> VerifyResult:
 
     Args:
         fqdn: Fully qualified domain name of agent record
-              (e.g., "_chat._a2a._agents.example.com")
+              (e.g., "chat.example.com")
         verify_dane_cert: If True, perform full DANE certificate matching
                          (connect to endpoint and compare TLS cert against
                          TLSA record). Default False (existence check only).
@@ -91,10 +110,18 @@ async def verify(fqdn: str, *, verify_dane_cert: bool = False) -> VerifyResult:
                 "use verify_dane_cert=True for full certificate matching)"
             )
 
-        # DANE without DNSSEC is meaningless — per RFC 6698 and IETF draft,
-        # TLSA records MUST be DNSSEC-validated to be trusted.
+        # DANE without DNSSEC carries no integrity guarantee — RFC 6698
+        # §10.1 and draft-02 §Security Considerations both treat TLSA
+        # without a validated chain as untrustworthy. Demote the outcome
+        # to None (DANE state unknown), not just append to the note, so
+        # downstream consumers — including security_score — don't credit
+        # a TLSA record that hasn't been DNSSEC-validated.
         if result.dane_valid is not None and not result.dnssec_valid:
-            result.dane_note += " ⚠ DNSSEC not validated — DANE requires DNSSEC to be trustworthy"
+            result.dane_note += (
+                " ⚠ DNSSEC not validated — DANE requires DNSSEC to be "
+                "trustworthy; demoting DANE outcome to unknown"
+            )
+            result.dane_valid = None
 
     # 4. Check endpoint reachability
     if target and port:

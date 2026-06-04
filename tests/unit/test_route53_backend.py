@@ -608,6 +608,7 @@ class TestRoute53PublishAgentParamDemotion:
             port=443,
             capabilities=["testing"],
             realm="demo",
+            publish_walkable_alias=True,
         )
 
         backend = Route53Backend(zone_id="Z123")
@@ -617,10 +618,12 @@ class TestRoute53PublishAgentParamDemotion:
         with patch.object(backend, "_get_client", return_value=mock_client):
             records = await backend.publish_agent(agent)
 
-        # Should create both SVCB and TXT
-        assert len(records) == 2
+        # Should create SVCB primary, TXT companion, and the walkable
+        # AliasMode (default-on per draft-02).
+        assert len(records) == 3
         assert records[0].startswith("SVCB")
         assert records[1].startswith("TXT")
+        assert records[2].startswith("SVCB(AliasMode)")
 
         # Inspect the SVCB call — must NOT contain key65404
         svcb_call = mock_client.change_resource_record_sets.call_args_list[0]
@@ -651,6 +654,7 @@ class TestRoute53PublishAgentParamDemotion:
             target_host="simple.example.com",
             port=443,
             capabilities=["chat"],
+            publish_walkable_alias=True,
         )
 
         backend = Route53Backend(zone_id="Z123")
@@ -660,7 +664,8 @@ class TestRoute53PublishAgentParamDemotion:
         with patch.object(backend, "_get_client", return_value=mock_client):
             records = await backend.publish_agent(agent)
 
-        assert len(records) == 2
+        # SVCB + TXT + walkable AliasMode (default-on per draft-02)
+        assert len(records) == 3
         # No dnsaid_ entries in TXT
         txt_call = mock_client.change_resource_record_sets.call_args_list[1]
         txt_values = txt_call[1]["ChangeBatch"]["Changes"][0]["ResourceRecordSet"][
@@ -683,7 +688,7 @@ class TestRoute53PublishAgentParamDemotion:
             capabilities=["dns"],
             realm="production",
             policy_uri="urn:policy:strict",
-            bap=["mcp/1", "a2a/1"],
+            bap="mcp=2.1",
         )
 
         backend = Route53Backend(zone_id="Z123")

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dns-aid"
-version = "0.23.0"
+version = "0.24.0"
 description = "DNS-based Agent Identification and Discovery - Reference Implementation"
 readme = "README.md"
 license = "Apache-2.0"
@@ -52,7 +52,7 @@ mcp = [
     "uvicorn>=0.30.0",
     # Direct floors on transitive deps pulled by `mcp` to close Dependabot alerts
     # (mcp's upstream constraints are looser than the patched versions need).
-    "pyjwt>=2.12.0",            # CVE-2026-32597 (high) — accepts unknown 'crit' header
+    "pyjwt>=2.13.0",            # PYSEC-2026-175/177/178/179 (4 vulns); supersedes CVE-2026-32597 (unknown 'crit' header)
     "python-multipart>=0.0.27", # CVE-2026-42561 / GHSA-pp6c-gr5w-3c5g (high) — DoS via unbounded multipart headers; supersedes CVE-2026-40347
 ]
 route53 = [
@@ -131,7 +131,7 @@ all = [
     "mcp>=1.0.0",
     "uvicorn>=0.30.0",
     # Transitive floors via mcp (Dependabot)
-    "pyjwt>=2.12.0",
+    "pyjwt>=2.13.0",
     "python-multipart>=0.0.27",
     # Backends: Route53, Cloudflare, NS1, Cloud DNS, Infoblox BloxOne, NIOS, DDNS
     "boto3>=1.34.0",

@@ -12,7 +12,7 @@ httpx.AsyncClient mocks (discoverer/validator read path).
 from __future__ import annotations
 
 import json
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import urlparse
@@ -273,8 +273,29 @@ class MockDNSBridge:
             # 5. Default: connection error
             raise httpx.ConnectError(f"Mock: no route for {url}")
 
+        def mock_stream(method: str, url: str, **kwargs: Any):
+            # http_index now streams the body with a size cap instead of
+            # calling response.json(). Reuse the same URL routing and adapt
+            # the resolved response to the streaming interface.
+            @asynccontextmanager
+            async def _cm():
+                resp = await mock_get(url)  # raises ConnectError on no route
+                body = getattr(resp, "content", b"") or b""
+
+                async def _aiter_bytes():
+                    yield body
+
+                stream_resp = MagicMock()
+                stream_resp.status_code = resp.status_code
+                stream_resp.headers = {}
+                stream_resp.aiter_bytes = _aiter_bytes
+                yield stream_resp
+
+            return _cm()
+
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(side_effect=mock_get)
+        mock_client.stream = MagicMock(side_effect=mock_stream)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         return mock_client

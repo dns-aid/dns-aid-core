@@ -380,6 +380,37 @@ class TestPublishCommand:
         )
         assert result.exit_code == 1
 
+    @patch("dns_aid.cli.main.run_async")
+    def test_publish_bap_scalar_passthrough(self, mock_run_async):
+        """CLI ``--bap`` accepts the draft-02 scalar form (``mcp=1.0``,
+        bare ``mcp``) and passes it through verbatim. Regression for
+        Igor's #158 review item 2: the breaking direction must be
+        pinned with a test."""
+        mock_run_async.side_effect = [
+            _make_publish_result(),
+            _make_index_result(created=True),
+        ]
+        result = runner.invoke(
+            app,
+            [
+                "publish",
+                "--name",
+                "chat",
+                "--domain",
+                "example.com",
+                "--backend",
+                "mock",
+                "--bap",
+                "mcp=1.0",
+            ],
+        )
+        assert result.exit_code == 0
+        # publish() is a coroutine; the kwargs are baked into it before
+        # run_async receives it, so the kwarg passthrough is verified by
+        # the publisher tests. Here we just confirm the CLI accepted the
+        # scalar form without exploding.
+        assert "published successfully" in _strip_ansi(result.output)
+
 
 # ============================================================================
 # DELETE COMMAND TESTS

@@ -9,27 +9,11 @@
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
 [![PyPI](https://img.shields.io/pypi/v/dns-aid)](https://pypi.org/project/dns-aid/)
 
-<!-- mcp-name: io.github.dns-aid/dns-aid -->
-
 **DNS-based Agent Identification and Discovery**
 
-Reference implementation of the DNS-AID specification, developed at the IETF: https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/.
+Reference implementation for [IETF draft-mozleywilliams-dnsop-dnsaid-02](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
 
 DNS-AID enables AI agents to discover each other via DNS, using the internet's existing naming infrastructure instead of centralized registries or hardcoded URLs.
-
-## Relationship to IETF
-
-The DNS-AID specification is being developed within the IETF: https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/.
-
-This repository provides a reference implementation.
-
-This project does not define the specification. The IETF draft is authoritative.
-
-## Scope of this Repository
-
-This project focuses on implementation, tooling, and ecosystem activities.
-
-Changes to protocol behavior should be discussed within the IETF.
 
 > **New to DNS-AID?** Start with the [Getting Started Guide](docs/getting-started.md) for install, first agent publication, and backend setup.
 
@@ -97,7 +81,7 @@ result = await dns_aid.discover(
 )
 
 # Verify an agent's DNS records
-result = await dns_aid.verify("_my-agent._mcp._agents.example.com")
+result = await dns_aid.verify("my-agent.example.com")
 print(f"Security Score: {result.security_score}/100")
 ```
 
@@ -278,7 +262,7 @@ dns-aid discover example.com --use-http-index
 dns-aid discover example.com --json
 
 # Verify DNS records
-dns-aid verify _my-agent._mcp._agents.example.com
+dns-aid verify my-agent.example.com
 
 # List DNS-AID records in a zone
 dns-aid list example.com
@@ -397,7 +381,7 @@ agents = await dns_aid.discover("example.com", use_http_index=True)
 | **DNS (default)** | Maximum decentralization, offline caching, minimal round trips |
 | **HTTP Index** | Rich metadata upfront, ANS compatibility, model cards, capabilities, direct endpoints |
 
-**FQDN as Source of Truth (v0.4.7):** The HTTP index only needs to provide each agent's FQDN (e.g., `_booking._mcp._agents.example.com`). Agent name and protocol are extracted from the FQDN — no separate `protocols` field needed. DNS SVCB lookup then resolves the authoritative endpoint.
+**FQDN as Source of Truth (v0.4.7):** The HTTP index only needs to provide each agent's FQDN (e.g., `booking.example.com`). Agent name and protocol are extracted from the FQDN — no separate `protocols` field needed. DNS SVCB lookup then resolves the authoritative endpoint.
 
 **Discovery Transparency (v0.4.6+):** Each discovered agent includes source fields showing how data was resolved:
 
@@ -491,14 +475,14 @@ Claude will:
 DNS-AID uses SVCB records (RFC 9460) to advertise AI agents:
 
 ```
-_chat._a2a._agents.example.com. 3600 IN SVCB 1 chat.example.com. alpn="a2a" port=443 mandatory="alpn,port"
-_chat._a2a._agents.example.com. 3600 IN TXT "capabilities=chat,assistant" "version=1.0.0"
+chat.example.com. 3600 IN SVCB 1 chat.example.com. alpn="a2a" port=443 mandatory="alpn,port"
+chat.example.com. 3600 IN TXT "capabilities=chat,assistant" "version=1.0.0"
 ```
 
 **DNS-AID Custom SVCB Parameters (v0.4.8+):** Per the IETF draft, SVCB records can carry additional custom parameters for richer agent metadata:
 
 ```
-_booking._mcp._agents.example.com. SVCB 1 mcp.example.com. alpn="mcp" port=443 \
+booking.example.com. SVCB 1 mcp.example.com. alpn="mcp" port=443 \
     cap="https://mcp.example.com/.well-known/agent-cap.json" \
     cap-sha256="dGVzdGhhc2g" bap="mcp/1,a2a/1" \
     policy="https://example.com/agent-policy" realm="production"
@@ -526,7 +510,7 @@ This allows any DNS client to discover agents without proprietary protocols or c
   │  Step 1: Fetch HTTP Index (primary)                             │
   │  ──────────────────────────────────                             │
   │  GET https://index.aiagents.salesforce.com/index-wellknown      │
-  │  Response: [{"fqdn":"_chat._a2a._agents.salesforce.com",...}]   │
+  │  Response: [{"fqdn":"chat.salesforce.com",...}]   │
   │                                                                 │
   │  Fallback: Query TXT Index via DNS                              │
   │  Query: _index._agents.salesforce.com TXT                       │
@@ -536,7 +520,7 @@ This allows any DNS client to discover agents without proprietary protocols or c
   ┌──┴──────────────────────────────────────────────────────────────┐
   │  Step 2: Query SVCB per agent                                   │
   │  ────────────────────────────                                   │
-  │  Query: _chat._a2a._agents.salesforce.com SVCB                  │
+  │  Query: chat.salesforce.com SVCB                  │
   │  Response: SVCB 1 chat.salesforce.com. alpn="a2a" port=443      │
   │            cap="https://chat.salesforce.com/.well-known/cap.json"│
   │  (DNSSEC validated)                                             │
@@ -553,7 +537,7 @@ This allows any DNS client to discover agents without proprietary protocols or c
   ┌──┴──────────────────────────────────────────────────────────────┐
   │  Step 3: TXT Capabilities (fallback if no cap document)         │
   │  ──────────────────────────────────────────────────             │
-  │  Query: _chat._a2a._agents.salesforce.com TXT                   │
+  │  Query: chat.salesforce.com TXT                   │
   │  Response: "capabilities=chat,support" "version=1.0.0"          │
   └──┬──────────────────────────────────────────────────────────────┘
      │                            │                               │
@@ -1025,9 +1009,81 @@ Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to it
 - **Simple API**: Well-documented REST API v4
 - **Full DNS-AID compliance**: Supports ServiceMode SVCB with all parameters
 
-## Background and Comparison
+## Why DNS-AID?
 
-For background on how DNS-AID compares to other agent-discovery approaches (ANS, Google A2A+UCP, `.agent` gTLD, AgentDNS, NANDA, Web3, `ai.txt`) and "The Sovereignty Question", see [docs/positioning.md](docs/positioning.md). That content is non-normative — protocol positioning is determined at the IETF.
+### vs Competing Proposals
+
+| Approach | Problem | DNS-AID Advantage |
+|----------|---------|-------------------|
+| **ANS (GoDaddy)** | Centralized registry, KYC required, single gatekeeper | Federated — you control your domain, publish instantly |
+| **Google (A2A + UCP)** | Discovery via Gemini/Search, payments via UCP | Neutral discovery — no platform lock-in or transaction fees |
+| **.agent gTLD** | Requires ICANN approval, ongoing domain fees | Works NOW with domains you already own |
+| **AgentDNS (China Telecom)** | Requires 6G infrastructure, carrier control | Works NOW on existing DNS infrastructure |
+| **NANDA (MIT)** | New P2P overlay network, new ops paradigm | Uses infrastructure your DNS team already operates |
+| **Web3 (ERC-8004)** | Gas fees, crypto wallets, enterprise-hostile | Free DNS queries, no blockchain complexity |
+| **ai.txt / llms.txt** | No integrity verification, free-form JSON | DNSSEC cryptographic verification, structured SVCB |
+
+### Feature Comparison
+
+| Feature | DNS-AID | Central Registry | ai.txt |
+|---------|---------|------------------|--------|
+| **Decentralized** | ✅ | ❌ | ✅ |
+| **Secure (DNSSEC)** | ✅ | Varies | ❌ |
+| **Sovereign** | ✅ | ❌ | ✅ |
+| **Standards-based** | ✅ (IETF) | ❌ | ❌ |
+| **Works with existing infra** | ✅ | ❌ | ✅ |
+
+### The Sovereignty Question
+
+> **Who controls agent discovery?**
+> - ANS: GoDaddy (US company as gatekeeper)
+> - AgentDNS: China Telecom (state-owned carrier)
+> - Web3: Ethereum Foundation
+> - **DNS-AID: You control your own domain**
+>
+> DNS-AID preserves sovereignty. Organizations and nations maintain control over their own agent namespaces with no central authority that can block, censor, or surveil agent discovery.
+
+### Google's Agent Ecosystem
+
+Google is building a full-stack agent platform: **A2A** (communication), **UCP** (payments), and **Gemini/Search** (discovery). While A2A is an open protocol, discovery through Google surfaces means:
+- Google controls visibility (pay-to-rank)
+- Transaction fees via [UCP](https://developers.google.com/merchant/ucp)
+- Platform dependency for reach
+
+**DNS-AID complements A2A** by providing neutral, decentralized discovery — find agents anywhere, not just through Google.
+
+### Understanding the .agent Domain Approach
+
+The [Agent Community](https://agentcommunity.org/) is pursuing a `.agent` top-level domain through ICANN's [new gTLD program](https://newgtlds.icann.org/). Here's how the two approaches compare:
+
+**How .agent Domains Would Work:**
+1. Apply to ICANN for `.agent` gTLD (~$185,000 application fee)
+2. Wait 9-20 months for ICANN approval process
+3. Build registry infrastructure (Open Agent Registry, Inc.)
+4. Sell `.agent` domains through accredited registrars
+5. Users pay annual registration fees (~$15-50/year per domain)
+
+**How DNS-AID Works:**
+1. Use your existing domain (you already own `yourcompany.com`)
+2. Add DNS-AID records to your zone (`myagent.yourcompany.com`)
+3. Start discovering and being discovered immediately
+
+| Factor | .agent gTLD | DNS-AID |
+|--------|-------------|---------|
+| **Cost to publish** | ~$15-50/year domain fee | Free (use existing domain) |
+| **Time to start** | Months (gTLD launch + registration) | Minutes |
+| **Who controls discovery** | Registry operator | You (your domain) |
+| **Works today** | ❌ Pending ICANN approval | ✅ Works now |
+| **Requires new infrastructure** | ✅ Registry, registrars | ❌ Uses existing DNS |
+| **Memorable names** | ✅ `myagent.agent` | `myagent.example.com` |
+
+**The Friendly Take:**
+
+Both approaches share the goal of making AI agents discoverable. The `.agent` gTLD creates a dedicated namespace that's easy to remember (`mycompany.agent`), while DNS-AID leverages existing infrastructure so you can start publishing agents today.
+
+DNS-AID doesn't require waiting for ICANN approval or paying for new domains—it works with the DNS infrastructure your organization already operates. If you own `example.com`, you can publish agents to `myagent.example.com` right now.
+
+*Fun fact: When `.agent` domains become available, DNS-AID records will work on them too! The approaches are complementary.*
 
 ## Examples
 
@@ -1076,6 +1132,6 @@ Apache 2.0
 
 ## Contributing
 
-Contributions welcome! This project supports an implementation ecosystem with planned hosting in the Linux Foundation. The DNS-AID specification is developed in the IETF.
+Contributions welcome! This project is intended for contribution to the Linux Foundation Agent AI Foundation.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
