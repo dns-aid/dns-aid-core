@@ -1,0 +1,74 @@
+name: _draft-watch-reusable
+
+# Reusable workflow that watches the IETF Datatracker for state changes on
+# a pinned draft and maintains a single canonical tracking issue in the
+# calling repository. Designed to be invoked from a PR-triggered consumer
+# workflow.
+#
+# Source of truth: dns-aid/dns-aid-core. Consumer repos reference this
+# file via:
+#
+#   jobs:
+#     draft-watch:
+#       uses: dns-aid/dns-aid-core/.github/workflows/_draft-watch-reusable.yml@main
+#       with:
+#         tag_user: nicknacnic
+#       permissions:
+#         contents: read
+#         issues: write
+#
+# The status check name surfaced to PR reviewers is "IETF draft watch".
+# The job ALWAYS exits 0 — this signal is informational, never blocks merge.
+
+on:
+  workflow_call:
+    inputs:
+      tracking_config_path:
+        description: "Path to the per-repo tracking config (default: .github/draft-tracking.json)"
+        required: false
+        type: string
+        default: ".github/draft-tracking.json"
+      issue_title:
+        description: "Title of the canonical tracking issue"
+        required: false
+        type: string
+        default: "[draft-watch] IETF DNS-AID draft state"
+      tag_user:
+        description: "GitHub @user to ping on state change (no leading @)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  draft-watch:
+    name: IETF draft watch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          # Default behaviour: on pull_request events, actions/checkout
+          # checks out the merge-ref (what the code would look like
+          # post-merge). That's what we want — the script and the config
+          # both need to exist. Fork PRs can't escalate from this: the
+          # worst case is a weird-looking comment on a public issue
+          # (no DDNS credentials, no policy decisions, no merge gate).
+          persist-credentials: false
+
+      - name: Run draft watcher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TRACKING_CONFIG_PATH: ${{ inputs.tracking_config_path }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          TAG_USER: ${{ inputs.tag_user }}
+        run: |
+          python3 scripts/check_draft_status.py \
+            --config "$TRACKING_CONFIG_PATH" \
+            --issue-title "$ISSUE_TITLE" \
+            --tag-user "$TAG_USER" \
+            --manage-issue
