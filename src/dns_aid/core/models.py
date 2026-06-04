@@ -18,6 +18,31 @@ from pydantic import BaseModel, Field, field_validator
 
 from dns_aid.utils.validation import validate_connect_class
 
+# Capability provenance — single source of truth.
+#
+# Each value records WHERE a record's capabilities came from, so
+# downstream consumers can make trust / audit / fallback decisions
+# without re-deriving the chain. Add new values here (and only here)
+# — the discoverer, SDK, indexer, and AgentRecord all import this
+# symbol so adding a value automatically widens every type-check site.
+#
+# Priority (most trusted → least): cap_uri > well_known > agent_card
+# > http_index > txt_fallback. ``descriptor_unreachable`` is a
+# diagnostic source: the SVCB record declared a cap/well-known
+# locator but the fetch failed (timeout, TLS error, 5xx). Recording
+# this as a distinct source lets callers tell "no descriptor
+# declared" from "descriptor declared but unreachable right now"
+# without scraping log lines.
+CapabilitySource = Literal[
+    "cap_uri",
+    "well_known",
+    "agent_card",
+    "http_index",
+    "txt_fallback",
+    "descriptor_unreachable",
+    "none",
+]
+
 # DNS-AID custom SVCB param key mapping (IETF draft-02 §4 IANA Considerations).
 # These use the RFC 9460 Private Use range (65280-65534).
 # Once IANA assigns official SvcParamKey numbers, update these values.
@@ -25,7 +50,7 @@ from dns_aid.utils.validation import validate_connect_class
 # Six of the entries below (cap, cap-sha256, bap, policy, realm, well-known)
 # correspond to keys that draft-02 requests IANA register normatively. The
 # remaining four (sig, connect-class, connect-meta, enroll-uri) are not in
-# the draft-02 normative set; they back features discussed in -02 §FutureWork
+# the draft-02 normative set; they back features discussed in -02 §5 (Future Work and Experimental Mechanisms)
 # or shipping in dns-aid-core as extensions and remain at private-use code
 # points pending a follow-up discussion.
 DNS_AID_KEY_MAP: dict[str, str] = {
@@ -188,7 +213,7 @@ class SvcbRecord(BaseModel):
     @field_validator("target", mode="after")
     @classmethod
     def _enforce_no_underscore_in_target(cls, v: str) -> str:
-        """Enforce draft-02 §Known Organization at the type boundary.
+        """Enforce draft-02 §3.2 (Known Organization, Unknown Agent) at the type boundary.
 
         Earlier the no-underscore rule fired only inside ``publish()``;
         anyone constructing an ``SvcbRecord`` directly (or via
@@ -427,15 +452,15 @@ class AgentRecord(BaseModel):
     )
 
     # Capability source tracking
-    capability_source: (
-        Literal["cap_uri", "well_known", "agent_card", "http_index", "txt_fallback", "none"] | None
-    ) = Field(
+    capability_source: CapabilitySource | None = Field(
         default=None,
         description="Where capabilities were sourced from: 'cap_uri' (SVCB cap param), "
         "'well_known' (SVCB well-known param, reconstructed against the target host), "
         "'agent_card' (A2A /.well-known/agent-card.json skills), "
         "'http_index' (HTTP index capabilities), "
-        "'txt_fallback' (TXT record), or 'none'",
+        "'txt_fallback' (TXT record), "
+        "'descriptor_unreachable' (cap/well-known declared but fetch failed), "
+        "or 'none'",
     )
 
     # DNS settings
@@ -672,6 +697,18 @@ class PublishResult(BaseModel):
     backend: str = Field(..., description="DNS backend used")
     success: bool = Field(default=True, description="Whether publish succeeded")
     message: str | None = Field(default=None, description="Status message")
+    # Caller-visible advisories raised during the publish path (e.g.
+    # ``dns_aid.underscore_bypass`` when allow_underscore_target=True
+    # AND DNS_AID_ALLOW_UNDERSCORE_TARGET is set in the env). These
+    # are non-fatal — the publish still succeeded — but downstream
+    # observability needs to count and alert on them without scraping
+    # logs.
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Non-fatal advisories raised during publish. Each entry is a stable "
+        "warning_class identifier (e.g. 'dns_aid.underscore_bypass') so consumers can "
+        "match exactly without log-string parsing.",
+    )
 
 
 class VerifyResult(BaseModel):

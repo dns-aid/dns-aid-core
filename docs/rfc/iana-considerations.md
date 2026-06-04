@@ -14,7 +14,7 @@ Per [RFC 8552](https://www.rfc-editor.org/rfc/rfc8552.html) (Scoped Interpretati
 | SVCB | `_index` | draft-mozleywilliams-dnsop-dnsaid-02 |
 | TXT | `_agents-challenge` | draft-mozleywilliams-dnsop-dnsaid-02 (experimental, §DCV) |
 
-**Purpose:** Under -02, the agent's primary owner name is a flat FQDN `{agent}.{domain}` (no underscore-prefix labels, x.509-SAN-valid). Operators MAY additionally publish a walkable AliasMode record at `{agent}._agents.{domain}` so that crawlers and DNS-SD-style consumers can enumerate. The `_index._agents.{domain}` SVCB record points at the organization-level agent index. The `_agents-challenge.{domain}` TXT record is used by the experimental domain-control-validation mechanism described in -02 §FutureWork.
+**Purpose:** Under -02, the agent's primary owner name is a flat FQDN `{agent}.{domain}` (no underscore-prefix labels, x.509-SAN-valid). Operators MAY additionally publish a walkable AliasMode record at `{agent}._agents.{domain}` so that crawlers and DNS-SD-style consumers can enumerate. The `_index._agents.{domain}` SVCB record points at the organization-level agent index. The `_agents-challenge.{domain}` TXT record is used by the experimental domain-control-validation mechanism described in -02 §5 (Future Work and Experimental Mechanisms).
 
 **Examples:**
 ```
@@ -114,14 +114,14 @@ This document requests IANA registration of six SvcParamKeys per RFC 9460 §14.3
 | `realm` | 65404 | Token | Opaque token for multi-tenant scoping or authz realm selection during protocol bootstrapping. Payload semantics deferred to a future revision. | draft-mozleywilliams-dnsop-dnsaid-02 |
 | `well-known` | 65409 | RFC 8615 path | Well-known URI path suffix (e.g., `agent-card.json`). Consumer constructs `https://<target>/.well-known/<value>`. Complements `cap` (which is a flexible locator); the two are independent keys. | draft-mozleywilliams-dnsop-dnsaid-02 |
 
-The following keys remain at private-use code points but are NOT in the -02 normative SvcParamKey set; they back features that are either in §FutureWork or shipping in dns-aid-core as extensions:
+The following keys remain at private-use code points but are NOT in the -02 normative SvcParamKey set; they back features that are either in §5 (Future Work and Experimental Mechanisms) or shipping in dns-aid-core as extensions:
 
 | Parameter | Key ID | Notes |
 |-----------|--------|-------|
 | `sig` | 65405 | JWS signature over the record. Backs the optional record-signature flow. |
-| `connect-class` | 65406 | Transport-class hint (§FutureWork — `direct`, `lattice`, `apphub-psc`). |
+| `connect-class` | 65406 | Transport-class hint (§5 (Future Work and Experimental Mechanisms) — `direct`, `lattice`, `apphub-psc`). |
 | `connect-meta` | 65407 | Transport-class metadata for the selected `connect-class`. |
-| `enroll-uri` | 65408 | Zero-trust enrollment URI (§FutureWork). |
+| `enroll-uri` | 65408 | Zero-trust enrollment URI (§5 (Future Work and Experimental Mechanisms)). |
 
 **Wire Format:** Until IANA allocates permanent key IDs, implementations MUST use the generic `keyNNNNN` presentation format (e.g., `key65400="https://..."`) for interoperability with DNS providers that do not recognize custom parameter names. See Section 2.2 of RFC 9460.
 

@@ -27,9 +27,22 @@ from dns_aid.core.a2a_card import A2AAgentCard, fetch_agent_card
 from dns_aid.core.cap_fetcher import fetch_cap_document
 from dns_aid.core.filters import apply_filters
 from dns_aid.core.http_index import HttpIndexAgent, fetch_http_index_or_empty
-from dns_aid.core.models import AgentRecord, DiscoveryResult, DNSSECError, Protocol
+from dns_aid.core.models import (
+    AgentRecord,
+    CapabilitySource,
+    DiscoveryResult,
+    DNSSECError,
+    Protocol,
+)
 
 logger = structlog.get_logger(__name__)
+
+# Per-agent total-time budget for descriptor (cap / well-known) fetch.
+# Slightly above fetch_cap_document's default 10s HTTP timeout so a
+# normal slow response still completes, but bounds pathological cases
+# (DNS hangs, TLS handshake stalls, redirect chains). Cross-agent
+# bulk discovery would otherwise serialize on the slowest endpoint.
+_DESCRIPTOR_FETCH_BUDGET_SECONDS: float = 12.0
 
 
 def _normalize_protocol(protocol: str | Protocol | None) -> Protocol | None:
@@ -105,7 +118,11 @@ async def discover(
     domain: str,
     protocol: str | Protocol | None = None,
     name: str | None = None,
-    require_dnssec: bool = False,  # Default False for now, True in production
+    # draft-02 §6.2 relaxes DNSSEC to MAY by default; MUST applies only when
+    # TLSA / DANE is in use (RFC 6698 §10.1). Default False matches the
+    # baseline SVCB-only deployment posture. Opt-in True when the consumer
+    # wants AD-flag enforcement or when records carry TLSA hints.
+    require_dnssec: bool = False,
     use_http_index: bool = False,
     enrich_endpoints: bool = True,
     verify_signatures: bool = False,
@@ -133,7 +150,11 @@ async def discover(
         domain: Domain to search for agents (e.g., "example.com").
         protocol: Filter by protocol ("a2a", "mcp", or None for all).
         name: Filter by specific agent name (or None for all).
-        require_dnssec: Require DNSSEC validation (raises if invalid).
+        require_dnssec: Require DNSSEC validation (raises if invalid). Per
+            draft-02 §6.2 DNSSEC is MAY by default; consumers SHOULD set this
+            to True for TLSA/DANE-bound deployments, where unsigned records
+            cannot be trusted (RFC 6698 §10.1). SVCB-only deployments may
+            leave this False.
         use_http_index: If True, fetch agent list from HTTP endpoint
             (``/.well-known/agents-index.json``) instead of DNS-only discovery.
         enrich_endpoints: If True (default), fetch ``.well-known/agent-card.json``
@@ -390,9 +411,7 @@ async def _query_single_agent(
             # the reconstructed well-known URL rather than treating the
             # non-fetchable `cap` as terminal.
             capabilities: list[str] = []
-            capability_source: Literal[
-                "cap_uri", "well_known", "agent_card", "http_index", "txt_fallback", "none"
-            ] = "none"
+            capability_source: CapabilitySource = "none"
             agent_card = None
             cap_sha256_applied = False
 
@@ -456,9 +475,42 @@ async def _query_single_agent(
                 )
 
             if effective_descriptor_url:
-                cap_doc = await fetch_cap_document(
-                    effective_descriptor_url, expected_sha256=cap_sha256
-                )
+                # Per-agent total-time budget on descriptor fetch.
+                # fetch_cap_document already times out individual HTTP
+                # operations, but a chain of redirects + DNS + TLS can
+                # still pile up; cap the whole fetch so one slow agent
+                # can't stall a bulk-discovery loop. Igor flagged this
+                # on PR #154 v2 review as a reliability item.
+                cap_doc = None
+                descriptor_reachable = True
+                try:
+                    cap_doc = await asyncio.wait_for(
+                        fetch_cap_document(effective_descriptor_url, expected_sha256=cap_sha256),
+                        timeout=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
+                    )
+                except TimeoutError:
+                    descriptor_reachable = False
+                    logger.warning(
+                        "Descriptor fetch exceeded per-agent budget — "
+                        "recording capability_source=descriptor_unreachable",
+                        fqdn=fqdn,
+                        descriptor_url=effective_descriptor_url,
+                        budget_seconds=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
+                    )
+
+                # Reachability signal: the operator declared a descriptor
+                # locator (cap or well-known) but we couldn't pull bytes
+                # off the wire. Distinct from "no descriptor declared",
+                # so consumers can tell transient outages from
+                # mis-configurations.
+                if cap_doc is None and descriptor_reachable:
+                    descriptor_reachable = False
+                    logger.debug(
+                        "Descriptor fetch returned no document",
+                        fqdn=fqdn,
+                        descriptor_url=effective_descriptor_url,
+                    )
+
                 if cap_doc and cap_doc.capabilities:
                     capabilities = cap_doc.capabilities
                     capability_source = descriptor_source_label
@@ -478,14 +530,17 @@ async def _query_single_agent(
                         capabilities=capabilities,
                         cap_sha256_applied=cap_sha256_applied,
                     )
+                elif not descriptor_reachable:
+                    capability_source = "descriptor_unreachable"
 
                 # Reuse raw data as A2AAgentCard (avoids redundant fetch later)
                 if cap_doc and cap_doc.raw_data:
                     try:
                         agent_card = A2AAgentCard.from_dict(cap_doc.raw_data)
                         logger.debug(
-                            "Parsed A2A Agent Card from cap URI response",
+                            "Parsed A2A Agent Card from descriptor response",
                             fqdn=fqdn,
+                            descriptor_source=descriptor_source_label,
                             card_name=agent_card.name,
                             skills_count=len(agent_card.skills),
                         )
@@ -920,7 +975,7 @@ def _http_agent_to_record(
 
     # Extract capabilities from HTTP index if available
     http_capabilities: list[str] = []
-    cap_source: Literal["cap_uri", "agent_card", "http_index", "txt_fallback", "none"] = "none"
+    cap_source: CapabilitySource = "none"
     if http_agent.capability and http_agent.capability.capabilities:
         http_capabilities = http_agent.capability.capabilities
         cap_source = "http_index"
@@ -948,10 +1003,13 @@ def _apply_agent_card(agent: AgentRecord, card: A2AAgentCard) -> None:
     """
     agent.agent_card = card
 
-    # Wire agent card skills → capabilities
-    # agent_card is higher priority than txt_fallback and http_index,
-    # so override those sources. Only cap_uri takes precedence.
-    if card.skills and agent.capability_source not in ("cap_uri",):
+    # Wire agent card skills → capabilities. Preserve higher-trust
+    # provenance: cap_uri (draft §6.1 normative locator) and well_known
+    # (RFC 8615 locator, also normative in -02) both record the actual
+    # descriptor source. Overwriting them with "agent_card" here would
+    # erase the fact that the operator declared a specific fetch path —
+    # downstream consumers use capability_source for trust/audit calls.
+    if card.skills and agent.capability_source not in ("cap_uri", "well_known"):
         agent.capabilities = card.to_capabilities()
         agent.capability_source = "agent_card"
         logger.debug(

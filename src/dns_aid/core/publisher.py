@@ -132,7 +132,7 @@ async def publish(
         private_key_path: Path to EC P-256 private key PEM file for signing
         allow_underscore_target: If True, downgrade a TargetName-contains-
             underscore violation from an error to a warning. Per
-            draft-mozleywilliams-dnsop-dnsaid-02 §Known Organization, SVCB
+            draft-mozleywilliams-dnsop-dnsaid-02 §3.2 (Known Organization, Unknown Agent), SVCB
             TargetNames reached over TLS with publicly-issued x.509 certs
             MUST NOT contain underscores. dns-aid-core enforces this by
             default; set this flag for internal-only deployments where the
@@ -158,16 +158,30 @@ async def publish(
     if isinstance(protocol, str):
         protocol = Protocol(protocol.lower())
 
-    # Enforce draft-02 §Known Organization: the SVCB TargetName MUST NOT
+    # Enforce draft-02 §3.2 (Known Organization, Unknown Agent): the SVCB TargetName MUST NOT
     # contain underscores when reached over TLS with a public x.509 cert.
     # Strict-by-default; the allow_underscore_target flag downgrades to a
     # warning for internal-only deployments.
     from dns_aid.utils.validation import (
+        _underscore_bypass_env_enabled,
         validate_no_underscore_in_target,
         validate_well_known_path,
     )
 
     validate_no_underscore_in_target(endpoint, allow_underscore=allow_underscore_target)
+
+    # Capture whether the bypass actually fired so we can surface it
+    # on PublishResult.warnings (caller-visible, log-aggregator
+    # parseable). The check is intentionally redundant with the
+    # validator's WARN log: PR #154 v2 review (Igor) asked for the
+    # signal as structured data, not just a log line.
+    publish_warnings: list[str] = []
+    if (
+        allow_underscore_target
+        and _underscore_bypass_env_enabled()
+        and any("_" in label for label in endpoint.rstrip(".").split("."))
+    ):
+        publish_warnings.append("dns_aid.underscore_bypass")
 
     # Constrain well-known to a safe RFC 8615 single-segment suffix so
     # the publisher can't emit a SvcParamKey value that a consumer would
@@ -251,6 +265,7 @@ async def publish(
             backend=dns_backend.name,
             success=False,
             message=f"Zone '{domain}' does not exist or is not accessible",
+            warnings=publish_warnings,
         )
 
     try:
@@ -270,6 +285,7 @@ async def publish(
             backend=dns_backend.name,
             success=True,
             message="Agent published successfully",
+            warnings=publish_warnings,
         )
 
     except Exception as e:
@@ -281,6 +297,7 @@ async def publish(
             backend=dns_backend.name,
             success=False,
             message=f"Failed to publish: {e}",
+            warnings=publish_warnings,
         )
 
 

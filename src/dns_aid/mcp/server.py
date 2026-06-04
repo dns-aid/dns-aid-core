@@ -298,7 +298,7 @@ def publish_agent_to_dns(
             Eliminates extra AAAA record lookup for the target hostname.
         allow_underscore_target: When True, downgrade a "TargetName contains
             underscored label" violation from an error to a warning. Per
-            draft-mozleywilliams-dnsop-dnsaid-02 §Known Organization, SVCB
+            draft-mozleywilliams-dnsop-dnsaid-02 §3.2 (Known Organization, Unknown Agent), SVCB
             TargetNames reached over TLS with publicly-issued x.509 certs
             MUST NOT contain underscores. Set this only when the target is
             internal-only and will not be reached over public PKI.

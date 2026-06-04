@@ -171,7 +171,7 @@ bap-list       = protocol *("," protocol)
                  ; Per -02: agent protocols supported at this endpoint
                  ; e.g., "mcp" or "mcp,a2a"
                  ; Version suffixes (e.g. "mcp/1") were proposed as an
-                 ; experimental extension in -02 §FutureWork (Bulk Agent
+                 ; experimental extension in -02 §5 (Future Work and Experimental Mechanisms) (Bulk Agent
                  ; Protocol) and are not normative in the base spec
 
 ; Policy bundle URI (key 65403)

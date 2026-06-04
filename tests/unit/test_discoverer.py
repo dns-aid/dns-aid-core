@@ -1375,3 +1375,104 @@ class TestWellKnownReconstruction:
         # False so consumers don't treat it as applied.
         assert result.cap_sha256 == "ORPHANED"
         assert result.cap_sha256_verified is False
+
+
+class TestCapabilitySourceProvenance:
+    """Regression — PR #154 v2 review item 5.
+
+    The trust hierarchy (most → least: cap_uri > well_known >
+    agent_card > http_index > txt_fallback) is recorded on the
+    record via ``capability_source``. Enrichment (_apply_agent_card)
+    must not erase a higher-trust source by overwriting with
+    ``agent_card``.
+    """
+
+    def test_apply_agent_card_preserves_well_known_source(self):
+        """``_apply_agent_card`` must NOT overwrite a well_known
+        provenance with ``agent_card``. Before the v2 fix, only
+        ``cap_uri`` was preserved, so a record whose descriptor was
+        fetched via the SVCB ``well-known`` SvcParamKey would be
+        relabelled to ``agent_card`` after enrichment — losing the
+        spec-mandated locator's provenance."""
+        from dns_aid.core.a2a_card import A2AAgentCard, A2ASkill
+        from dns_aid.core.discoverer import _apply_agent_card
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+            port=443,
+            capabilities=["preexisting"],
+            capability_source="well_known",
+        )
+        card = A2AAgentCard(
+            name="chat",
+            description="",
+            url="https://chat.example.com",
+            version="1.0.0",
+            skills=[A2ASkill(id="payments", name="Payments", description="", tags=[])],
+        )
+
+        _apply_agent_card(agent, card)
+
+        assert agent.capability_source == "well_known", (
+            "well_known provenance must survive _apply_agent_card; see PR #154 v2 review item 5"
+        )
+
+    def test_apply_agent_card_preserves_cap_uri_source(self):
+        """Existing pre-v2 invariant: cap_uri provenance survives."""
+        from dns_aid.core.a2a_card import A2AAgentCard, A2ASkill
+        from dns_aid.core.discoverer import _apply_agent_card
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+            port=443,
+            capabilities=["preexisting"],
+            capability_source="cap_uri",
+        )
+        card = A2AAgentCard(
+            name="chat",
+            description="",
+            url="https://chat.example.com",
+            version="1.0.0",
+            skills=[A2ASkill(id="payments", name="Payments", description="", tags=[])],
+        )
+
+        _apply_agent_card(agent, card)
+
+        assert agent.capability_source == "cap_uri"
+
+    def test_apply_agent_card_upgrades_txt_fallback(self):
+        """The override SHOULD still fire for lower-trust sources
+        (txt_fallback, http_index) — those are weaker than the
+        agent_card skill data."""
+        from dns_aid.core.a2a_card import A2AAgentCard, A2ASkill
+        from dns_aid.core.discoverer import _apply_agent_card
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+            port=443,
+            capabilities=["txt-only"],
+            capability_source="txt_fallback",
+        )
+        card = A2AAgentCard(
+            name="chat",
+            description="",
+            url="https://chat.example.com",
+            version="1.0.0",
+            skills=[A2ASkill(id="payments", name="Payments", description="", tags=[])],
+        )
+
+        _apply_agent_card(agent, card)
+
+        assert agent.capability_source == "agent_card"

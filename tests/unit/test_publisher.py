@@ -322,6 +322,48 @@ class TestPublishTargetUnderscoreValidation:
         assert len(warn_calls) >= 1
         assert all(c.kwargs.get("warning_class") == "dns_aid.underscore_bypass" for c in warn_calls)
         assert all("_chat" in c.kwargs.get("target", "") for c in warn_calls)
+        # PR #154 v2 review (Igor): the bypass must also surface on
+        # PublishResult.warnings as a stable warning_class identifier
+        # — log lines alone aren't a usable signal for log aggregators
+        # or downstream observability.
+        assert "dns_aid.underscore_bypass" in result.warnings
+
+    @pytest.mark.asyncio
+    async def test_underscored_endpoint_strict_default_is_bc_break(
+        self, mock_backend: MockBackend, monkeypatch
+    ):
+        """BC-pin — PR #154 strict-by-default tightening.
+
+        Even without explicitly passing ``allow_underscore_target``, a
+        plain `publish()` with an underscored endpoint MUST raise. This
+        is the BREAKING behaviour called out in CHANGELOG [Unreleased]
+        — a deliberate, versioned change per draft-02 §3.2. If a future
+        commit accidentally relaxes the default, this test holds the
+        line.
+        """
+        monkeypatch.delenv("DNS_AID_ALLOW_UNDERSCORE_TARGET", raising=False)
+        with pytest.raises(ValidationError):
+            await publish(
+                name="chat",
+                domain="example.com",
+                protocol="a2a",
+                endpoint="my_service.internal.example",
+                backend=mock_backend,
+            )
+
+    @pytest.mark.asyncio
+    async def test_clean_endpoint_no_warnings_emitted(self, mock_backend: MockBackend):
+        """A normal endpoint must not populate warnings — the field is
+        for advisories, not always-on noise."""
+        result = await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+        )
+        assert result.success is True
+        assert result.warnings == []
 
     @pytest.mark.asyncio
     async def test_underscored_endpoint_flag_without_env_raises(

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### BREAKING
+
+- **SVCB TargetName underscore validator is strict by default.**
+  `dns_aid.publish()` and direct `SvcbRecord` / `AgentRecord`
+  construction now reject endpoints containing any underscored DNS
+  label, because the CA/Browser Forum Baseline Requirements and
+  RFC 5280 dNSName SANs forbid underscored labels — a publicly-issued
+  x.509 certificate cannot cover such a name. This is a deliberate,
+  versioned tightening per draft-mozleywilliams-dnsop-dnsaid-02
+  §3.2 (Known Organization, Unknown Agent).
+
+  **Migration from 0.23.0** for deployments that intentionally
+  publish underscored internal endpoints (not behind public PKI):
+
+  1. Preferred: rename the endpoint to use only LDH labels (letters,
+     digits, hyphens). This is the long-term spec-conformant path.
+  2. Operator opt-in: set `DNS_AID_ALLOW_UNDERSCORE_TARGET=1` on the
+     publishing process AND pass `allow_underscore_target=True` to
+     `publish()`. Both are required — the env gate prevents a calling
+     LLM or MCP client from unilaterally downgrading the MUST.
+  3. The opt-in surfaces `dns_aid.underscore_bypass` on
+     `PublishResult.warnings` (caller-visible structured signal) and
+     in structlog with `warning_class="dns_aid.underscore_bypass"`,
+     so operators can count and alert per zone.
+
+  Downstream wrappers and controllers that call `publish()` will
+  need to thread the new flag through their own config surface (CRD
+  field, CLI flag, env var) to preserve any intentional
+  underscored-endpoint behaviour. Until that wiring lands, those
+  deployments must rename the endpoint to LDH labels.
+
 ### Changed
 
 - **Repository moved to the vendor-neutral `dns-aid` GitHub organization** (`github.com/dns-aid/dns-aid-core`), ahead of Linux Foundation graduation. Previous `infobloxopen/dns-aid-core` URLs redirect automatically, so existing clones, links, and badges continue to work. Contributors should update their git remotes (`git remote set-url <remote> https://github.com/dns-aid/dns-aid-core.git`). The PyPI Trusted Publisher and MCP Registry namespace are being updated to match the new organization.
@@ -36,6 +67,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of `cap_sha256` is no longer a sufficient signal. Dangling case
   (pin declared, never applied) logs a structured WARN with
   `warning_class="dns_aid.dangling_cap_sha256"`.
+- **`PublishResult.warnings: list[str]`** — non-fatal advisories
+  raised during the publish path, surfaced as stable warning-class
+  identifiers (e.g. `dns_aid.underscore_bypass`) so consumers can
+  match exactly without log-string parsing.
+- **`capability_source="descriptor_unreachable"`** — distinct
+  provenance value when a record declares a `cap` or `well-known`
+  locator but the descriptor fetch fails (timeout, TLS error, 5xx).
+  Lets consumers tell transient outages from mis-configurations
+  without scraping log lines.
+- **`CapabilitySource` `Literal` consolidated in `core.models`** —
+  single source of truth for provenance values; the discoverer,
+  SDK, indexer, and `AgentRecord` all import the same symbol.
+- **Per-agent descriptor-fetch budget** — descriptor fetches are
+  now bounded by `asyncio.wait_for` with a 12-second total budget.
+  A single slow endpoint can no longer stall a bulk-discovery loop;
+  the agent records `capability_source="descriptor_unreachable"`.
 - **`validate_no_underscore_in_target`** — TargetName underscore
   validator with operator-only bypass. The bypass requires both the
   per-call `allow_underscore=True` flag AND

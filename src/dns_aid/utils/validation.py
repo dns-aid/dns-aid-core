@@ -486,7 +486,7 @@ def validate_no_underscore_in_target(
 ) -> str:
     """Validate that an SVCB TargetName contains no underscored DNS labels.
 
-    Per draft-mozleywilliams-dnsop-dnsaid-02 §Known Organization, the
+    Per draft-mozleywilliams-dnsop-dnsaid-02 §3.2 (Known Organization, Unknown Agent), the
     TargetName of an SVCB record reached over TLS with a publicly-issued
     x.509 certificate MUST NOT contain underscores. CA/Browser Forum
     Baseline Requirements and RFC 5280 dNSName SANs forbid underscored
@@ -542,7 +542,7 @@ def validate_no_underscore_in_target(
             target=target,
             underscored=underscored,
             cab_forbidden_chars=True,
-            spec_section="draft-02 §Known Organization",
+            spec_section="draft-02 §3.2 (Known Organization, Unknown Agent)",
             warning_class="dns_aid.underscore_bypass",
             env_gate=_UNDERSCORE_BYPASS_ENV,
         )
