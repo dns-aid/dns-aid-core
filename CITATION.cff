@@ -3,7 +3,7 @@ title: "DNS-AID: DNS-based Agent Identification and Discovery"
 message: "If you use this software, please cite both the software and the IETF draft."
 type: software
 license: Apache-2.0
-repository-code: "https://github.com/infobloxopen/dns-aid-core"
+repository-code: "https://github.com/dns-aid/dns-aid-core"
 
 authors:
   - family-names: Racic
@@ -13,7 +13,7 @@ authors:
     given-names: Ingmar
     affiliation: Infoblox
 
-version: "0.24.1"
+version: "0.24.2"
 date-released: "2026-06-04"
 
 keywords:

@@ -8,7 +8,7 @@ All notable changes to DNS-AID are documented here.\n
 """
 body = """
 {%- macro remote_url() -%}
-  https://github.com/infobloxopen/dns-aid-core
+  https://github.com/dns-aid/dns-aid-core
 {%- endmacro -%}
 
 {% if version -%}

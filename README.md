@@ -2,10 +2,10 @@
 
 <!-- mcp-name: io.github.dns-aid/dns-aid -->
 
-[![CI](https://github.com/infobloxopen/dns-aid-core/actions/workflows/ci.yml/badge.svg)](https://github.com/infobloxopen/dns-aid-core/actions/workflows/ci.yml)
-[![Security](https://github.com/infobloxopen/dns-aid-core/actions/workflows/security.yml/badge.svg)](https://github.com/infobloxopen/dns-aid-core/actions/workflows/security.yml)
-[![CodeQL](https://github.com/infobloxopen/dns-aid-core/actions/workflows/codeql.yml/badge.svg)](https://github.com/infobloxopen/dns-aid-core/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/infobloxopen/dns-aid-core/badge)](https://scorecard.dev/viewer/?uri=github.com/infobloxopen/dns-aid-core)
+[![CI](https://github.com/dns-aid/dns-aid-core/actions/workflows/ci.yml/badge.svg)](https://github.com/dns-aid/dns-aid-core/actions/workflows/ci.yml)
+[![Security](https://github.com/dns-aid/dns-aid-core/actions/workflows/security.yml/badge.svg)](https://github.com/dns-aid/dns-aid-core/actions/workflows/security.yml)
+[![CodeQL](https://github.com/dns-aid/dns-aid-core/actions/workflows/codeql.yml/badge.svg)](https://github.com/dns-aid/dns-aid-core/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/dns-aid/dns-aid-core/badge)](https://scorecard.dev/viewer/?uri=github.com/dns-aid/dns-aid-core)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12651/badge)](https://www.bestpractices.dev/projects/12651)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
@@ -59,7 +59,7 @@ You are encouraged to run your own directory or telemetry backend — the indexe
 pip install "dns-aid[cli,mcp]"
 
 # Or install the latest unreleased main from GitHub
-pip install "dns-aid[cli,mcp] @ git+https://github.com/infobloxopen/dns-aid-core.git"
+pip install "dns-aid[cli,mcp] @ git+https://github.com/dns-aid/dns-aid-core.git"
 ```
 
 For backend-specific extras (`route53`, `cloudflare`, `ns1`, `cloud_dns`, `infoblox`, `ddns`), see the [Getting Started Guide](docs/getting-started.md#install).
@@ -1122,7 +1122,7 @@ python examples/demo_full.py
 
 ```bash
 # Clone the repo
-git clone https://github.com/infobloxopen/dns-aid-core.git
+git clone https://github.com/dns-aid/dns-aid-core.git
 cd DNS-AID
 
 # Install all workspace packages (requires uv)

@@ -11,8 +11,8 @@
 
 ## Asking Questions
 
-- **GitHub Discussions** — for questions, ideas, and general conversation: [Discussions](https://github.com/infobloxopen/dns-aid-core/discussions)
-- **GitHub Issues** — for bug reports and feature requests: [Issues](https://github.com/infobloxopen/dns-aid-core/issues)
+- **GitHub Discussions** — for questions, ideas, and general conversation: [Discussions](https://github.com/dns-aid/dns-aid-core/discussions)
+- **GitHub Issues** — for bug reports and feature requests: [Issues](https://github.com/dns-aid/dns-aid-core/issues)
 
 ## Reporting Bugs
 

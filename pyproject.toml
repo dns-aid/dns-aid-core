@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dns-aid"
-version = "0.24.1"
+version = "0.24.2"
 description = "DNS-based Agent Identification and Discovery - Reference Implementation"
 readme = "README.md"
 license = "Apache-2.0"
@@ -160,12 +160,12 @@ dns-aid = "dns_aid.cli.main:app"
 dns-aid-mcp = "dns_aid.mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/infobloxopen/dns-aid-core"
-Documentation = "https://github.com/infobloxopen/dns-aid-core#readme"
-Repository = "https://github.com/infobloxopen/dns-aid-core"
-Changelog = "https://github.com/infobloxopen/dns-aid-core/blob/main/CHANGELOG.md"
-Issues = "https://github.com/infobloxopen/dns-aid-core/issues"
-Security = "https://github.com/infobloxopen/dns-aid-core/security/policy"
+Homepage = "https://github.com/dns-aid/dns-aid-core"
+Documentation = "https://github.com/dns-aid/dns-aid-core#readme"
+Repository = "https://github.com/dns-aid/dns-aid-core"
+Changelog = "https://github.com/dns-aid/dns-aid-core/blob/main/CHANGELOG.md"
+Issues = "https://github.com/dns-aid/dns-aid-core/issues"
+Security = "https://github.com/dns-aid/dns-aid-core/security/policy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dns_aid"]

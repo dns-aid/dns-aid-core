@@ -1962,7 +1962,7 @@ try:
                     "/health": "Health check (GET)",
                     "/ready": "Readiness check (GET)",
                 },
-                "documentation": "https://github.com/infobloxopen/dns-aid-core",
+                "documentation": "https://github.com/dns-aid/dns-aid-core",
                 "specification": "IETF draft-mozleywilliams-dnsop-dnsaid-02",
             }
         )

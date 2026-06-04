@@ -28,7 +28,7 @@ The DNS-AID specification is defined in the IETF draft: https://datatracker.ietf
 
 ```bash
 # Clone the repository
-git clone https://github.com/infobloxopen/dns-aid-core.git
+git clone https://github.com/dns-aid/dns-aid-core.git
 cd dns-aid-core
 
 # Create virtual environment

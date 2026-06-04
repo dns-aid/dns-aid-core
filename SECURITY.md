@@ -163,7 +163,7 @@ We publish accepted (documented, risk-assessed) dependency CVEs here so reviewer
   includes pyjwt for OAuth-protected MCP servers, which use
   operator-issued tokens with operator-chosen key lengths.
 - **Mitigation**: None required at the SDK layer.
-- **Re-evaluation criteria**: Close [tracking issue #141](https://github.com/infobloxopen/dns-aid-core/issues/141)
+- **Re-evaluation criteria**: Close [tracking issue #141](https://github.com/dns-aid/dns-aid-core/issues/141)
   when ANY of the following changes:
   - NVD status changes away from "Analyzed / Disputed".
   - Snyk adds this CVE to their database.

@@ -36,7 +36,7 @@ FROM python:3.11-slim@sha256:6ed5bff4d7396e3244b0f3c2fe578c87862efedd3e5e8cebd14
 
 LABEL org.opencontainers.image.title="DNS-AID MCP Server"
 LABEL org.opencontainers.image.description="DNS-based Agent Identification and Discovery"
-LABEL org.opencontainers.image.source="https://github.com/infobloxopen/dns-aid-core"
+LABEL org.opencontainers.image.source="https://github.com/dns-aid/dns-aid-core"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.sbom="cyclonedx"
 

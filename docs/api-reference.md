@@ -1848,4 +1848,4 @@ print(dns_aid.__version__)  # "0.6.0"
 - [Getting Started Guide](getting-started.md)
 - [IETF Draft: DNS-AID](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/)
 - [RFC 9460: SVCB Records](https://www.rfc-editor.org/rfc/rfc9460.html)
-- [GitHub Repository](https://github.com/infobloxopen/dns-aid-core)
+- [GitHub Repository](https://github.com/dns-aid/dns-aid-core)
