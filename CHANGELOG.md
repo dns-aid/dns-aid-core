@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.3] - 2026-06-04
+
+### Fixed
+
+- **Flattened a stale nested SVCB zone example** in
+  `docs/rfc/security-considerations.md` (Tampering → Zone Configuration)
+  that the flat-FQDN migration missed. It now shows the draft-02 flat
+  owner (`network.example.com` under `$ORIGIN example.com.`) instead of
+  the legacy `_network._mcp` / `$ORIGIN _agents.example.com.` shape; the
+  protocol stays in `alpn`/`bap`. The `wire-format-01.abnf` reference and
+  legacy back-compat test fixtures intentionally keep the nested shape.
+
 ## [0.24.2] - 2026-06-04
 
 ### Changed
@@ -1882,7 +1894,8 @@ Explicit version floors added to our `pyproject.toml` because upstream parents (
 - [RFC 9460 - SVCB and HTTPS Resource Records](https://www.rfc-editor.org/rfc/rfc9460.html)
 - [RFC 4033-4035 - DNSSEC](https://www.rfc-editor.org/rfc/rfc4033.html)
 
-[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.2...HEAD
+[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.3...HEAD
+[0.24.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.2...v0.24.3
 [0.24.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.23.0...v0.24.0
