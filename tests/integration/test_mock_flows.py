@@ -430,7 +430,7 @@ class TestDnsaidParamsRoundtrip:
             capabilities=["ipam"],
             cap_uri="https://cap.example.com/rich.json",
             cap_sha256="abc123",
-            bap="mcp2.1",
+            bap="mcp=2.1",
             policy_uri="https://example.com/policy",
             realm="demo",
             backend=mock_backend,
@@ -447,7 +447,7 @@ class TestDnsaidParamsRoundtrip:
             agent = result.agents[0]
             assert agent.cap_uri == "https://cap.example.com/rich.json"
             assert agent.cap_sha256 == "abc123"
-            assert agent.bap == "mcp2.1"
+            assert agent.bap == "mcp=2.1"
             assert agent.policy_uri == "https://example.com/policy"
             assert agent.realm == "demo"
 

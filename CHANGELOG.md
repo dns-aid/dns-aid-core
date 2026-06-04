@@ -119,6 +119,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `to_params()` reads `DNS_AID_SVCB_STRING_KEYS` once per call (was up
   to 11× per serialization).
 
+### BREAKING CHANGE — `bap` SvcParamKey is now a single scalar
+
+The `bap` SvcParamKey value type changed from `list[str] | None` to
+`str | None` across the public API: `publish()`, the CLI `--bap`
+flag, the MCP `publish_agent_to_dns` tool, and the `AgentRecord` /
+`SvcbRecord` Pydantic models.
+
+The value form follows draft-02 §5.1: bare (`mcp`, `a2a`) or
+versioned with the draft's `=` delimiter (`mcp=1.0`, `a2a=1.1`).
+
+- `AgentRecord(bap=["mcp"])` now raises `ValidationError`. Field
+  validators on both models reject the list form at the type
+  boundary so the break direction is pinned.
+- `--bap mcp,a2a` no longer auto-splits — the CLI passes the value
+  through verbatim and the validator rejects the comma. Operators
+  who want both protocols publish two SVCB records, one per
+  protocol.
+- The MCP tool's input schema for `bap` changed from `array` to
+  `string`. Clients that bind to the JSON schema need updates.
+- The previous concatenated form (`mcp2.1`, `a2a1.0`) is rejected
+  because it is ambiguous to parse back into protocol and version.
+
+This is experimental territory in the draft (§FutureWork), but the
+public-API shape change still warrants the version bump. A new
+shared `dns_aid.core.bap.normalize_bap` helper coerces legacy
+comma-strings and list inputs into the canonical scalar on the
+discover / SDK / indexer paths so existing wire data on the network
+keeps deserializing without operator intervention.
+
+### Security
+
+- **`bap` field validator closes a SvcParamKey injection
+  vulnerability.** A crafted value such as `mcp" key65500="x` used
+  to round-trip verbatim through `to_params()` and the backend
+  formatters; dnspython would then parse two SvcParamKeys, with the
+  second attacker-controlled. On a multi-tenant publish path that is
+  server-side parameter injection. The new validator rejects
+  quotes, spaces, commas, and any character that could break SVCB
+  SvcParam quoting at every construction path.
+
 ### BREAKING CHANGE — draft-02 flat FQDN + walkable AliasMode
 
 This release flips the wire-format default from

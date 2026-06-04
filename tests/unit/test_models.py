@@ -141,7 +141,7 @@ class TestAgentRecord:
             target_host="mcp.example.com",
             cap_uri="https://mcp.example.com/.well-known/agent-cap.json",
             cap_sha256="abc123base64url",
-            bap="mcp2.1",
+            bap="mcp=2.1",
             policy_uri="https://example.com/agent-policy",
             realm="production",
         )
@@ -151,7 +151,7 @@ class TestAgentRecord:
         # Default: keyNNNNN format per RFC 9460
         assert params["key65400"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert params["key65401"] == "abc123base64url"
-        assert params["key65402"] == "mcp2.1"  # scalar bap per draft-02 §FutureWork
+        assert params["key65402"] == "mcp=2.1"  # scalar bap per draft-02 §FutureWork
         assert params["key65403"] == "https://example.com/agent-policy"
         assert params["key65404"] == "production"
         # Standard params still present
@@ -170,7 +170,7 @@ class TestAgentRecord:
             target_host="mcp.example.com",
             cap_uri="https://mcp.example.com/.well-known/agent-cap.json",
             cap_sha256="abc123base64url",
-            bap="mcp2.1",
+            bap="mcp=2.1",
             policy_uri="https://example.com/agent-policy",
             realm="production",
         )
@@ -180,7 +180,7 @@ class TestAgentRecord:
 
         assert params["cap"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert params["cap-sha256"] == "abc123base64url"
-        assert params["bap"] == "mcp2.1"
+        assert params["bap"] == "mcp=2.1"
         assert params["policy"] == "https://example.com/agent-policy"
         assert params["realm"] == "production"
 
@@ -247,11 +247,11 @@ class TestAgentRecord:
             domain="example.com",
             protocol=Protocol.MCP,
             target_host="mcp.example.com",
-            bap="mcp2.1",
+            bap="mcp=2.1",
         )
         params = agent.to_svcb_params()
         # No comma, no list — emitted exactly as the scalar string.
-        assert params["key65402"] == "mcp2.1"
+        assert params["key65402"] == "mcp=2.1"
         assert "," not in params["key65402"]
 
     def test_svcb_params_bap_absent_when_none(self):
@@ -552,3 +552,209 @@ class TestVerifyResult:
         # 20 (record) + 20 (svcb) + 0 (dnssec) + 0 (dane gated) + 15 (endpoint)
         assert result.security_score == 55
         assert result.security_rating == "Fair"
+
+
+class TestBapValidator:
+    """Regression tests for Igor's #158 review.
+
+    The ``bap`` SvcParamKey value goes straight onto the wire as
+    ``key65402="<value>"`` via the publisher and every backend formatter.
+    Without a field-validator a crafted value can inject sibling
+    SvcParamKeys (e.g. ``mcp" key65500="x``) — a multi-tenant publish
+    path turns into server-side param injection. The validator now
+    constrains bap to the canonical draft-02 form at the type boundary
+    so every construction path (direct, ``to_svcb_record()``, MCP,
+    CLI) inherits the rule.
+    """
+
+    def test_bare_protocol_accepted(self):
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+            bap="mcp",
+        )
+        assert agent.bap == "mcp"
+
+    def test_versioned_form_accepted(self):
+        for value in ("mcp=1.0", "a2a=1.1", "https=2"):
+            agent = AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap=value,
+            )
+            assert agent.bap == value
+
+    def test_svcparam_injection_rejected(self):
+        """The original vulnerability: a crafted value with a quote
+        escape can be parsed by dnspython as two SvcParamKeys, the
+        second one attacker-controlled."""
+        for evil in (
+            'mcp" key65500="x',
+            'mcp\\"',
+            'mcp" key65500="x',
+        ):
+            with pytest.raises(ValidationError):
+                AgentRecord(
+                    name="chat",
+                    domain="example.com",
+                    protocol=Protocol.MCP,
+                    target_host="chat.example.com",
+                    bap=evil,
+                )
+
+    def test_legacy_comma_list_rejected(self):
+        """Pre-draft-02 comma-list (``mcp,a2a``) is rejected at the
+        type — callers passing legacy input should run
+        ``normalize_bap`` first."""
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap="mcp,a2a",
+            )
+
+    def test_list_form_rejected_on_agent_record(self):
+        """Pin the breaking change direction: ``bap=["mcp"]`` raises."""
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap=["mcp"],  # type: ignore[arg-type]
+            )
+
+    def test_list_form_rejected_on_svcb_record(self):
+        from dns_aid.core.models import SvcbRecord
+
+        with pytest.raises(ValidationError):
+            SvcbRecord(
+                target="chat.example.com.",
+                alpn="mcp",
+                port=443,
+                bap=["mcp"],  # type: ignore[arg-type]
+            )
+
+    def test_uppercase_protocol_rejected(self):
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap="MCP",
+            )
+
+    def test_whitespace_in_value_rejected(self):
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap="mcp 1.0",
+            )
+
+    def test_empty_string_passed_as_bap_rejected(self):
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap="",
+            )
+
+
+class TestNormalizeBap:
+    """Tests for the shared ``normalize_bap`` collapse helper.
+
+    The discoverer, SDK adapter, and indexer all route through this
+    one function so they agree on edge inputs (empty string vs None
+    vs whitespace-only vs leading-comma legacy etc.).
+    """
+
+    def test_none_passthrough(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap(None) is None
+
+    def test_empty_string_to_none(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap("") is None
+        assert normalize_bap("   ") is None
+        assert normalize_bap("\t\n") is None
+
+    def test_scalar_passthrough(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap("mcp") == "mcp"
+        assert normalize_bap("mcp=1.0") == "mcp=1.0"
+        assert normalize_bap("  mcp=1.0  ") == "mcp=1.0"
+
+    def test_comma_list_collapsed_to_first_non_empty(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap("mcp,a2a") == "mcp"
+        assert normalize_bap("mcp=1.0,a2a=1.1") == "mcp=1.0"
+        # Leading comma — Igor's #158 item 5 regression.
+        assert normalize_bap(",mcp=1.0") == "mcp=1.0"
+        # Trailing comma.
+        assert normalize_bap("mcp=1.0,") == "mcp=1.0"
+        # Comma-only / all empties.
+        assert normalize_bap(",,,") is None
+        assert normalize_bap(", ,") is None
+
+    def test_list_form_collapsed_to_first(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap(["mcp"]) == "mcp"
+        assert normalize_bap(["mcp", "a2a"]) == "mcp"
+        # Empty list, list of empties.
+        assert normalize_bap([]) is None
+        assert normalize_bap(["", " ", None]) is None  # type: ignore[list-item]
+        # Defensive: non-string elements survive via str().
+        assert normalize_bap([" mcp "]) == "mcp"
+
+    def test_non_string_non_list_input(self):
+        from dns_aid.core.bap import normalize_bap
+
+        # Forgiving public API: anything not a str/list/None returns None.
+        assert normalize_bap(42) is None  # type: ignore[arg-type]
+        assert normalize_bap({"mcp": True}) is None  # type: ignore[arg-type]
+
+
+class TestSplitBapToken:
+    """Tests for protocol/version token extraction."""
+
+    def test_bare_form(self):
+        from dns_aid.core.bap import split_bap_token
+
+        assert split_bap_token("mcp") == ("mcp", None)
+        assert split_bap_token("a2a") == ("a2a", None)
+
+    def test_versioned_form(self):
+        from dns_aid.core.bap import split_bap_token
+
+        assert split_bap_token("mcp=1.0") == ("mcp", "1.0")
+        assert split_bap_token("a2a=1.1") == ("a2a", "1.1")
+
+    def test_none_and_empty(self):
+        from dns_aid.core.bap import split_bap_token
+
+        assert split_bap_token(None) == (None, None)
+        assert split_bap_token("") == (None, None)
+        assert split_bap_token("   ") == (None, None)
+
+    def test_dangling_equals_returns_only_proto(self):
+        from dns_aid.core.bap import split_bap_token
+
+        # ``mcp=`` is unusual but defensive — keep the proto, no version.
+        assert split_bap_token("mcp=") == ("mcp", None)

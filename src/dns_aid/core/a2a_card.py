@@ -221,10 +221,10 @@ class A2AAgentCard:
             "ttl": ttl,
             "cap_uri": cap_uri,
             # Bulk Agent Protocol — scalar versioned identifier per draft-02
-            # §FutureWork. A2A agent cards default to "a2a1.0"; operators
+            # §FutureWork. A2A agent cards default to "a2a=1.0"; operators
             # publishing a different version of A2A can override before passing
             # to publish().
-            "bap": "a2a1.0",
+            "bap": "a2a=1.0",
         }
 
 

@@ -46,7 +46,13 @@ class InfobloxNIOSBackend(DNSBackend):
         NIOS_TIMEOUT: HTTP request timeout in seconds (default: 30.0)
     """
 
-    _SPLIT_VALUE_KEYS = {"alpn", "bap", "ipv4hint", "ipv6hint"}
+    # ``bap`` was historically split as a multi-value key when the
+    # field carried comma-separated protocols. draft-02 §5.1 makes it
+    # a single scalar (bare ``mcp`` or versioned ``mcp=1.0``); the
+    # ``=`` in a versioned value would also re-expand on a split, so
+    # we keep bap out of the split set even though current scalar
+    # values would be harmless to split.
+    _SPLIT_VALUE_KEYS = {"alpn", "ipv4hint", "ipv6hint"}
     # NIOS only accepts registered SVC keys or keyNNNNN numeric keys.
     # Map draft custom names to private-use keyNNNNN aliases for compatibility.
     _CUSTOM_PARAM_TO_NUMERIC_KEY = {

@@ -127,8 +127,8 @@ async def publish(
             cap_uri; both may be set. Consumers prefer cap_uri when both are
             present and fall back to reconstructing
             https://<svcb-target>/.well-known/<well_known_path>.
-        bap: Optional single versioned agent-protocol identifier (e.g. "mcp2.1",
-            "a2a1.0") for the Bulk Agent Protocol SvcParamKey. Experimental per
+        bap: Optional single versioned agent-protocol identifier (e.g. "mcp=2.1",
+            "a2a=1.0") for the Bulk Agent Protocol SvcParamKey. Experimental per
             draft-02 §FutureWork; alpn remains the canonical protocol carrier.
             Multi-protocol agents publish multiple AgentRecord instances at the
             same flat owner name, each with its own alpn and (optionally) bap —

@@ -289,7 +289,7 @@ def publish_agent_to_dns(
             and fall back to reconstructing
             https://<svcb-target>/.well-known/<well_known_path>.
         bap: Optional single versioned agent-protocol identifier (e.g.,
-            "mcp2.1", "a2a1.0") for the Bulk Agent Protocol SvcParamKey.
+            "mcp=2.1", "a2a=1.0") for the Bulk Agent Protocol SvcParamKey.
             Experimental per draft-02 §FutureWork; alpn remains the canonical
             protocol carrier. Multi-protocol agents publish multiple records
             at the same flat owner, each with its own alpn and (optionally)

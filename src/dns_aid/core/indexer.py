@@ -408,20 +408,29 @@ async def sync_index(
     def _protocol_from_primary(primary_records: dict[str, dict], name: str) -> str:
         """Read the agent protocol off the primary SVCB record.
 
-        draft-02 §Known Agent: ``bap`` is the canonical carrier for the
-        bulk-agent-protocol identifier; ``alpn`` is the back-compat
-        carrier accepted for single-protocol publishers. Read whichever
-        the record uses.
+        draft-02 §5.1 (experimental ``bap``) carries an agent-protocol
+        identifier — bare (``mcp``) or versioned (``mcp=1.0``).
+        ``alpn`` is dns-aid-core's canonical reconciliation carrier
+        and accepted as a fallback. Use the shared ``normalize_bap``
+        and ``split_bap_token`` helpers so the indexer agrees with the
+        discoverer and SDK on collapse + token extraction semantics.
         """
+        from dns_aid.core.bap import normalize_bap, split_bap_token
+
         primary = primary_records.get(name)
         if not primary:
             return UNKNOWN_PROTOCOL
         params = primary.get("data", {}).get("params", {}) or {}
-        alpn = params.get("bap") or params.get("alpn")
-        if alpn:
-            # alpn may be quoted; trim.
-            return alpn.strip('"').split(",")[0].strip() or UNKNOWN_PROTOCOL
-        return UNKNOWN_PROTOCOL
+        # SVCB params from list_records may carry stray quoting.
+        raw = params.get("bap") or params.get("alpn")
+        if not raw:
+            return UNKNOWN_PROTOCOL
+        cleaned = raw.strip('"') if isinstance(raw, str) else raw
+        normalized = normalize_bap(cleaned)
+        if normalized is None:
+            return UNKNOWN_PROTOCOL
+        proto_token, _version = split_bap_token(normalized)
+        return proto_token or UNKNOWN_PROTOCOL
 
     try:
         # Single backend enumeration. Earlier the function fetched the

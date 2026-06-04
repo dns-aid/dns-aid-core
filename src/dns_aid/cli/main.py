@@ -123,7 +123,7 @@ def publish(
         typer.Option(
             "--bap",
             help="Bulk Agent Protocol identifier — single versioned protocol per "
-            "record (e.g., 'mcp2.1', 'a2a1.0'). Experimental per draft-02 §FutureWork; "
+            "record (e.g., 'mcp=2.1', 'a2a=1.0'). Experimental per draft-02 §FutureWork; "
             "alpn remains the canonical protocol carrier.",
         ),
     ] = None,

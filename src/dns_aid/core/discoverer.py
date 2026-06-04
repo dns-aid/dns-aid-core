@@ -469,12 +469,17 @@ async def _query_single_agent(
             cap_uri = custom_params.get("cap")
             cap_sha256 = custom_params.get("cap-sha256")
             well_known_path = custom_params.get("well-known")
-            # Under draft-02 §FutureWork (Bulk Agent Protocol), `bap` carries
-            # a single versioned protocol identifier per record (e.g., "mcp2.1").
-            # Pre-PR 4 records may have a comma-separated list; in that case we
-            # take the first value to preserve a sensible scalar.
-            bap_raw = custom_params.get("bap")
-            bap = bap_raw.split(",")[0].strip() if bap_raw else None
+            # draft-02 §5.1 (Bulk Agent Protocol, experimental): `bap`
+            # carries a single agent-protocol identifier per record in
+            # either bare (``mcp``) or versioned (``mcp=1.0``) form.
+            # Pre-draft-02 records may have a comma-separated list; the
+            # shared ``normalize_bap`` helper collapses that to the
+            # first non-empty token and warns so the data loss is
+            # observable. Use the same helper in the SDK and indexer
+            # so all consumers agree on the collapse semantics.
+            from dns_aid.core.bap import normalize_bap
+
+            bap = normalize_bap(custom_params.get("bap"))
             policy_uri = custom_params.get("policy")
             realm = custom_params.get("realm")
             connect_class = custom_params.get("connect-class")
@@ -725,8 +730,8 @@ def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
 
     Accepts both human-readable string names and RFC 9460 keyNNNNN form:
 
-    - String form: ``cap="https://..." bap="mcp,a2a" realm="demo"``
-    - Numeric form: ``key65400="https://..." key65402="mcp,a2a"``
+    - String form: ``cap="https://..." bap="mcp=1.0" realm="demo"``
+    - Numeric form: ``key65400="https://..." key65402="mcp=1.0"``
 
     The recognised name set is derived from
     ``dns_aid.core.models.DNS_AID_KEY_MAP`` at module load so this
@@ -1353,21 +1358,23 @@ async def discover_at_fqdn(fqdn: str) -> AgentRecord | None:
     # DNS query is identical regardless of which Protocol we ask for —
     # only the AgentRecord.protocol field gets stamped from it — so we
     # resolve once and then read the actual protocol from the record's
-    # ``bap`` scalar (preferred per draft-02 §Known Agent) or fall back
-    # to the protocol kwarg if bap doesn't name a value we model.
+    # ``bap`` scalar. bap can be bare (``mcp``) or versioned
+    # (``mcp=1.0``); split off the protocol token before checking
+    # membership against the Protocol enum, otherwise a versioned bap
+    # never matches and the reconciliation silently no-ops (Igor's
+    # #158 review item 4).
+    from dns_aid.core.bap import split_bap_token
+
     result = await _query_single_agent(domain, name, Protocol.MCP)
     if result is None:
         return None
-    # Reconcile the record's protocol with what was actually announced.
-    declared = (
-        result.bap if result.bap and result.bap.strip() in {pv.value for pv in Protocol} else None
-    )
-    if declared is not None:
+    proto_token, _version = split_bap_token(result.bap)
+    if proto_token is not None and proto_token in {pv.value for pv in Protocol}:
         # bap may carry a value we don't model (e.g. an extension);
         # in that case leave the default in place rather than refuse
         # the record.
         with contextlib.suppress(ValueError):
-            result.protocol = Protocol(declared.strip())
+            result.protocol = Protocol(proto_token)
     return result
 
 

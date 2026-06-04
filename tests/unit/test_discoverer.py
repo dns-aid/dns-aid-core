@@ -419,6 +419,36 @@ class TestDiscoverAtFqdn:
         assert result.protocol == Protocol.A2A
 
     @pytest.mark.asyncio
+    async def test_flat_shape_reads_protocol_from_versioned_bap(self):
+        """Igor's #158 review item 4 regression: when bap carries the
+        versioned form (``mcp=1.0``), the discoverer's protocol
+        reconciliation MUST extract the bare token before the membership
+        check — otherwise versioned bap silently no-ops and the
+        protocol stays the hardcoded default.
+        """
+        from dns_aid.core.models import AgentRecord
+
+        fake_record = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,  # default applied during the lookup
+            target_host="chat.example.com",
+            bap="a2a=1.1",  # versioned A2A — the case that used to silently fail
+        )
+        with patch(
+            "dns_aid.core.discoverer._query_single_agent",
+            new_callable=AsyncMock,
+            return_value=fake_record,
+        ):
+            result = await discover_at_fqdn("chat.example.com")
+
+        assert result is not None
+        # Protocol resolved to A2A despite the version suffix.
+        assert result.protocol == Protocol.A2A
+        # Versioned bap stays on the record verbatim.
+        assert result.bap == "a2a=1.1"
+
+    @pytest.mark.asyncio
     async def test_walkable_shape_resolves(self):
         """The walkable draft-02 shape `{name}._agents.{domain}` parses
         cleanly and routes to a single _query_single_agent call."""
@@ -610,14 +640,14 @@ class TestParseSvcbCustomParams:
             '1 mcp.example.com. alpn="mcp" port="443" '
             'cap="https://mcp.example.com/.well-known/agent-cap.json" '
             'cap-sha256="dGVzdGhhc2g" '
-            'bap="mcp/1,a2a/1" policy="https://example.com/policy" realm="production" '
+            'bap="mcp=1.0" policy="https://example.com/policy" realm="production" '
             'connect-class="lattice" connect-meta="arn:aws:vpc-lattice:::service/svc-123" '
             'enroll-uri="https://service.example.com/.well-known/agent-connect"'
         )
         params = _parse_svcb_custom_params(svcb_text)
         assert params["cap"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert params["cap-sha256"] == "dGVzdGhhc2g"
-        assert params["bap"] == "mcp/1,a2a/1"
+        assert params["bap"] == "mcp=1.0"
         assert params["policy"] == "https://example.com/policy"
         assert params["realm"] == "production"
         assert params["connect-class"] == "lattice"
@@ -855,7 +885,7 @@ class TestDiscoveryWithCapUri:
         mock_rdata.params = {}
         mock_rdata.__str__ = lambda self: (
             '1 mcp.example.com. alpn="mcp" port="443" '
-            'bap="mcp2.1" policy="https://example.com/policy" realm="staging"'
+            'bap="mcp=2.1" policy="https://example.com/policy" realm="staging"'
         )
 
         mock_answers = MagicMock()
@@ -880,7 +910,7 @@ class TestDiscoveryWithCapUri:
             agent = await _query_single_agent("example.com", "chat", Protocol.MCP)
 
         assert agent is not None
-        assert agent.bap == "mcp2.1"
+        assert agent.bap == "mcp=2.1"
         assert agent.policy_uri == "https://example.com/policy"
         assert agent.realm == "staging"
 
@@ -894,9 +924,7 @@ class TestDiscoveryWithCapUri:
         mock_rdata.priority = 1
         mock_rdata.port = 443
         mock_rdata.params = {}
-        mock_rdata.__str__ = lambda self: (
-            '1 mcp.example.com. alpn="mcp" port="443" bap="mcp/1,a2a/1"'
-        )
+        mock_rdata.__str__ = lambda self: '1 mcp.example.com. alpn="mcp" port="443" bap="mcp=1.0"'
         mock_answers = MagicMock()
         mock_answers.__iter__ = lambda self: iter([mock_rdata])
         mock_resolver = MagicMock()
@@ -918,7 +946,7 @@ class TestDiscoveryWithCapUri:
             agent = await _query_single_agent("example.com", "chat", Protocol.MCP)
 
         assert agent is not None
-        assert agent.bap == "mcp/1"
+        assert agent.bap == "mcp=1.0"
 
     @pytest.mark.asyncio
     async def test_discovery_extracts_connect_fields(self):

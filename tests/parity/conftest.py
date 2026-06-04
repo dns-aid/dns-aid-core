@@ -95,7 +95,7 @@ def parity_search_payload() -> dict[str, Any]:
                     "capabilities": ["payment-processing", "fraud-detection"],
                     "description": "Process card payments.",
                     "auth_type": "oauth2",
-                    "bap": "mcp/1,a2a/1",
+                    "bap": "mcp=1.0",
                     # Trust signals flat on the agent.
                     "security_score": 88,
                     "trust_score": 91,

@@ -688,7 +688,7 @@ class TestRoute53PublishAgentParamDemotion:
             capabilities=["dns"],
             realm="production",
             policy_uri="urn:policy:strict",
-            bap="mcp2.1",
+            bap="mcp=2.1",
         )
 
         backend = Route53Backend(zone_id="Z123")

@@ -131,7 +131,7 @@ class TestPublish:
             capabilities=["travel", "booking"],
             cap_uri="https://mcp.example.com/.well-known/agent-cap.json",
             cap_sha256="dGVzdGhhc2g",
-            bap="mcp2.1",
+            bap="mcp=2.1",
             policy_uri="https://example.com/agent-policy",
             realm="production",
             backend=mock_backend,
@@ -140,7 +140,7 @@ class TestPublish:
         assert result.success is True
         assert result.agent.cap_uri == "https://mcp.example.com/.well-known/agent-cap.json"
         assert result.agent.cap_sha256 == "dGVzdGhhc2g"
-        assert result.agent.bap == "mcp2.1"
+        assert result.agent.bap == "mcp=2.1"
         assert result.agent.policy_uri == "https://example.com/agent-policy"
         assert result.agent.realm == "production"
 
@@ -150,7 +150,7 @@ class TestPublish:
         # keyNNNNN format by default (RFC 9460 compliant)
         assert svcb["params"]["key65400"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert svcb["params"]["key65401"] == "dGVzdGhhc2g"
-        assert svcb["params"]["key65402"] == "mcp2.1"
+        assert svcb["params"]["key65402"] == "mcp=2.1"
         assert svcb["params"]["key65403"] == "https://example.com/agent-policy"
         assert svcb["params"]["key65404"] == "production"
 

@@ -189,12 +189,13 @@ class SvcbRecord(BaseModel):
     )
     bap: str | None = Field(
         default=None,
-        description="Bulk Agent Protocol (draft-02 §FutureWork). Carries a single "
-        "versioned agent-protocol identifier (e.g. 'mcp2.1', 'a2a1.0') per SVCB "
-        "record. Experimental in draft-02 — alpn remains the canonical protocol "
-        "carrier; bap adds version information when present. Multi-protocol "
-        "agents publish multiple SVCB records at the same flat owner, each with "
-        "its own alpn and (optionally) bap.",
+        description="Bulk Agent Protocol (draft-02 §5.1, §FutureWork). Carries a "
+        "single agent-protocol identifier per SVCB record in the draft's "
+        "delimited form: bare (``mcp``, ``a2a``) or versioned (``mcp=1.0``, "
+        "``a2a=1.1``). Experimental in draft-02 — alpn remains the protocol "
+        "carrier dns-aid-core treats as canonical for reconciliation. "
+        "Multi-protocol agents publish multiple SVCB records at the same flat "
+        "owner, each with its own alpn and (optionally) bap.",
     )
     policy_uri: str | None = Field(default=None, description="Agent policy URI")
     realm: str | None = Field(default=None, description="Opaque authz realm identifier")
@@ -267,6 +268,26 @@ class SvcbRecord(BaseModel):
         from dns_aid.utils.validation import validate_well_known_path
 
         return validate_well_known_path(v)
+
+    @field_validator("bap", mode="after")
+    @classmethod
+    def _enforce_safe_bap(cls, v: str | None) -> str | None:
+        """Constrain ``bap`` to the draft-02 wire shape at the type boundary.
+
+        Igor's #158 review surfaced the missing validator as a server-
+        side SvcParamKey injection vulnerability: a crafted value like
+        ``mcp" key65500="x`` would round-trip verbatim through
+        ``to_params()`` and the backend formatters, so dnspython
+        would parse two SvcParamKeys instead of one — the attacker
+        controls the second. Enforcing the constraint here catches it
+        on every construction path (direct, via ``to_svcb_record()``,
+        via ``publish()``).
+        """
+        if v is None:
+            return None
+        from dns_aid.core.bap import validate_bap
+
+        return validate_bap(v)
 
     @property
     def normalized_target(self) -> str:
@@ -437,14 +458,16 @@ class AgentRecord(BaseModel):
     )
     bap: str | None = Field(
         default=None,
-        description="Bulk Agent Protocol — single versioned agent-protocol "
-        "identifier (e.g. 'mcp2.1', 'a2a1.0') for this SVCB record. Per "
-        "draft-02 §FutureWork (Bulk Agent Protocol) this is experimental; "
-        "the canonical protocol carrier remains 'alpn'. bap adds version "
-        "information when present. Multi-protocol agents are published as "
-        "multiple AgentRecord instances at the same flat owner name, each "
-        "with its own alpn and (optionally) bap — NOT as a comma-separated "
-        "list on one record.",
+        description="Bulk Agent Protocol — single agent-protocol identifier "
+        "for this SVCB record in the draft's delimited form: bare "
+        "(``mcp``, ``a2a``) or versioned (``mcp=1.0``, ``a2a=1.1``). Per "
+        "draft-02 §5.1 / §FutureWork (Bulk Agent Protocol) this is "
+        "experimental; dns-aid-core treats ``alpn`` as the canonical "
+        "protocol carrier for reconciliation. bap adds version information "
+        "when present. Multi-protocol agents are published as multiple "
+        "AgentRecord instances at the same flat owner name, each with its "
+        "own alpn and (optionally) bap — NOT as a comma-separated list on "
+        "one record.",
     )
     policy_uri: str | None = Field(
         default=None,
@@ -640,6 +663,22 @@ class AgentRecord(BaseModel):
         from dns_aid.utils.validation import validate_well_known_path
 
         return validate_well_known_path(v)
+
+    @field_validator("bap", mode="after")
+    @classmethod
+    def _enforce_safe_bap_on_agent(cls, v: str | None) -> str | None:
+        """Same as SvcbRecord — enforce the canonical bap shape at the type.
+
+        Closes the SvcParamKey-injection hole Igor flagged on #158;
+        also rejects ``bap=["mcp"]`` (list form) at the type boundary
+        so the list→scalar break is explicit instead of silently
+        coercing.
+        """
+        if v is None:
+            return None
+        from dns_aid.core.bap import validate_bap
+
+        return validate_bap(v)
 
     @property
     def fqdn(self) -> str:

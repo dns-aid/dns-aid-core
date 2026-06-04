@@ -781,7 +781,7 @@ class TestCloudflarePublishAgentParamDemotion:
             capabilities=["all"],
             cap_uri="https://multi.example.com/cap.json",
             cap_sha256="abc123",
-            bap="mcp2.1",
+            bap="mcp=2.1",
             policy_uri="https://example.com/policy",
             realm="production",
         )
