@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dns-aid[cli]` imports without the `mcp` extra.** The MCP telemetry seam
+  imported `mcp.shared._httpx_utils.McpHttpClientFactory` at module load for a
+  single return-type annotation, so `import dns_aid` (and therefore the CLI)
+  failed with `ModuleNotFoundError: No module named 'mcp'` whenever the `mcp`
+  extra was not installed. The import now lives under `TYPE_CHECKING`
+  (`from __future__ import annotations` already keeps the annotation lazy), so
+  the package and CLI import with the core dependencies alone.
+- **`list` and `list_published_agents` surface flat-FQDN agents.** Listing
+  filtered records by the `_agents` substring, which under draft-02 matched
+  only the organization index and walkable aliases and silently missed every
+  flat agent owner (`{name}.{domain}`). A new `dns_aid.core.lister` identifies
+  DNS-AID records by structure (SVCB owners + companion TXT + `_agents`
+  bookkeeping); the CLI `list` command and the `list_published_agents` MCP tool
+  now report the same, complete set.
+- **Idempotent Infoblox BloxOne writes.** `create_svcb_record` and
+  `create_txt_record` POST-created records unconditionally, so repeated index
+  updates and re-publishes accumulated duplicate records and eventually failed
+  with `409 Conflict` on the `_index._agents` TXT. They now replace any
+  existing record at the same `(name, type)` before writing — an upsert that
+  matches the Route 53 backend's `UPSERT` contract and self-heals pre-existing
+  duplicates.
+
 ## [0.24.3] - 2026-06-04
 
 ### Fixed
