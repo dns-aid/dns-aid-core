@@ -19,11 +19,18 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import httpx
-from mcp.shared._httpx_utils import McpHttpClientFactory
 
 from dns_aid.sdk.telemetry.propagation import inject_otel_context
+
+if TYPE_CHECKING:
+    # `mcp` is an optional dependency (the `mcp` extra). It is referenced here
+    # only as a return-type annotation, which `from __future__ import
+    # annotations` keeps lazy — so importing this module (and therefore the
+    # whole `dns_aid` package and CLI) must not require `mcp` to be installed.
+    from mcp.shared._httpx_utils import McpHttpClientFactory
 
 
 @dataclass
