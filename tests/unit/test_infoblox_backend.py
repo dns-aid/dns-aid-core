@@ -146,8 +146,14 @@ class TestInfobloxBloxOneBackendAsync:
     ):
         """Test SVCB record creation."""
         with patch.object(backend, "_request", new_callable=AsyncMock) as mock_req:
-            # Calls: view lookup, zone lookup, record creation
-            mock_req.side_effect = [mock_view_response, mock_zone_response, mock_record_response]
+            # Calls: view lookup, zone lookup, upsert-existing lookup (none
+            # present), record creation.
+            mock_req.side_effect = [
+                mock_view_response,
+                mock_zone_response,
+                {"results": []},  # no existing SVCB at this name
+                mock_record_response,
+            ]
 
             result = await backend.create_svcb_record(
                 zone="example.com",
@@ -159,10 +165,10 @@ class TestInfobloxBloxOneBackendAsync:
             )
 
             assert result == "_test._mcp._agents.example.com"
-            assert mock_req.call_count == 3
+            assert mock_req.call_count == 4
 
             # Verify the POST call payload
-            post_call = mock_req.call_args_list[2]
+            post_call = mock_req.call_args_list[3]
             assert post_call[0][0] == "POST"
             assert post_call[0][1] == "/dns/record"
             payload = post_call[1]["json"]
@@ -181,8 +187,14 @@ class TestInfobloxBloxOneBackendAsync:
         }
 
         with patch.object(backend, "_request", new_callable=AsyncMock) as mock_req:
-            # Calls: view lookup, zone lookup, record creation
-            mock_req.side_effect = [mock_view_response, mock_zone_response, mock_txt_response]
+            # Calls: view lookup, zone lookup, upsert-existing lookup (none
+            # present), record creation.
+            mock_req.side_effect = [
+                mock_view_response,
+                mock_zone_response,
+                {"results": []},  # no existing TXT at this name
+                mock_txt_response,
+            ]
 
             result = await backend.create_txt_record(
                 zone="example.com",
@@ -194,10 +206,45 @@ class TestInfobloxBloxOneBackendAsync:
             assert result == "_test._mcp._agents.example.com"
 
             # Verify payload
-            post_call = mock_req.call_args_list[2]
+            post_call = mock_req.call_args_list[3]
             payload = post_call[1]["json"]
             assert payload["type"] == "TXT"
             assert "capabilities" in payload["rdata"]["text"]
+
+    async def test_create_is_idempotent_replaces_existing(
+        self, backend, mock_view_response, mock_zone_response
+    ):
+        """A create with an existing record at the same (name, type) deletes it
+        first, then creates — an upsert that prevents duplicate/409 accumulation
+        (regression for the BloxOne _index._agents duplication bug)."""
+        existing = {"results": [{"id": "dns/record/old-index-1"}]}
+        create_resp = {"result": {"id": "dns/record/new-index", "type": "TXT"}}
+
+        with patch.object(backend, "_request", new_callable=AsyncMock) as mock_req:
+            # view, zone, upsert-existing lookup (one present), DELETE, POST
+            mock_req.side_effect = [
+                mock_view_response,
+                mock_zone_response,
+                existing,
+                {},  # DELETE response
+                create_resp,
+            ]
+
+            await backend.create_txt_record(
+                zone="example.com",
+                name="_index._agents",
+                values=["agents=chat:mcp"],
+                ttl=3600,
+            )
+
+            methods_paths = [(c[0][0], c[0][1]) for c in mock_req.call_args_list]
+            # The existing record is deleted before the new one is created.
+            assert ("DELETE", "/dns/record/old-index-1") in methods_paths
+            delete_idx = methods_paths.index(("DELETE", "/dns/record/old-index-1"))
+            post_idx = next(
+                i for i, (m, p) in enumerate(methods_paths) if m == "POST" and p == "/dns/record"
+            )
+            assert delete_idx < post_idx, "must delete the stale record before creating the new one"
 
     async def test_delete_record_success(self, backend, mock_view_response, mock_zone_response):
         """Test successful record deletion."""

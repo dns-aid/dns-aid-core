@@ -291,6 +291,59 @@ class InfobloxBloxOneBackend(DNSBackend):
             "target_name": target,
         }
 
+    async def _delete_existing_records(
+        self, zone_id: str, name_in_zone: str, record_type: str
+    ) -> int:
+        """Delete every record at ``(name_in_zone, record_type)`` in the zone.
+
+        DNS-AID owns the names it writes (agent owners and ``_index._agents``)
+        and publishes exactly one record per ``(name, type)``. Removing any
+        existing record(s) before a create makes the write idempotent (an
+        upsert) and self-heals accidental duplicates left by earlier
+        non-idempotent writes — matching the UPSERT contract other backends
+        (e.g. Route53) already provide, and avoiding BloxOne ``409 Conflict``
+        on repeated index updates and re-publishes.
+
+        Returns the number of records deleted.
+        """
+        deleted = 0
+        # Bounded loop: re-query from the top after each batch (deletions shift
+        # pagination). The cap is a safety stop, far above any real fan-out.
+        for _ in range(50):
+            response = await self._request(
+                "GET",
+                "/dns/record",
+                params={
+                    "_filter": (
+                        f'zone=="{zone_id}" and name_in_zone=="{name_in_zone}" '
+                        f'and type=="{record_type}"'
+                    ),
+                    "_limit": "100",
+                },
+            )
+            results = response.get("results", [])
+            if not results:
+                break
+            for record in results:
+                record_id = record.get("id")
+                if record_id:
+                    await self._request("DELETE", f"/{record_id}")
+                    deleted += 1
+            # A partial page means we have just deleted the last of them, so
+            # there is nothing left to re-query. Only loop again if the page
+            # was full (which a real DNS-AID name never reaches).
+            if len(results) < 100:
+                break
+        if deleted:
+            logger.debug(
+                "Replaced existing record(s) before write",
+                zone_id=zone_id,
+                name=name_in_zone,
+                type=record_type,
+                deleted=deleted,
+            )
+        return deleted
+
     async def create_svcb_record(
         self,
         zone: str,
@@ -307,6 +360,11 @@ class InfobloxBloxOneBackend(DNSBackend):
         # Build record name (without zone suffix)
         # name comes as "_agent._mcp._agents"
         name_in_zone = name
+
+        # Idempotent write (upsert): replace any existing SVCB at this name so
+        # re-publishing an agent updates in place instead of accumulating
+        # duplicate records (see _delete_existing_records).
+        await self._delete_existing_records(zone_id, name_in_zone, "SVCB")
 
         # Build FQDN for logging
         fqdn = f"{name}.{zone}"
@@ -354,6 +412,11 @@ class InfobloxBloxOneBackend(DNSBackend):
         """Create TXT record in BloxOne."""
         zone_info = await self._get_zone_info(zone)
         zone_id = zone_info["id"]
+
+        # Idempotent write (upsert): replace any existing TXT at this name.
+        # Without this, repeated index updates (_index._agents) POST-create
+        # duplicate TXT records and eventually 409 on BloxOne.
+        await self._delete_existing_records(zone_id, name, "TXT")
 
         # Build FQDN
         fqdn = f"{name}.{zone}"
