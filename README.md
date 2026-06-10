@@ -859,26 +859,22 @@ Infoblox UDDI (Universal DDI) is Infoblox's cloud-native DDI platform. DNS-AID s
    )
    ```
 
-#### Infoblox UDDI Limitations & DNS-AID Compliance
+#### Infoblox UDDI SVCB Support
 
-> **⚠️ Important**: Infoblox UDDI SVCB records only support "alias mode" (priority 0) and do not
-> support SVC parameters (`alpn`, `port`, `mandatory`). This means **Infoblox UDDI is not fully
-> compliant with the [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/)**.
->
-> The draft requires ServiceMode SVCB records (priority > 0) with mandatory `alpn` and `port`
-> parameters. Infoblox UDDI's limitation is a platform constraint, not a DNS-AID limitation.
+Infoblox UDDI supports **full ServiceMode SVCB** (RFC 9460): `priority > 0` with `svc_params`,
+including the standard keys (`alpn`, `port`, `mandatory`, `ipv4hint`, `ipv6hint`, ...) and the
+private-use range `key65280`–`key65534`. DNS-AID's custom parameters (`cap`, `cap-sha256`,
+`bap`, `policy`, `realm`, `sig`, `connect-class`, `connect-meta`, `enroll-uri` — encoded as
+`key65400`–`key65405`) are written **natively on the SVCB record**, not demoted to a TXT
+companion.
 
 | DNS-AID Requirement | Route 53 | Infoblox UDDI |
 |---------------------|----------|---------------|
-| ServiceMode (priority > 0) | ✅ | ❌ |
-| `alpn` parameter | ✅ | ❌ |
-| `port` parameter | ✅ | ❌ |
-| `mandatory` key | ✅ | ❌ |
+| ServiceMode (priority > 0) | ✅ | ✅ |
+| `alpn` / `port` / `mandatory` | ✅ | ✅ |
+| Private-use keys (cap/bap/policy/realm/sig/...) | ✅ | ✅ |
 
-**For full DNS-AID compliance, use Route 53 or another RFC 9460-compliant DNS provider.**
-
-DNS-AID stores `alpn` and `port` in TXT records as a fallback for Infoblox UDDI, but this is
-a workaround and not standard-compliant for agent discovery.
+Infoblox UDDI is a **fully DNS-AID-compliant** ServiceMode SVCB backend.
 
 #### Verify Records via API
 

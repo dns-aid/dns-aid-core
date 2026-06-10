@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-06-10
+
+### Added
+
+- **Full RFC 9460 ServiceMode SVCB support for the Infoblox UDDI backend.** The
+  backend now declares `supports_private_svcb_keys = True`, so the DNS-AID
+  custom SvcParams (`cap` / `cap-sha256` / `bap` / `policy` / `realm` / `sig` /
+  `connect-*` / `enroll-uri`, encoded as the private-use keys
+  `key65400`–`key65405`) are written natively on the SVCB record itself via the
+  UDDI DNS Data API's `svc_params` list rather than demoted to a TXT companion.
+  Verified against the live UDDI DNS Data API across the library, CLI, and MCP
+  interfaces, including idempotent upsert, concurrent publish, adversarial
+  values, and the SvcParam quote-breakout injection guard.
+
+### Changed
+
+- **The Infoblox UDDI backend emits true ServiceMode SVCB rdata.** SVCB records
+  now carry their real `priority` (ServiceMode when `> 0`) and a structured
+  `svc_params` list of `{"key", "value"}` objects. Previously the backend
+  hardcoded `priority` to `0` (AliasMode) and dropped all SvcParams, mirroring
+  a now-removed assumption that UDDI could not store them. Record listing and
+  lookup render through a single shared presentation helper so `list_records`
+  and `get_record` stay consistent. Records published by earlier versions
+  continue to resolve; re-publishing upgrades them to ServiceMode in place.
+
+### Fixed
+
+- **Infoblox UDDI writes are now a safe in-place upsert (no data-loss window).**
+  `create_svcb_record` / `create_txt_record` previously deleted the existing
+  record before creating the replacement, so a rejected or transient failure on
+  the follow-up create (throttle, 5xx, oversize payload during a re-publish)
+  could leave the name with no record — for SVCB, an agent silently dropping out
+  of DNS. The backend now reads the existing record and updates it in place with
+  `PATCH` (creating with `POST` only when none exists), so a failed write leaves
+  the previous record intact. This also resolves the repeated-index-update `409`
+  the delete-then-create was working around, and heals duplicate records left by
+  older non-idempotent writes. The expanded ServiceMode SvcParam payload made the
+  previous window materially larger, so it is closed here alongside that change.
+
 ## [0.24.4] - 2026-06-10
 
 ### Fixed
