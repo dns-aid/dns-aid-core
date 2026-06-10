@@ -1009,12 +1009,11 @@ def list_published_agents(
     dns_backend = _get_dns_backend(backend)
 
     async def _list():
+        from dns_aid.core.lister import list_dns_aid_records
+
         if not await dns_backend.zone_exists(domain):
             return None  # sentinel: zone not found
-        records = []
-        async for record in dns_backend.list_records(domain, name_pattern="_agents"):
-            records.append(record)
-        return records
+        return await list_dns_aid_records(dns_backend, domain)
 
     try:
         records = _run_async(_list())

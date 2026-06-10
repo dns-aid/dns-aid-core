@@ -787,11 +787,14 @@ def list_records(
     """
     List DNS-AID records in a domain.
 
-    Shows all _agents.* records in the specified zone.
+    Shows the flat agent owners ({name}.{domain} SVCB + TXT), the organization
+    index (_index._agents), and any walkable aliases in the specified zone.
 
     Example:
         dns-aid list example.com
     """
+    from dns_aid.core.lister import list_dns_aid_records
+
     dns_backend = _get_backend(backend)
 
     console.print(f"\n[bold]DNS-AID records in {domain}:[/bold]\n")
@@ -799,10 +802,7 @@ def list_records(
     async def list_all():
         if not await dns_backend.zone_exists(domain):
             return None  # sentinel: zone not found
-        records = []
-        async for record in dns_backend.list_records(domain, name_pattern="_agents"):
-            records.append(record)
-        return records
+        return await list_dns_aid_records(dns_backend, domain)
 
     try:
         records = run_async(list_all())
