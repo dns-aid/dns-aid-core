@@ -47,7 +47,7 @@ Experimental features should be clearly labeled in code comments, documentation,
 dns-aid-core/
 ├── src/dns_aid/
 │   ├── core/           # Discovery, publishing, validation (Tier 0)
-│   ├── backends/       # DNS backends (Route 53, Cloudflare, NS1, Infoblox BloxOne, NIOS, DDNS, Mock)
+│   ├── backends/       # DNS backends (Route 53, Cloudflare, NS1, Infoblox BloxOne, NIOS, Akamai EdgeDNS, DDNS, Mock)
 │   ├── sdk/            # Telemetry SDK, ranking, protocol handlers (Tier 1)
 │   ├── cli/            # CLI commands (publish, discover, verify, list, init, doctor)
 │   ├── mcp/            # MCP server for AI agents

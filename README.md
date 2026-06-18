@@ -61,7 +61,7 @@ pip install "dns-aid[cli,mcp]"
 pip install "dns-aid[cli,mcp] @ git+https://github.com/dns-aid/dns-aid-core.git"
 ```
 
-For backend-specific extras (`route53`, `cloudflare`, `ns1`, `cloud_dns`, `infoblox`, `ddns`), see the [Getting Started Guide](docs/getting-started.md#install).
+For backend-specific extras (`route53`, `cloudflare`, `ns1`, `cloud_dns`, `infoblox`, `akamai-edgedns`, `ddns`), see the [Getting Started Guide](docs/getting-started.md#install).
 
 ### Python Library
 

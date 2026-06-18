@@ -155,6 +155,27 @@ BACKEND_REGISTRY: dict[str, BackendInfo] = {
             "Set NIOS_VERIFY_SSL=true if you have a valid TLS certificate",
         ],
     ),
+    "akamai-edgedns": BackendInfo(
+        name="akamai-edgedns",
+        display_name="Akamai Edge DNS",
+        required_env={},  # credentials resolved via env vars or ~/.edgerc
+        optional_env={
+            "AKAMAI_HOST": "EdgeGrid API hostname (e.g., akab-xxx.luna.akamaiapis.net)",
+            "AKAMAI_CLIENT_TOKEN": "EdgeGrid client token", 
+            "AKAMAI_CLIENT_SECRET": "EdgeGrid client secret",  
+            "AKAMAI_ACCESS_TOKEN": "EdgeGrid access token", 
+            "AKAMAI_EDGERC": "Path to .edgerc file (default: ~/.edgerc)",
+            "AKAMAI_EDGERC_SECTION": "Section within .edgerc (default: default)",
+        },
+        optional_dep="akamai-edgedns",
+        setup_url="https://techdocs.akamai.com/developer/docs/set-up-authentication-credentials",
+        setup_steps=[
+            "Create API credentials at control.akamai.com → Identity & Access Management",
+            "Grant DNS—Zone Record Management read-write permission",
+            "Set AKAMAI_HOST, AKAMAI_CLIENT_TOKEN, AKAMAI_CLIENT_SECRET, AKAMAI_ACCESS_TOKEN",
+            "Or configure ~/.edgerc (Akamai CLI creates this automatically)",
+        ],
+    ),
     "ddns": BackendInfo(
         name="ddns",
         display_name="RFC 2136 Dynamic DNS",

@@ -80,6 +80,9 @@ ns1 = [
 nios = [
     # Uses httpx from core deps
 ]
+akamai-edgedns = [
+    "edgegrid-python>=2.0.7",
+]
 ddns = [
     # Uses dnspython from core deps
 ]
@@ -141,9 +144,10 @@ all = [
     # Transitive floors via mcp (Dependabot)
     "pyjwt>=2.13.0",
     "python-multipart>=0.0.27",
-    # Backends: Route53, Cloudflare, NS1, Cloud DNS, Infoblox BloxOne, NIOS, DDNS
+    # Backends: Route53, Cloudflare, NS1, Cloud DNS, Infoblox BloxOne, NIOS, Akamai EdgeDNS, DDNS
     "boto3>=1.34.0",
     "google-auth>=2.30.0",
+    "edgegrid-python>=2.0.7",
     # JWS
     "cryptography>=46.0.7",
     # OpenTelemetry (spec 005 — upper bound pinned per FR-027)

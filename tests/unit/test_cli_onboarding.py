@@ -29,6 +29,7 @@ class TestBackendRegistry:
             "ns1",
             "infoblox",
             "nios",
+            "akamai-edgedns",
             "ddns",
             "mock",
         }

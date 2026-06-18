@@ -51,6 +51,7 @@ pip install -e ".[cloudflare]"  # Core + Cloudflare backend
 pip install -e ".[ns1]"         # Core + NS1 (IBM) backend
 pip install -e ".[infoblox]"    # Core + Infoblox BloxOne backend
 pip install -e ".[nios]"        # Core + Infoblox NIOS (on-prem) backend
+pip install -e ".[akamai-edgedns]" # Core + Akamai Edge DNS backend
 pip install -e ".[ddns]"        # Core + RFC 2136 Dynamic DNS backend
 pip install -e ".[cel]"         # Core + CEL custom policy rules
 ```
@@ -1647,7 +1648,7 @@ python examples/demo_full.py
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DNS_AID_BACKEND` | Yes (if no `backend=` arg) | — | DNS backend: `route53`, `cloudflare`, `ns1`, `infoblox`, `nios`, `ddns`, `mock` |
+| `DNS_AID_BACKEND` | Yes (if no `backend=` arg) | — | DNS backend: `route53`, `cloudflare`, `ns1`, `infoblox`, `nios`, `akamai-edgedns`, `ddns`, `mock` |
 | `DNS_AID_SVCB_STRING_KEYS` | No | `0` | Set `1` to emit human-readable SVCB param names instead of keyNNNNN |
 | `DNS_AID_FETCH_ALLOWLIST` | No | — | Comma-separated hostnames to bypass SSRF protection (testing only) |
 
