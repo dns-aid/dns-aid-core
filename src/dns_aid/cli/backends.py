@@ -173,7 +173,7 @@ BACKEND_REGISTRY: dict[str, BackendInfo] = {
             "Create API credentials at control.akamai.com → Identity & Access Management",
             "Grant DNS—Zone Record Management read-write permission",
             "Set AKAMAI_HOST, AKAMAI_CLIENT_TOKEN, AKAMAI_CLIENT_SECRET, AKAMAI_ACCESS_TOKEN",
-            "Or configure ~/.edgerc (Akamai CLI creates this automatically)",
+            "Or configure ~/.edgerc",
         ],
     ),
     "ddns": BackendInfo(
