@@ -203,7 +203,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         ``Authorization`` header, then hand those headers to httpx for the
         actual async I/O.  No HTTP call goes through ``requests``.
         """
-        import requests as req_lib
+        import requests as req_lib  # type: ignore[import-untyped]
 
         prepared = req_lib.Request(method, url, headers=headers, data=body).prepare()
         signed = self._auth(prepared)
