@@ -170,7 +170,7 @@ BACKEND_REGISTRY: dict[str, BackendInfo] = {
         optional_dep="akamai-edgedns",
         setup_url="https://techdocs.akamai.com/developer/docs/set-up-authentication-credentials",
         setup_steps=[
-            "Create API credentials at control.akamai.com → Identity & Access Management",
+            "Create API credentials at control.akamai.com → Identity & Access",
             "Grant DNS—Zone Record Management read-write permission",
             "Set AKAMAI_HOST, AKAMAI_CLIENT_TOKEN, AKAMAI_CLIENT_SECRET, AKAMAI_ACCESS_TOKEN",
             "Or configure ~/.edgerc",
