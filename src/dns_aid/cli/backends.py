@@ -161,9 +161,9 @@ BACKEND_REGISTRY: dict[str, BackendInfo] = {
         required_env={},  # credentials resolved via env vars or ~/.edgerc
         optional_env={
             "AKAMAI_HOST": "EdgeGrid API hostname (e.g., akab-xxx.luna.akamaiapis.net)",
-            "AKAMAI_CLIENT_TOKEN": "EdgeGrid client token", 
-            "AKAMAI_CLIENT_SECRET": "EdgeGrid client secret",  
-            "AKAMAI_ACCESS_TOKEN": "EdgeGrid access token", 
+            "AKAMAI_CLIENT_TOKEN": "EdgeGrid client token",  # nosec B105 — description, not a credential
+            "AKAMAI_CLIENT_SECRET": "EdgeGrid client secret",  # nosec B105 — description, not a credential
+            "AKAMAI_ACCESS_TOKEN": "EdgeGrid access token",  # nosec B105 — description, not a credential
             "AKAMAI_EDGERC": "Path to .edgerc file (default: ~/.edgerc)",
             "AKAMAI_EDGERC_SECTION": "Section within .edgerc (default: default)",
         },
