@@ -394,6 +394,122 @@ dns-aid delete \
 
 NIOS WAPI supports ServiceMode SVCB records (priority > 0) with full SVC parameters, including custom DNS-AID keys natively via `key65400`–`key65405`. This makes it fully compliant with the DNS-AID draft.
 
+## Akamai Edge DNS Setup
+
+Akamai Edge DNS supports ServiceMode SVCB records with full private-use key support, making it fully compliant with the DNS-AID draft. All custom DNS-AID parameters (`cap`, `bap`, `realm`, etc.) are written directly into SVCB — no TXT demotion.
+
+### 1. Install
+
+```bash
+pip install -e ".[akamai-edgedns]"
+```
+
+### 2. Configure Credentials
+
+**Option A — Environment variables:**
+
+```bash
+export AKAMAI_HOST="akab-xxxx.luna.akamaiapis.net"
+export AKAMAI_CLIENT_TOKEN="akab-xxxx"
+export AKAMAI_CLIENT_SECRET="xxxx"
+export AKAMAI_ACCESS_TOKEN="akab-xxxx"
+```
+
+**Option B — `.edgerc` file (default: `~/.edgerc`):**
+
+```ini
+[default]
+host = akab-xxxx.luna.akamaiapis.net
+client_token = akab-xxxx
+client_secret = xxxx
+access_token = akab-xxxx
+```
+
+If your `.edgerc` is at a non-default path or uses a section other than `[default]`, set these:
+
+```bash
+export AKAMAI_EDGERC="/path/to/.edgerc"       # default: ~/.edgerc
+export AKAMAI_EDGERC_SECTION="production"     # default: default
+```
+
+Environment variables take precedence over `.edgerc` when both are present.
+
+### 3. Set Test Zone
+
+```bash
+export DNS_AID_TEST_ZONE="your-zone.com"
+```
+
+### 4. Verify Connection
+
+```bash
+dns-aid doctor
+```
+
+### 5. Verify Connection (Python)
+
+```python
+import asyncio
+from dns_aid.backends.akamai_edgedns import AkamaiEdgeDNSBackend
+
+async def verify_connection():
+    backend = AkamaiEdgeDNSBackend()
+
+    exists = await backend.zone_exists("your-zone.com")
+    print(f"Zone exists: {exists}")
+
+    async for record in backend.list_records("your-zone.com"):
+        if "_agents" in record["fqdn"]:
+            print(f"  {record['type']}: {record['fqdn']}")
+
+    await backend.close()
+
+asyncio.run(verify_connection())
+```
+
+### 6. Quick CLI Test
+
+```bash
+# Publish a test agent
+dns-aid publish \
+    --name test-agent \
+    --domain $DNS_AID_TEST_ZONE \
+    --protocol mcp \
+    --endpoint mcp.$DNS_AID_TEST_ZONE \
+    --backend akamai-edgedns
+
+# Verify it was created
+dns-aid list $DNS_AID_TEST_ZONE --backend akamai-edgedns
+
+# Clean up
+dns-aid delete \
+    --name test-agent \
+    --domain $DNS_AID_TEST_ZONE \
+    --protocol mcp \
+    --backend akamai-edgedns \
+    --force
+```
+
+### 7. Run Integration Tests
+
+```bash
+# Install the required dependency first
+uv pip install edgegrid-python
+
+export AKAMAI_TEST_ZONE="your-zone.com"
+
+# Read-only (zone checks, no records created)
+uv run pytest tests/integration/test_akamai_edgedns.py::TestAkamaiEdgeDNSReadOnly -v -m live
+
+# Mutation tests (creates and deletes real records)
+export AKAMAI_MUTATION_TESTS=1
+uv run pytest tests/integration/test_akamai_edgedns.py::TestAkamaiEdgeDNSMutation -v -m live
+```
+
+### Akamai Edge DNS Compliance
+
+Akamai Edge DNS accepts private-use SVCB keys natively. DNS-AID custom parameters (`cap` → `key65400`, `bap` → `key65402`, `realm` → `key65404`, etc.) are written directly on the SVCB record without demotion to TXT. This makes it fully compliant with the DNS-AID draft.
+
 ## DDNS Setup (RFC 2136)
 
 DDNS (Dynamic DNS) works with any DNS server supporting RFC 2136, including BIND9, Windows DNS, PowerDNS, and Knot DNS. This is ideal for on-premise infrastructure without vendor-specific APIs.
