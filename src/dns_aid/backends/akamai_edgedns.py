@@ -169,7 +169,13 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             ) from exc
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create httpx async client with event-loop tracking."""
+        """Get or create httpx async client with event-loop tracking.
+
+        Note: this client intentionally carries no auth headers. EdgeGrid
+        requires a per-request HMAC signature over method + URL + body, so
+        signing happens inside ``_request()`` via ``_sign_request()`` rather
+        than at client construction time. Do not move auth here.
+        """
         current_loop_id = id(asyncio.get_running_loop())
 
         # Recreate client if the event loop changed (e.g., multiple asyncio.run() calls)
@@ -202,6 +208,10 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         we create a throw-away ``requests.PreparedRequest`` to compute the
         ``Authorization`` header, then hand those headers to httpx for the
         actual async I/O.  No HTTP call goes through ``requests``.
+
+        ``requests`` is a transitive dependency of ``edgegrid-python`` and
+        is always available whenever the ``akamai-edgedns`` extra is
+        installed; we deliberately do not list it as a direct dependency.
         """
         import requests as req_lib  # type: ignore[import-untyped]
 
@@ -248,7 +258,9 @@ class AkamaiEdgeDNSBackend(DNSBackend):
                 headers=signed_headers,
             )
         except httpx.HTTPError as exc:
-            raise RuntimeError(f"Akamai Edge DNS transport error ({method} {path}): {exc}") from exc
+            raise ValueError(
+                f"Akamai Edge DNS transport error ({method} {path}): {exc}"
+            ) from exc
 
         # 404 = record/zone not found — return None instead of raising
         if response.status_code == 404:
@@ -265,7 +277,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
                 status_code=exc.response.status_code,
                 response_body=body_text,
             )
-            raise RuntimeError(
+            raise ValueError(
                 f"Akamai Edge DNS API error ({method} {path}): "
                 f"status={exc.response.status_code} body={body_text}"
             ) from exc
@@ -353,9 +365,9 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         rdata = self._format_svcb_rdata(priority, target, params)
 
         logger.info(
-            "Creating SVCB record in Akamai Edge DNS",
+            "Creating SVCB record",
             zone=zone_clean,
-            fqdn=fqdn,
+            name=fqdn,
             priority=priority,
             target=target,
             params=params,
@@ -378,7 +390,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         else:
             await self._request("POST", path, json_data=payload)
 
-        logger.info("SVCB record created", fqdn=fqdn)
+        logger.info("SVCB record created", name=fqdn)
         return fqdn
 
     async def create_txt_record(
@@ -394,9 +406,9 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         content = " ".join(values)
 
         logger.info(
-            "Creating TXT record in Akamai Edge DNS",
+            "Creating TXT record",
             zone=zone_clean,
-            fqdn=fqdn,
+            name=fqdn,
             values=values,
             ttl=ttl,
         )
@@ -417,7 +429,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         else:
             await self._request("POST", path, json_data=payload)
 
-        logger.info("TXT record created", fqdn=fqdn)
+        logger.info("TXT record created", name=fqdn)
         return fqdn
 
     async def delete_record(
@@ -432,21 +444,30 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         rtype = record_type.upper()
 
         logger.info(
-            "Deleting record from Akamai Edge DNS",
+            "Deleting record",
             zone=zone_clean,
-            fqdn=fqdn,
+            name=fqdn,
             type=rtype,
         )
 
         path = f"/config-dns/v2/zones/{zone_clean}/names/{fqdn}/types/{rtype}"
-        # _request returns None on 404 — record doesn't exist
-        result = await self._request("DELETE", path)
-
-        if result is None:
-            logger.warning("Record not found", fqdn=fqdn, type=rtype)
+        try:
+            # _request returns None on 404 — record doesn't exist
+            result = await self._request("DELETE", path)
+        except Exception as exc:
+            logger.exception(
+                "Failed to delete record",
+                name=fqdn,
+                type=rtype,
+                error=str(exc),
+            )
             return False
 
-        logger.info("Record deleted", fqdn=fqdn, type=rtype)
+        if result is None:
+            logger.warning("Record not found", name=fqdn, type=rtype)
+            return False
+
+        logger.info("Record deleted", name=fqdn, type=rtype)
         return True
 
     async def list_records(
@@ -454,12 +475,12 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         zone: str,
         name_pattern: str | None = None,
         record_type: str | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> AsyncIterator[dict]:
         """List DNS records in an Akamai Edge DNS zone."""
         zone_clean = zone.rstrip(".")
 
         logger.debug(
-            "Listing records in Akamai Edge DNS",
+            "Listing records",
             zone=zone_clean,
             name_pattern=name_pattern,
             record_type=record_type,
@@ -521,7 +542,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         zone: str,
         name: str,
         record_type: str,
-    ) -> dict[str, Any] | None:
+    ) -> dict | None:
         """Get a specific DNS record by querying the Edge DNS API directly."""
         fqdn = self._to_fqdn(name, zone)
         zone_clean = zone.rstrip(".")
@@ -572,9 +593,9 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             self._zone_cache[zone_clean] = False
             return False
 
-    async def list_zones(self) -> list[dict[str, Any]]:
+    async def list_zones(self) -> list[dict]:
         """List all zones accessible with the current credentials."""
-        zones: list[dict[str, Any]] = []
+        zones: list[dict] = []
         page = 1
 
         while True:

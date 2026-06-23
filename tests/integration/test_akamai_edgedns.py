@@ -25,6 +25,7 @@ import uuid
 
 import pytest
 
+
 def _edgegrid_available() -> bool:
     try:
         import akamai.edgegrid  # noqa: F401
@@ -49,11 +50,13 @@ pytestmark = [
 
 @pytest.fixture
 def test_zone() -> str:
+    """Get test zone from environment."""
     return os.environ["AKAMAI_TEST_ZONE"]
 
 
 @pytest.fixture
 async def backend():
+    """Create Akamai Edge DNS backend from environment variables / ~/.edgerc."""
     from dns_aid.backends.akamai_edgedns import AkamaiEdgeDNSBackend
 
     b = AkamaiEdgeDNSBackend()
@@ -63,25 +66,29 @@ async def backend():
 
 @pytest.fixture
 def unique_name() -> str:
+    """Generate unique record name to avoid conflicts."""
     short_id = str(uuid.uuid4())[:8]
     return f"_inttest-{short_id}._mcp._agents"
 
 
 class TestAkamaiEdgeDNSReadOnly:
-    """Read-only tests — no records created."""
+    """Read-only integration tests for Akamai Edge DNS backend."""
 
     async def test_zone_exists(self, backend, test_zone):
+        """Test zone existence check."""
         assert await backend.zone_exists(test_zone) is True
 
     async def test_zone_exists_trailing_dot(self, backend, test_zone):
+        """Test zone existence with trailing dot."""
         assert await backend.zone_exists(f"{test_zone}.") is True
 
     async def test_zone_not_exists(self, backend):
+        """Test zone non-existence."""
         assert await backend.zone_exists("nonexistent-zone-xyz123.invalid") is False
 
 
 class TestAkamaiEdgeDNSMutation:
-    """Mutation tests — require AKAMAI_MUTATION_TESTS=1."""
+    """Mutation integration tests (create/delete) for Akamai Edge DNS backend."""
 
     pytestmark = pytest.mark.skipif(
         not os.environ.get("AKAMAI_MUTATION_TESTS"),

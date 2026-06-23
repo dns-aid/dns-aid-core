@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -21,6 +21,7 @@ class TestAkamaiEdgeDNSBackendInit:
     """Tests for AkamaiEdgeDNSBackend initialization."""
 
     def test_init_with_explicit_credentials(self):
+        """Explicit credential kwargs are stored on the instance."""
         backend = AkamaiEdgeDNSBackend(
             host="akab-test.luna.akamaiapis.net",
             client_token="ct-xxx",
@@ -33,6 +34,7 @@ class TestAkamaiEdgeDNSBackendInit:
         assert backend._access_token == "at-xxx"
 
     def test_init_from_env_vars(self):
+        """Backend reads credentials from AKAMAI_* env vars when kwargs omitted."""
         env = {
             "AKAMAI_HOST": "akab-env.luna.akamaiapis.net",
             "AKAMAI_CLIENT_TOKEN": "ct-env",
@@ -45,6 +47,7 @@ class TestAkamaiEdgeDNSBackendInit:
             assert backend._client_token == "ct-env"
 
     def test_init_defaults(self):
+        """Lazy state (client, auth, zone cache) starts uninitialised; edgerc defaults apply."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -58,6 +61,7 @@ class TestAkamaiEdgeDNSBackendInit:
         assert backend._edgerc_section == "default"
 
     def test_init_custom_edgerc(self):
+        """Custom edgerc_path and edgerc_section kwargs override defaults."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -79,6 +83,7 @@ class TestAkamaiEdgeDNSBackendProperties:
     """Tests for backend properties."""
 
     def test_name_property(self):
+        """`name` returns the backend's registry identifier."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -88,6 +93,7 @@ class TestAkamaiEdgeDNSBackendProperties:
         assert backend.name == "akamai-edgedns"
 
     def test_supports_private_svcb_keys(self):
+        """Akamai Edge DNS accepts private-use SVCB keys natively."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -106,19 +112,41 @@ class TestAkamaiEdgeDNSBackendAuth:
     """Tests for EdgeGrid authentication initialization."""
 
     def test_ensure_auth_with_env_credentials(self):
+        """Real _ensure_auth() initialises EdgeGridAuth from explicit credentials."""
         backend = AkamaiEdgeDNSBackend(
             host="akab-test.luna.akamaiapis.net",
             client_token="ct-xxx",
             client_secret="cs-xxx",
             access_token="at-xxx",
         )
-        MockAuth = MagicMock()
-        with patch("dns_aid.backends.akamai_edgedns.AkamaiEdgeDNSBackend._ensure_auth") as m:
-            m.side_effect = lambda: setattr(backend, "_auth", MockAuth)
+        mock_ega_instance = MagicMock()
+        with patch(
+            "akamai.edgegrid.EdgeGridAuth", return_value=mock_ega_instance
+        ) as mock_ega:
             backend._ensure_auth()
-            assert backend._auth is not None
+
+        assert backend._auth is mock_ega_instance
+        mock_ega.assert_called_once_with(
+            client_token="ct-xxx",
+            client_secret="cs-xxx",
+            access_token="at-xxx",
+        )
+
+    def test_ensure_auth_is_idempotent(self):
+        """Second call to _ensure_auth() short-circuits when _auth is already set."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+        existing_auth = MagicMock()
+        backend._auth = existing_auth
+        backend._ensure_auth()
+        assert backend._auth is existing_auth
 
     def test_ensure_auth_raises_without_credentials(self):
+        """Missing creds and missing .edgerc raises ValueError with setup hint."""
         backend = AkamaiEdgeDNSBackend()
         backend._edgerc_path = "/nonexistent/.edgerc"
         with pytest.raises(ValueError, match="credentials not configured"):
@@ -135,6 +163,7 @@ class TestAkamaiEdgeDNSBackendClient:
 
     @pytest.mark.asyncio
     async def test_get_client_creates_client(self):
+        """First call to _get_client() returns a real httpx.AsyncClient."""
         backend = AkamaiEdgeDNSBackend(
             host="akab-test.luna.akamaiapis.net",
             client_token="ct-xxx",
@@ -151,6 +180,7 @@ class TestAkamaiEdgeDNSBackendClient:
 
     @pytest.mark.asyncio
     async def test_get_client_caches_client(self):
+        """Subsequent calls to _get_client() return the same cached instance."""
         backend = AkamaiEdgeDNSBackend(
             host="akab-test.luna.akamaiapis.net",
             client_token="ct-xxx",
@@ -168,59 +198,171 @@ class TestAkamaiEdgeDNSBackendClient:
 
 
 # ---------------------------------------------------------------------------
+# Internal _request() helper
+# ---------------------------------------------------------------------------
+
+
+def _make_response(status_code: int, json_body=None, text: str = "") -> MagicMock:
+    """Build a mock httpx.Response with the supplied status and body."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status_code
+    resp.text = text or (str(json_body) if json_body is not None else "")
+    resp.content = b"x" if json_body is not None or text else b""
+    resp.json = MagicMock(return_value=json_body if json_body is not None else {})
+
+    if status_code >= 400:
+        request = httpx.Request("GET", "https://example.com")
+        resp.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError("error", request=request, response=resp)
+        )
+    else:
+        resp.raise_for_status = MagicMock()
+    return resp
+
+
+class TestAkamaiEdgeDNSBackendRequest:
+    """Tests for the internal _request() helper."""
+
+    @pytest.mark.asyncio
+    async def test_request_returns_json_on_success(self):
+        """A 200 response returns the parsed JSON body."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+        backend._auth = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(
+            return_value=_make_response(200, json_body={"zone": "example.com"})
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch.object(backend, "_sign_request", return_value={}),
+        ):
+            result = await backend._request("GET", "/config-dns/v2/zones/example.com")
+
+        assert result == {"zone": "example.com"}
+
+    @pytest.mark.asyncio
+    async def test_request_returns_none_on_404(self):
+        """A 404 response is converted to None (record/zone not found)."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+        backend._auth = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=_make_response(404))
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch.object(backend, "_sign_request", return_value={}),
+        ):
+            result = await backend._request("GET", "/config-dns/v2/zones/missing.com")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_request_raises_value_error_on_transport_error(self):
+        """httpx.HTTPError raised by the client is converted to ValueError."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+        backend._auth = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(side_effect=httpx.ConnectError("refused"))
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch.object(backend, "_sign_request", return_value={}),
+        ):
+            with pytest.raises(ValueError, match="transport error"):
+                await backend._request("GET", "/config-dns/v2/zones/example.com")
+
+    @pytest.mark.asyncio
+    async def test_request_raises_value_error_on_api_error_status(self):
+        """A non-404 HTTP error status is converted to ValueError."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+        backend._auth = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(
+            return_value=_make_response(403, text="Forbidden")
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch.object(backend, "_sign_request", return_value={}),
+        ):
+            with pytest.raises(ValueError, match="status=403"):
+                await backend._request("GET", "/config-dns/v2/zones/example.com")
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-class TestAkamaiEdgeDNSHelpers:
+class TestAkamaiEdgeDNSBackendHelpers:
     """Tests for helper methods."""
 
     def test_to_fqdn(self):
+        """`_to_fqdn` joins a relative name to its zone."""
         assert (
             AkamaiEdgeDNSBackend._to_fqdn("_chat._a2a._agents", "example.com")
             == "_chat._a2a._agents.example.com"
         )
 
     def test_to_fqdn_already_qualified(self):
+        """Names already ending with the zone are returned unchanged."""
         assert (
             AkamaiEdgeDNSBackend._to_fqdn("_chat._agents.example.com", "example.com")
             == "_chat._agents.example.com"
         )
 
     def test_to_fqdn_strips_trailing_dot(self):
+        """Trailing dots on the zone are stripped from the resulting FQDN."""
         assert AkamaiEdgeDNSBackend._to_fqdn("_chat", "example.com.") == "_chat.example.com"
 
     def test_extract_name_from_fqdn(self):
+        """`_extract_name_from_fqdn` strips the zone suffix to recover the record name."""
         assert (
             AkamaiEdgeDNSBackend._extract_name_from_fqdn("_chat._agents.example.com", "example.com")
             == "_chat._agents"
         )
 
     def test_extract_name_from_fqdn_no_match(self):
+        """FQDN that does not end with the zone is returned unchanged."""
         assert (
             AkamaiEdgeDNSBackend._extract_name_from_fqdn("other.net", "example.com") == "other.net"
         )
 
     def test_to_numeric_key_custom(self):
+        """DNS-AID custom param names map to private-use key65400-key65408."""
         assert AkamaiEdgeDNSBackend._to_numeric_key("cap") == "key65400"
         assert AkamaiEdgeDNSBackend._to_numeric_key("bap") == "key65402"
         assert AkamaiEdgeDNSBackend._to_numeric_key("realm") == "key65404"
 
     def test_to_numeric_key_standard(self):
+        """Standard SVCB param names (alpn, port) pass through unchanged."""
         assert AkamaiEdgeDNSBackend._to_numeric_key("alpn") == "alpn"
         assert AkamaiEdgeDNSBackend._to_numeric_key("port") == "port"
 
     def test_to_numeric_key_already_numeric(self):
+        """Already numeric keyNNNNN strings pass through unchanged."""
         assert AkamaiEdgeDNSBackend._to_numeric_key("key65500") == "key65500"
 
     def test_from_numeric_key(self):
+        """Numeric key65400-key65408 map back to DNS-AID names."""
         assert AkamaiEdgeDNSBackend._from_numeric_key("key65400") == "cap"
         assert AkamaiEdgeDNSBackend._from_numeric_key("key65402") == "bap"
 
     def test_from_numeric_key_unknown(self):
+        """Unknown standard keys (alpn) pass through unchanged."""
         assert AkamaiEdgeDNSBackend._from_numeric_key("alpn") == "alpn"
 
     def test_build_url(self):
+        """`_build_url` prefixes the host with https:// when scheme is missing."""
         backend = AkamaiEdgeDNSBackend(
             host="akab-test.luna.akamaiapis.net",
             client_token="ct",
@@ -233,6 +375,7 @@ class TestAkamaiEdgeDNSHelpers:
         )
 
     def test_build_url_with_https_prefix(self):
+        """An explicit https:// prefix on the host is preserved (no double-scheme)."""
         backend = AkamaiEdgeDNSBackend(
             host="https://akab-test.luna.akamaiapis.net",
             client_token="ct",
@@ -250,10 +393,11 @@ class TestAkamaiEdgeDNSHelpers:
 # ---------------------------------------------------------------------------
 
 
-class TestAkamaiEdgeDNSSvcbFormat:
+class TestAkamaiEdgeDNSBackendSvcbFormat:
     """Tests for SVCB rdata formatting."""
 
     def test_format_svcb_rdata_basic(self):
+        """Standard alpn/port params are emitted in presentation format."""
         rdata = AkamaiEdgeDNSBackend._format_svcb_rdata(
             priority=1,
             target="chat.example.com",
@@ -264,6 +408,7 @@ class TestAkamaiEdgeDNSSvcbFormat:
         assert 'port="443"' in rdata
 
     def test_format_svcb_rdata_trailing_dot_preserved(self):
+        """Targets already ending in '.' are not double-dotted."""
         rdata = AkamaiEdgeDNSBackend._format_svcb_rdata(
             priority=1,
             target="chat.example.com.",
@@ -272,6 +417,7 @@ class TestAkamaiEdgeDNSSvcbFormat:
         assert rdata == "1 chat.example.com."
 
     def test_format_svcb_rdata_custom_params_mapped(self):
+        """DNS-AID custom params are rewritten to their numeric key alias."""
         rdata = AkamaiEdgeDNSBackend._format_svcb_rdata(
             priority=1,
             target="chat.example.com",
@@ -281,6 +427,7 @@ class TestAkamaiEdgeDNSSvcbFormat:
         assert 'alpn="mcp"' in rdata
 
     def test_format_svcb_rdata_no_params(self):
+        """Priority 0 with no params produces a bare AliasMode record."""
         rdata = AkamaiEdgeDNSBackend._format_svcb_rdata(
             priority=0,
             target="alias.example.com.",
@@ -289,6 +436,7 @@ class TestAkamaiEdgeDNSSvcbFormat:
         assert rdata == "0 alias.example.com."
 
     def test_format_svcb_rdata_all_custom_params(self):
+        """cap/bap/realm all map to their assigned private-use keys."""
         rdata = AkamaiEdgeDNSBackend._format_svcb_rdata(
             priority=1,
             target="t.example.com",
@@ -308,11 +456,12 @@ class TestAkamaiEdgeDNSSvcbFormat:
 # ---------------------------------------------------------------------------
 
 
-class TestAkamaiEdgeDNSCreateSvcb:
+class TestAkamaiEdgeDNSBackendCreateSvcb:
     """Tests for SVCB record creation."""
 
     @pytest.mark.asyncio
     async def test_create_svcb_record_new(self):
+        """No existing record → POST is issued and the FQDN is returned."""
         backend = AkamaiEdgeDNSBackend(
             host="akab-test.luna.akamaiapis.net",
             client_token="ct",
@@ -347,6 +496,7 @@ class TestAkamaiEdgeDNSCreateSvcb:
 
     @pytest.mark.asyncio
     async def test_create_svcb_record_update_existing(self):
+        """Existing record → PUT (upsert) is issued instead of POST."""
         backend = AkamaiEdgeDNSBackend(
             host="akab-test.luna.akamaiapis.net",
             client_token="ct",
@@ -377,6 +527,7 @@ class TestAkamaiEdgeDNSCreateSvcb:
 
     @pytest.mark.asyncio
     async def test_create_svcb_passes_custom_params_natively(self):
+        """DNS-AID custom params reach the SVCB rdata mapped to private-use keys."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -412,11 +563,12 @@ class TestAkamaiEdgeDNSCreateSvcb:
 # ---------------------------------------------------------------------------
 
 
-class TestAkamaiEdgeDNSCreateTxt:
+class TestAkamaiEdgeDNSBackendCreateTxt:
     """Tests for TXT record creation."""
 
     @pytest.mark.asyncio
     async def test_create_txt_record_new(self):
+        """No existing record → POST is issued with joined rdata."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -445,17 +597,52 @@ class TestAkamaiEdgeDNSCreateTxt:
         assert captured_payload[0]["type"] == "TXT"
         assert "capabilities=chat,code version=1.0.0" in captured_payload[0]["rdata"][0]
 
+    @pytest.mark.asyncio
+    async def test_create_txt_record_update_existing(self):
+        """Existing TXT record → PUT (upsert) is issued instead of POST."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        call_log: list[tuple[str, str]] = []
+
+        async def mock_request(method, path, **kwargs):
+            call_log.append((method, path))
+            if method == "GET":
+                return {
+                    "name": "_chat._agents.example.com",
+                    "type": "TXT",
+                    "ttl": 3600,
+                    "rdata": ["capabilities=old"],
+                }
+            return {}
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            result = await backend.create_txt_record(
+                zone="example.com",
+                name="_chat._agents",
+                values=["capabilities=new"],
+                ttl=3600,
+            )
+
+        assert result == "_chat._agents.example.com"
+        assert call_log[1][0] == "PUT"
+
 
 # ---------------------------------------------------------------------------
 # Delete record
 # ---------------------------------------------------------------------------
 
 
-class TestAkamaiEdgeDNSDeleteRecord:
+class TestAkamaiEdgeDNSBackendDeleteRecord:
     """Tests for record deletion."""
 
     @pytest.mark.asyncio
     async def test_delete_record_success(self):
+        """A successful DELETE returns True."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -477,6 +664,7 @@ class TestAkamaiEdgeDNSDeleteRecord:
 
     @pytest.mark.asyncio
     async def test_delete_record_not_found(self):
+        """A 404 (via _request returning None) returns False, not an exception."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -496,17 +684,40 @@ class TestAkamaiEdgeDNSDeleteRecord:
 
         assert result is False
 
+    @pytest.mark.asyncio
+    async def test_delete_record_returns_false_on_api_error(self):
+        """An API error (e.g. 500) is swallowed and delete_record returns False."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        async def mock_request(method, path, **kwargs):
+            raise ValueError("API error 500")
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            result = await backend.delete_record(
+                zone="example.com",
+                name="_chat._agents",
+                record_type="SVCB",
+            )
+
+        assert result is False
+
 
 # ---------------------------------------------------------------------------
 # List records
 # ---------------------------------------------------------------------------
 
 
-class TestAkamaiEdgeDNSListRecords:
+class TestAkamaiEdgeDNSBackendListRecords:
     """Tests for record listing."""
 
     @pytest.mark.asyncio
     async def test_list_records_all(self):
+        """list_records yields both SVCB and TXT recordsets returned by the API."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -544,6 +755,7 @@ class TestAkamaiEdgeDNSListRecords:
 
     @pytest.mark.asyncio
     async def test_list_records_filter_by_name(self):
+        """A name_pattern substring filter drops non-matching records."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -570,6 +782,7 @@ class TestAkamaiEdgeDNSListRecords:
 
     @pytest.mark.asyncio
     async def test_list_records_pagination(self):
+        """Pagination metadata drives multiple GET pages until total is reached."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -605,15 +818,163 @@ class TestAkamaiEdgeDNSListRecords:
 
 
 # ---------------------------------------------------------------------------
+# Zone exists
+# ---------------------------------------------------------------------------
+
+
+class TestAkamaiEdgeDNSBackendZoneExists:
+    """Tests for zone existence check."""
+
+    @pytest.mark.asyncio
+    async def test_zone_exists_true(self):
+        """A 200 zone GET returns True and caches the positive answer."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        async def mock_request(method, path, **kwargs):
+            return {"zone": "example.com", "type": "primary"}
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            result = await backend.zone_exists("example.com")
+
+        assert result is True
+        assert backend._zone_cache["example.com"] is True
+
+    @pytest.mark.asyncio
+    async def test_zone_exists_false(self):
+        """A 404 zone GET returns False and caches the negative answer."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        async def mock_request(method, path, **kwargs):
+            return None
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            result = await backend.zone_exists("notfound.com")
+
+        assert result is False
+        assert backend._zone_cache["notfound.com"] is False
+
+    @pytest.mark.asyncio
+    async def test_zone_exists_cached(self):
+        """A cached entry short-circuits the API call entirely."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+        backend._zone_cache["cached.com"] = True
+
+        result = await backend.zone_exists("cached.com")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_zone_exists_error_returns_false(self):
+        """zone_exists swallows API errors and returns False (never raises)."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        async def mock_request(method, path, **kwargs):
+            raise ValueError("API error")
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            result = await backend.zone_exists("error.com")
+
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# List zones
+# ---------------------------------------------------------------------------
+
+
+class TestAkamaiEdgeDNSBackendListZones:
+    """Tests for listing zones."""
+
+    @pytest.mark.asyncio
+    async def test_list_zones(self):
+        """list_zones returns the full shape (id, name, type, contract_id)."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        async def mock_request(method, path, *, params=None, **kwargs):
+            return {
+                "zones": [
+                    {"zone": "example.com", "type": "primary", "contractId": "ctr-123"},
+                    {"zone": "other.com", "type": "secondary", "contractId": "ctr-456"},
+                ],
+                "metadata": {"totalElements": 2, "pageSize": 100},
+            }
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            zones = await backend.list_zones()
+
+        assert len(zones) == 2
+        assert zones[0]["id"] == "example.com"
+        assert zones[0]["name"] == "example.com"
+        assert zones[0]["type"] == "primary"
+        assert zones[0]["contract_id"] == "ctr-123"
+        assert zones[1]["name"] == "other.com"
+        assert zones[1]["contract_id"] == "ctr-456"
+
+
+# ---------------------------------------------------------------------------
+# Close
+# ---------------------------------------------------------------------------
+
+
+class TestAkamaiEdgeDNSBackendClose:
+    """Tests for client cleanup."""
+
+    @pytest.mark.asyncio
+    async def test_close(self):
+        """close() releases the cached httpx client."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        mock_auth = MagicMock()
+        with patch.object(
+            backend, "_ensure_auth", side_effect=lambda: setattr(backend, "_auth", mock_auth)
+        ):
+            await backend._get_client()
+            assert backend._client is not None
+
+            await backend.close()
+            assert backend._client is None
+
+
+# ---------------------------------------------------------------------------
 # Get record
 # ---------------------------------------------------------------------------
 
 
-class TestAkamaiEdgeDNSGetRecord:
+class TestAkamaiEdgeDNSBackendGetRecord:
     """Tests for get_record method."""
 
     @pytest.mark.asyncio
     async def test_get_record_found(self):
+        """A 200 record GET returns a normalised record dict."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -639,6 +1000,7 @@ class TestAkamaiEdgeDNSGetRecord:
 
     @pytest.mark.asyncio
     async def test_get_record_not_found(self):
+        """A 404 record GET returns None (no record at that name+type)."""
         backend = AkamaiEdgeDNSBackend(
             host="h",
             client_token="ct",
@@ -656,152 +1018,16 @@ class TestAkamaiEdgeDNSGetRecord:
 
 
 # ---------------------------------------------------------------------------
-# Zone exists
-# ---------------------------------------------------------------------------
-
-
-class TestAkamaiEdgeDNSZoneExists:
-    """Tests for zone existence check."""
-
-    @pytest.mark.asyncio
-    async def test_zone_exists_true(self):
-        backend = AkamaiEdgeDNSBackend(
-            host="h",
-            client_token="ct",
-            client_secret="cs",
-            access_token="at",
-        )
-
-        async def mock_request(method, path, **kwargs):
-            return {"zone": "example.com", "type": "primary"}
-
-        with patch.object(backend, "_request", side_effect=mock_request):
-            result = await backend.zone_exists("example.com")
-
-        assert result is True
-        assert backend._zone_cache["example.com"] is True
-
-    @pytest.mark.asyncio
-    async def test_zone_exists_false(self):
-        backend = AkamaiEdgeDNSBackend(
-            host="h",
-            client_token="ct",
-            client_secret="cs",
-            access_token="at",
-        )
-
-        async def mock_request(method, path, **kwargs):
-            return None
-
-        with patch.object(backend, "_request", side_effect=mock_request):
-            result = await backend.zone_exists("notfound.com")
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_zone_exists_cached(self):
-        backend = AkamaiEdgeDNSBackend(
-            host="h",
-            client_token="ct",
-            client_secret="cs",
-            access_token="at",
-        )
-        backend._zone_cache["cached.com"] = True
-
-        result = await backend.zone_exists("cached.com")
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_zone_exists_error_returns_false(self):
-        backend = AkamaiEdgeDNSBackend(
-            host="h",
-            client_token="ct",
-            client_secret="cs",
-            access_token="at",
-        )
-
-        async def mock_request(method, path, **kwargs):
-            raise RuntimeError("API error")
-
-        with patch.object(backend, "_request", side_effect=mock_request):
-            result = await backend.zone_exists("error.com")
-
-        assert result is False
-
-
-# ---------------------------------------------------------------------------
-# List zones
-# ---------------------------------------------------------------------------
-
-
-class TestAkamaiEdgeDNSListZones:
-    """Tests for listing zones."""
-
-    @pytest.mark.asyncio
-    async def test_list_zones(self):
-        backend = AkamaiEdgeDNSBackend(
-            host="h",
-            client_token="ct",
-            client_secret="cs",
-            access_token="at",
-        )
-
-        async def mock_request(method, path, *, params=None, **kwargs):
-            return {
-                "zones": [
-                    {"zone": "example.com", "type": "primary", "contractId": "ctr-123"},
-                    {"zone": "other.com", "type": "secondary", "contractId": "ctr-456"},
-                ],
-                "metadata": {"totalElements": 2, "pageSize": 100},
-            }
-
-        with patch.object(backend, "_request", side_effect=mock_request):
-            zones = await backend.list_zones()
-
-        assert len(zones) == 2
-        assert zones[0]["name"] == "example.com"
-        assert zones[0]["type"] == "primary"
-        assert zones[1]["name"] == "other.com"
-
-
-# ---------------------------------------------------------------------------
-# Close
-# ---------------------------------------------------------------------------
-
-
-class TestAkamaiEdgeDNSClose:
-    """Tests for client cleanup."""
-
-    @pytest.mark.asyncio
-    async def test_close(self):
-        backend = AkamaiEdgeDNSBackend(
-            host="h",
-            client_token="ct",
-            client_secret="cs",
-            access_token="at",
-        )
-
-        mock_auth = MagicMock()
-        with patch.object(
-            backend, "_ensure_auth", side_effect=lambda: setattr(backend, "_auth", mock_auth)
-        ):
-            await backend._get_client()
-            assert backend._client is not None
-
-            await backend.close()
-            assert backend._client is None
-
-
-# ---------------------------------------------------------------------------
 # Param demotion (should NOT demote — supports_private_svcb_keys = True)
 # ---------------------------------------------------------------------------
 
 
-class TestAkamaiEdgeDNSPublishAgentNoDemotion:
+class TestAkamaiEdgeDNSBackendPublishAgentNoDemotion:
     """Akamai Edge DNS passes ALL SVCB params natively — no demotion to TXT."""
 
     @pytest.mark.asyncio
     async def test_publish_passes_all_params_to_svcb(self):
+        """Custom DNS-AID params land in the SVCB record, not as TXT fallbacks."""
         from dns_aid.core.models import AgentRecord, Protocol
 
         agent = AgentRecord(
@@ -865,3 +1091,56 @@ class TestAkamaiEdgeDNSPublishAgentNoDemotion:
             txt_values = txt_calls[0]["values"]
             dnsaid_txt = [v for v in txt_values if v.startswith("dnsaid_")]
             assert len(dnsaid_txt) == 0, "No dnsaid_ params should appear in TXT"
+
+
+# ---------------------------------------------------------------------------
+# Factory wiring & CLI registry contract
+# ---------------------------------------------------------------------------
+
+
+class TestAkamaiEdgeDNSBackendFactoryWiring:
+    """create_backend("akamai-edgedns") wiring and env registry contract."""
+
+    def test_factory_creates_akamai_backend(self):
+        """create_backend("akamai-edgedns") returns AkamaiEdgeDNSBackend."""
+        from dns_aid.backends import create_backend
+
+        backend = create_backend("akamai-edgedns")
+        assert isinstance(backend, AkamaiEdgeDNSBackend)
+
+    def test_akamai_host_in_optional_env_registry(self):
+        """AKAMAI_HOST is advertised in the CLI backend registry."""
+        from dns_aid.cli.backends import BACKEND_REGISTRY
+
+        assert "AKAMAI_HOST" in BACKEND_REGISTRY["akamai-edgedns"].optional_env
+
+    def test_akamai_client_token_in_optional_env_registry(self):
+        """AKAMAI_CLIENT_TOKEN is advertised in the CLI backend registry."""
+        from dns_aid.cli.backends import BACKEND_REGISTRY
+
+        assert "AKAMAI_CLIENT_TOKEN" in BACKEND_REGISTRY["akamai-edgedns"].optional_env
+
+    def test_akamai_client_secret_in_optional_env_registry(self):
+        """AKAMAI_CLIENT_SECRET is advertised in the CLI backend registry."""
+        from dns_aid.cli.backends import BACKEND_REGISTRY
+
+        assert "AKAMAI_CLIENT_SECRET" in BACKEND_REGISTRY["akamai-edgedns"].optional_env
+
+    def test_akamai_access_token_in_optional_env_registry(self):
+        """AKAMAI_ACCESS_TOKEN is advertised in the CLI backend registry."""
+        from dns_aid.cli.backends import BACKEND_REGISTRY
+
+        assert "AKAMAI_ACCESS_TOKEN" in BACKEND_REGISTRY["akamai-edgedns"].optional_env
+
+    def test_akamai_edgerc_in_optional_env_registry(self):
+        """AKAMAI_EDGERC and AKAMAI_EDGERC_SECTION are advertised in the CLI registry."""
+        from dns_aid.cli.backends import BACKEND_REGISTRY
+
+        assert "AKAMAI_EDGERC" in BACKEND_REGISTRY["akamai-edgedns"].optional_env
+        assert "AKAMAI_EDGERC_SECTION" in BACKEND_REGISTRY["akamai-edgedns"].optional_env
+
+    def test_akamai_required_env_is_empty(self):
+        """No env vars are *required* — creds resolve via env OR ~/.edgerc."""
+        from dns_aid.cli.backends import BACKEND_REGISTRY
+
+        assert BACKEND_REGISTRY["akamai-edgedns"].required_env == {}
