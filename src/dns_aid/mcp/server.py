@@ -1551,7 +1551,9 @@ def compile_policy_to_rpz(
 )
 def publish_rpz_zone(
     policy_json: str,
-    backend: Literal["route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "mock"],
+    backend: Literal[
+        "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "mock"
+    ],
     rpz_zone: str,
     td_action: str = "action_block",
     td_policy_id: int | None = None,

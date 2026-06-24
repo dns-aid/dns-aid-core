@@ -48,7 +48,9 @@ async def main() -> None:
                 arguments={"iteration": i, "message": "hello from demo caller"},
             )
             status = "ok" if result.success else "FAIL"
-            print(f"[caller] invoke {i + 1}: {status} latency={result.signal.invocation_latency_ms:.1f}ms")
+            print(
+                f"[caller] invoke {i + 1}: {status} latency={result.signal.invocation_latency_ms:.1f}ms"
+            )
 
     print("\nFlush complete. Open http://localhost:16686 and search service=dns-aid-sdk")
 

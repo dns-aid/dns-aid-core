@@ -28,9 +28,7 @@ async def main() -> int:
 
     # ── Step 1: Discover booking agent via DNS ──────────────────
     print("\n[1/4] Discovering booking agent via DNS...")
-    result = await discover(
-        "example.com", protocol="mcp", name="booking"
-    )
+    result = await discover("example.com", protocol="mcp", name="booking")
 
     if result.count == 0:
         print("  FAIL: No agents found")
@@ -69,7 +67,12 @@ async def main() -> int:
         tool_names = [t["name"] for t in tools]
         print(f"  OK: MCP tools available: {tool_names}")
 
-        expected_tools = {"search_flights", "get_flight_details", "check_availability", "create_reservation"}
+        expected_tools = {
+            "search_flights",
+            "get_flight_details",
+            "check_availability",
+            "create_reservation",
+        }
         if not expected_tools.issubset(set(tool_names)):
             print(f"  FAIL: Missing tools: {expected_tools - set(tool_names)}")
             errors += 1

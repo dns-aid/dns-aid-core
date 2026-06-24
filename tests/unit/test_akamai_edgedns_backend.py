@@ -120,9 +120,7 @@ class TestAkamaiEdgeDNSBackendAuth:
             access_token="at-xxx",
         )
         mock_ega_instance = MagicMock()
-        with patch(
-            "akamai.edgegrid.EdgeGridAuth", return_value=mock_ega_instance
-        ) as mock_ega:
+        with patch("akamai.edgegrid.EdgeGridAuth", return_value=mock_ega_instance) as mock_ega:
             backend._ensure_auth()
 
         assert backend._auth is mock_ega_instance
@@ -338,9 +336,7 @@ class TestAkamaiEdgeDNSBackendRequest:
         )
         backend._auth = MagicMock()
         mock_client = AsyncMock()
-        mock_client.request = AsyncMock(
-            return_value=_make_response(403, text="Forbidden")
-        )
+        mock_client.request = AsyncMock(return_value=_make_response(403, text="Forbidden"))
 
         with (
             patch.object(backend, "_get_client", return_value=mock_client),

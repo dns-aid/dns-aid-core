@@ -258,9 +258,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
                 headers=signed_headers,
             )
         except httpx.HTTPError as exc:
-            raise ValueError(
-                f"Akamai Edge DNS transport error ({method} {path}): {exc}"
-            ) from exc
+            raise ValueError(f"Akamai Edge DNS transport error ({method} {path}): {exc}") from exc
 
         # 404 = record/zone not found — return None instead of raising
         if response.status_code == 404:
