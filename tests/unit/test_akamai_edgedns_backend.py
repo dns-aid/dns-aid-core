@@ -145,6 +145,33 @@ class TestAkamaiEdgeDNSBackendAuth:
         backend._ensure_auth()
         assert backend._auth is existing_auth
 
+    def test_ensure_auth_falls_back_to_edgerc(self):
+        """When env creds are absent, _ensure_auth() reads credentials from .edgerc."""
+        with patch.dict(
+            "os.environ",
+            {
+                "AKAMAI_HOST": "",
+                "AKAMAI_CLIENT_TOKEN": "",
+                "AKAMAI_CLIENT_SECRET": "",
+                "AKAMAI_ACCESS_TOKEN": "",
+            },
+        ):
+            backend = AkamaiEdgeDNSBackend()
+
+        mock_edgerc = MagicMock()
+        mock_edgerc.get.return_value = "akab-from-edgerc.luna.akamaiapis.net"
+        mock_auth_instance = MagicMock()
+
+        with (
+            patch("akamai.edgegrid.EdgeRc", return_value=mock_edgerc),
+            patch("akamai.edgegrid.EdgeGridAuth") as mock_ega_cls,
+        ):
+            mock_ega_cls.from_edgerc.return_value = mock_auth_instance
+            backend._ensure_auth()
+
+        assert backend._auth is mock_auth_instance
+        mock_ega_cls.from_edgerc.assert_called_once_with(mock_edgerc, "default")
+
     def test_ensure_auth_raises_without_credentials(self):
         """Missing creds and missing .edgerc raises ValueError with setup hint."""
         backend = AkamaiEdgeDNSBackend()
@@ -177,6 +204,31 @@ class TestAkamaiEdgeDNSBackendClient:
             client = await backend._get_client()
             assert isinstance(client, httpx.AsyncClient)
             await backend.close()
+
+    @pytest.mark.asyncio
+    async def test_get_client_recreates_on_loop_change(self):
+        """Client is replaced when the running event loop changes."""
+        backend = AkamaiEdgeDNSBackend(
+            host="akab-test.luna.akamaiapis.net",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        # Plant a stale client bound to a different (fake) loop ID
+        old_client = AsyncMock(spec=httpx.AsyncClient)
+        backend._client = old_client
+        backend._client_loop_id = -1  # guaranteed to differ from the real loop id
+
+        mock_auth = MagicMock()
+        with patch.object(
+            backend, "_ensure_auth", side_effect=lambda: setattr(backend, "_auth", mock_auth)
+        ):
+            new_client = await backend._get_client()
+
+        assert new_client is not old_client
+        old_client.aclose.assert_called_once()
+        await backend.close()
 
     @pytest.mark.asyncio
     async def test_get_client_caches_client(self):
@@ -781,6 +833,29 @@ class TestAkamaiEdgeDNSBackendListRecords:
         assert "_agents" in records[0]["fqdn"]
 
     @pytest.mark.asyncio
+    async def test_list_records_record_type_as_types_param(self):
+        """record_type is forwarded as the types= query parameter to the API."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        captured_params: list[dict] = []
+
+        async def mock_request(method, path, *, params=None, **kwargs):
+            if params:
+                captured_params.append(dict(params))
+            return {"recordsets": [], "metadata": {"totalElements": 0, "pageSize": 100}}
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            async for _ in backend.list_records(zone="example.com", record_type="SVCB"):
+                pass
+
+        assert captured_params[0]["types"] == "SVCB"
+
+    @pytest.mark.asyncio
     async def test_list_records_pagination(self):
         """Pagination metadata drives multiple GET pages until total is reached."""
         backend = AkamaiEdgeDNSBackend(
@@ -962,6 +1037,29 @@ class TestAkamaiEdgeDNSBackendClose:
 
             await backend.close()
             assert backend._client is None
+
+    @pytest.mark.asyncio
+    async def test_close_is_no_op_when_already_closed(self):
+        """Second close() call does not raise and leaves _client as None."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        mock_auth = MagicMock()
+        with patch.object(
+            backend, "_ensure_auth", side_effect=lambda: setattr(backend, "_auth", mock_auth)
+        ):
+            await backend._get_client()
+
+        await backend.close()
+        assert backend._client is None
+
+        # Second call — must not raise
+        await backend.close()
+        assert backend._client is None
 
 
 # ---------------------------------------------------------------------------
