@@ -756,7 +756,7 @@ DNS-AID supports multiple DNS backends:
 | Google Cloud DNS | GCP Cloud DNS | `dns-aid[cloud-dns]` | ✅ Production |
 | Infoblox NIOS | Infoblox NIOS (on-prem WAPI) | `dns-aid[nios]` | ✅ Production |
 | Infoblox UDDI | Infoblox Universal DDI (cloud) | `dns-aid[infoblox]` | ✅ Production |
-| Akamai Edge DNS | Akamai Edge DNS (EdgeGrid API) | `dns-aid[akamai-edgedns]` | ✅ Production |
+| Akamai Edge DNS | Akamai Edge DNS | `dns-aid[akamai-edgedns]` | ✅ Production |
 | DDNS | RFC 2136 Dynamic DNS (BIND, etc.) | `dns-aid[ddns]` | ✅ Production |
 | Mock | In-memory (testing only) | (built-in) | ✅ Production |
 
