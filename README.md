@@ -1077,7 +1077,7 @@ Akamai Edge DNS supports ServiceMode SVCB records with full private-use key supp
    asyncio.run(main())
    ```
 
-#### Akamai Edge DNS Advantages
+#### Akamai Edge DNS Features
 
 - **Native SVCB support**: Full RFC 9460 compliance including private-use keys 
 - **Full DNS-AID compliance**: All custom params (`cap`, `bap`, `realm`, etc.) written natively on the SVCB record — no demotion to TXT
