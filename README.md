@@ -750,13 +750,13 @@ DNS-AID supports multiple DNS backends:
 
 | Backend | Description | Install Extra | Status |
 |---------|-------------|---------------|--------|
+| Akamai Edge DNS | Akamai Edge DNS | `dns-aid[akamai-edgedns]` | ✅ Production |
 | Route 53 | AWS Route 53 | `dns-aid[route53]` | ✅ Production |
 | Cloudflare | Cloudflare DNS | `dns-aid[cloudflare]` | ✅ Production |
 | NS1 | NS1 (now IBM) Managed DNS | `dns-aid[ns1]` | ✅ Production |
 | Google Cloud DNS | GCP Cloud DNS | `dns-aid[cloud-dns]` | ✅ Production |
 | Infoblox NIOS | Infoblox NIOS (on-prem WAPI) | `dns-aid[nios]` | ✅ Production |
 | Infoblox UDDI | Infoblox Universal DDI (cloud) | `dns-aid[infoblox]` | ✅ Production |
-| Akamai Edge DNS | Akamai Edge DNS | `dns-aid[akamai-edgedns]` | ✅ Production |
 | DDNS | RFC 2136 Dynamic DNS (BIND, etc.) | `dns-aid[ddns]` | ✅ Production |
 | Mock | In-memory (testing only) | (built-in) | ✅ Production |
 
@@ -850,8 +850,8 @@ private-use range `key65280`–`key65534`. DNS-AID's custom parameters (`cap`, `
 `key65400`–`key65405`) are written **natively on the SVCB record**, not demoted to a TXT
 companion.
 
-| DNS-AID Requirement | Route 53 | Infoblox UDDI | Akamai Edge DNS |
-|---------------------|----------|---------------|-----------------|
+| DNS-AID Requirement | Akamai Edge DNS | Route 53 | Infoblox UDDI |
+|---------------------|-----------------|----------|---------------|
 | ServiceMode (priority > 0) | ✅ | ✅ | ✅ |
 | `alpn` / `port` / `mandatory` | ✅ | ✅ | ✅ |
 | Private-use keys (cap/bap/policy/realm/sig/...) | ✅ | ✅ | ✅ |
