@@ -287,6 +287,7 @@ class MockDNSBridge:
 
                 stream_resp = MagicMock()
                 stream_resp.status_code = resp.status_code
+                stream_resp.is_redirect = 300 <= resp.status_code < 400
                 stream_resp.headers = {}
                 stream_resp.aiter_bytes = _aiter_bytes
                 yield stream_resp

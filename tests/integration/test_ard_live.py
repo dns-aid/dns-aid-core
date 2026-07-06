@@ -22,6 +22,7 @@ import os
 import pytest
 
 pytestmark = [
+    pytest.mark.live,  # excluded by CI's `-m "not live"`; run explicitly with the env flag
     pytest.mark.asyncio,
     pytest.mark.skipif(
         os.environ.get("DNS_AID_LIVE_TESTS") != "1",
