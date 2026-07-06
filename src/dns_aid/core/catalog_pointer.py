@@ -1,0 +1,236 @@
+# Copyright 2024-2026 The DNS-AID Authors
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+ARD catalog DNS pointer — publish and resolve.
+
+This implements the DNS discovery channel for an ARD ai-catalog
+(https://agenticresourcediscovery.org/spec/ §6.1) in DNS-AID's own terms.
+A domain advertises *where* its agent catalog lives via SVCB records under
+two DNS-SD labels:
+
+- ``_index._agents.{domain}`` — DNS-AID's own organizational-index pointer
+  (draft-mozleywilliams-dnsop-dnsaid-02 §3.2 "Known Organization"), whose
+  index *format* the draft leaves out of scope — an ARD catalog is one valid
+  payload.
+- ``_catalog._agents.{domain}`` — ARD §6.1's catalog pointer label.
+
+Publishing both ("dual") makes the catalog discoverable to DNS-AID clients
+(which probe ``_index._agents``) and to ARD-native clients (which probe
+``_catalog._agents``) from a single DNS lookup.
+
+The SVCB target is the catalog host (underscore-free, carries a public
+x.509 cert, TLSA-pinnable per draft-02 §Known Organization). The catalog
+path defaults to ARD's fixed well-known location
+``/.well-known/ai-catalog.json``; a non-default filename may be carried in
+the DNS-AID ``well-known`` SvcParamKey (key65409).
+
+Resolution is authoritative for *location only*: it returns a catalog URL
+which the caller fetches and parses (:func:`dns_aid.core.http_index.parse_http_index`
+auto-detects the ARD format). No catalog content is trusted here.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import ipaddress
+
+import dns.asyncresolver
+import dns.resolver
+import structlog
+
+from dns_aid.backends.base import DNSBackend
+from dns_aid.core.models import SVCB_SERVICE_MODE
+from dns_aid.core.publisher import get_default_backend
+from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url
+from dns_aid.utils.validation import validate_no_underscore_in_target, validate_well_known_path
+
+logger = structlog.get_logger(__name__)
+
+# DNS-SD labels probed for a catalog pointer, in resolution precedence order.
+# ``_catalog`` (ARD-specific, unambiguous) is tried before ``_index``
+# (DNS-AID's generic org-index slot, which may point at a non-ARD index).
+CATALOG_POINTER_LABELS: tuple[str, ...] = ("_catalog._agents", "_index._agents")
+
+# ARD's fixed well-known catalog location (the filename under /.well-known/).
+DEFAULT_CATALOG_FILENAME = "ai-catalog.json"
+
+# DNS-AID ``well-known`` SvcParamKey (numeric wire form; see DNS_AID_KEY_MAP).
+_WELL_KNOWN_KEY = 65409
+
+DEFAULT_RESOLVE_TIMEOUT = 5.0
+
+
+async def _resolve_svcb(
+    resolver: dns.asyncresolver.Resolver, fqdn: str
+) -> dns.resolver.Answer | None:
+    """Resolve a SVCB record (with HTTPS/type-65 fallback), None if absent."""
+    try:
+        return await resolver.resolve(fqdn, "SVCB")
+    except dns.resolver.NoAnswer:
+        try:
+            return await resolver.resolve(fqdn, "HTTPS")
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+            return None
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoNameservers, dns.resolver.LifetimeTimeout):
+        return None
+
+
+def _read_wellknown_filename(rdata: object) -> str | None:
+    """Read an optional catalog-filename override from the well-known SvcParam.
+
+    Returns a validated single-segment filename, or None to use the default.
+    Never returns a path with separators / traversal (RFC 8615 single-segment).
+    """
+    params = getattr(rdata, "params", None) or {}
+    param = params.get(_WELL_KNOWN_KEY)
+    if param is None:
+        return None
+    value = getattr(param, "value", param)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            text = value.decode("utf-8", "strict")
+        except UnicodeDecodeError:
+            return None
+    else:
+        text = str(value)
+    text = text.strip().lstrip("/")
+    if not text or "/" in text or "\\" in text or ".." in text:
+        return None
+    return text
+
+
+async def resolve_catalog_pointer(
+    domain: str, *, timeout: float = DEFAULT_RESOLVE_TIMEOUT
+) -> str | None:
+    """Resolve a domain's ARD catalog URL from its DNS pointer records.
+
+    Tries ``_catalog._agents.{domain}`` then ``_index._agents.{domain}``
+    SVCB and, on the first ServiceMode answer with a usable target, returns
+    ``https://{target}/.well-known/{filename}``. Returns ``None`` when no
+    pointer is published (the caller then falls back to well-known probing).
+
+    Location discovery only — the returned URL is fetched and format-detected
+    by the caller; nothing about the catalog's contents is trusted here.
+    """
+    domain = domain.lower().rstrip(".")
+    resolver = dns.asyncresolver.Resolver()
+    resolver.lifetime = timeout
+
+    for label in CATALOG_POINTER_LABELS:
+        fqdn = f"{label}.{domain}"
+        try:
+            answers = await _resolve_svcb(resolver, fqdn)
+        except Exception as e:  # noqa: BLE001 — resolution must never break discovery
+            logger.debug("catalog_pointer.resolve_error", fqdn=fqdn, error=str(e))
+            continue
+        if answers is None:
+            continue
+        for rdata in answers:
+            # AliasMode (priority 0) does not carry a target endpoint here.
+            if getattr(rdata, "priority", SVCB_SERVICE_MODE) == 0:
+                continue
+            target = str(getattr(rdata, "target", "")).rstrip(".")
+            if not target or target == ".":
+                continue
+            filename = _read_wellknown_filename(rdata) or DEFAULT_CATALOG_FILENAME
+            url = f"https://{target}/.well-known/{filename}"
+            # SSRF guard: a pointer targets an arbitrary host (host-anywhere),
+            # so reject one that resolves to a private/loopback/link-local/
+            # reserved address before we fetch it. On rejection, skip this
+            # pointer and fall through to the queried domain's well-known
+            # paths (which are inherently safe). Runs off-loop — validation
+            # does a blocking DNS resolution.
+            try:
+                await asyncio.to_thread(validate_fetch_url, url)
+            except UnsafeURLError as e:
+                logger.warning(
+                    "catalog_pointer.unsafe_target",
+                    domain=domain,
+                    label=label,
+                    url=url,
+                    error=str(e),
+                )
+                continue
+            logger.info("catalog_pointer.resolved", domain=domain, label=label, url=url)
+            return url
+    return None
+
+
+async def publish_catalog_pointer(
+    domain: str,
+    catalog_host: str,
+    *,
+    filename: str = DEFAULT_CATALOG_FILENAME,
+    labels: tuple[str, ...] = CATALOG_POINTER_LABELS,
+    backend: DNSBackend | None = None,
+    ttl: int = 3600,
+    port: int = 443,
+    alpn: str = "h2",
+    ipv4_hint: str | None = None,
+    ipv6_hint: str | None = None,
+) -> list[str]:
+    """Publish ARD catalog pointer SVCB records for a domain.
+
+    Writes a ServiceMode SVCB record under each label in ``labels`` (default
+    both ``_catalog._agents`` and ``_index._agents``) pointing at
+    ``catalog_host``. The catalog path is ARD's fixed
+    ``/.well-known/ai-catalog.json`` unless ``filename`` overrides it, in
+    which case the filename is carried in the ``well-known`` SvcParamKey.
+
+    ``ipv4_hint``/``ipv6_hint`` add RFC 9460 address hints — a per-request
+    latency optimization that pins the catalog host's IPs in DNS. Only safe
+    for a fixed-IP origin; OMIT for CDN-fronted catalogs (e.g. CloudFront),
+    whose edge IPs rotate and would make the hint stale. Default off.
+
+    Note: ``_index._agents`` is DNS-AID's generic org-index pointer; writing
+    it makes the ARD catalog serve as the domain's DNS-AID index and will
+    UPSERT (replace) any existing ``_index._agents`` SVCB. Pass
+    ``labels=("_catalog._agents",)`` to publish only the ARD-specific label.
+
+    Returns the list of created FQDNs. Raises ValueError if the zone does
+    not exist or an address hint is malformed; the catalog host must not
+    contain underscored labels (it carries a public x.509 cert, per
+    draft-02 §Known Organization).
+    """
+    domain = domain.lower().rstrip(".")
+    validate_no_underscore_in_target(catalog_host)
+    filename = validate_well_known_path(filename)
+
+    dns_backend = backend or get_default_backend()
+    if not await dns_backend.zone_exists(domain):
+        raise ValueError(f"Zone '{domain}' does not exist")
+
+    target = catalog_host if catalog_host.endswith(".") else f"{catalog_host}."
+    params: dict[str, str] = {"alpn": alpn, "port": str(port)}
+    if ipv4_hint is not None:
+        if ipaddress.ip_address(ipv4_hint).version != 4:
+            raise ValueError(f"ipv4_hint is not an IPv4 address: {ipv4_hint}")
+        params["ipv4hint"] = ipv4_hint
+    if ipv6_hint is not None:
+        if ipaddress.ip_address(ipv6_hint).version != 6:
+            raise ValueError(f"ipv6_hint is not an IPv6 address: {ipv6_hint}")
+        params["ipv6hint"] = ipv6_hint
+    if filename != DEFAULT_CATALOG_FILENAME:
+        # Numeric key form for backends that don't take private-use string keys.
+        params[f"key{_WELL_KNOWN_KEY}"] = filename
+
+    written: list[str] = []
+    for label in labels:
+        fqdn = await dns_backend.create_svcb_record(
+            zone=domain,
+            name=label,
+            priority=SVCB_SERVICE_MODE,
+            target=target,
+            params=dict(params),
+            ttl=ttl,
+        )
+        written.append(fqdn)
+        logger.info(
+            "catalog_pointer.published",
+            domain=domain,
+            label=label,
+            target=target,
+            filename=filename,
+        )
+    return written

@@ -27,6 +27,7 @@ import structlog
 
 from dns_aid.core.a2a_card import A2AAgentCard, fetch_agent_card
 from dns_aid.core.cap_fetcher import fetch_cap_document
+from dns_aid.core.catalog_pointer import resolve_catalog_pointer
 from dns_aid.core.filters import apply_filters
 from dns_aid.core.http_index import (
     HttpIndexAgent,
@@ -1215,7 +1216,11 @@ async def _discover_via_http_index(
     Returns:
         List of AgentRecord objects
     """
-    http_agents = await fetch_http_index_or_empty(domain)
+    # DNS pointer first: if the domain publishes a _catalog._agents /
+    # _index._agents SVCB pointer, it authoritatively declares where its
+    # catalog lives — resolve it and fetch there before the well-known paths.
+    catalog_url = await resolve_catalog_pointer(domain)
+    http_agents = await fetch_http_index_or_empty(domain, catalog_url=catalog_url)
 
     if not http_agents:
         logger.debug("No agents found in HTTP index", domain=domain)

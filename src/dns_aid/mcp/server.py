@@ -429,6 +429,75 @@ def publish_agent_to_dns(
 
 
 @mcp.tool(
+    title="Publish ARD Catalog Pointer",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+def publish_catalog_pointer(
+    domain: str,
+    catalog_host: str,
+    filename: str = "ai-catalog.json",
+    catalog_only: bool = False,
+    port: int = 443,
+    ipv4_hint: str | None = None,
+    ipv6_hint: str | None = None,
+    ttl: int = 3600,
+    backend: Literal[
+        "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", "mock"
+    ] = "route53",
+) -> dict:
+    """Publish ARD catalog DNS pointer records for a domain.
+
+    Writes SVCB records under ``_catalog._agents.{domain}`` (ARD §6.1) and,
+    unless ``catalog_only`` is set, ``_index._agents.{domain}`` (DNS-AID
+    draft-02 §3.2), both pointing at ``catalog_host``. This lets DNS-AID
+    clients (which probe ``_index._agents``) and ARD-native clients (which
+    probe ``_catalog._agents``) discover the catalog from one DNS lookup.
+
+    Note: ``_index._agents`` is DNS-AID's generic org-index pointer — writing
+    it makes the ARD catalog serve as the domain's index and replaces any
+    existing ``_index._agents`` SVCB. Set ``catalog_only=True`` to publish
+    only the ARD-specific label. ``catalog_host`` must not contain underscored
+    labels (it carries a public x.509 certificate).
+    """
+    from dns_aid.core.catalog_pointer import CATALOG_POINTER_LABELS, publish_catalog_pointer
+
+    try:
+        dns_backend = _get_dns_backend(backend)
+        labels = ("_catalog._agents",) if catalog_only else CATALOG_POINTER_LABELS
+        written = _run_async(
+            publish_catalog_pointer(
+                domain,
+                catalog_host,
+                filename=filename,
+                labels=labels,
+                backend=dns_backend,
+                ttl=ttl,
+                port=port,
+                ipv4_hint=ipv4_hint,
+                ipv6_hint=ipv6_hint,
+            )
+        )
+        return {
+            "success": True,
+            "domain": domain,
+            "catalog_host": catalog_host,
+            "catalog_url": f"https://{catalog_host}/.well-known/{filename}",
+            "records": written,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "publish_catalog_error",
+            "message": str(e),
+        }
+
+
+@mcp.tool(
     title="Discover Agents via DNS",
     annotations=ToolAnnotations(
         readOnlyHint=True,

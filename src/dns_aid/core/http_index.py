@@ -540,34 +540,85 @@ def _ard_parse_into(data: dict[str, Any], state: _ArdParseState, depth: int) -> 
         state.agents.append(agent)
 
 
+async def _fetch_and_parse(
+    client: httpx.AsyncClient, url: str, errors: list[str]
+) -> list[HttpIndexAgent] | None:
+    """Fetch one URL under the byte cap and parse it, or record why it failed.
+
+    Returns the parsed agents on HTTP 200 + valid JSON; ``None`` on any
+    failure (appending a diagnostic to ``errors``). Never raises.
+    """
+    try:
+        # Stream the body with a byte cap so a hostile endpoint can't
+        # force an OOM — the oversized payload never fully lands in memory.
+        async with client.stream("GET", url) as response:
+            if response.status_code != 200:
+                if response.status_code == 404:
+                    errors.append(f"{url}: Not found (404)")
+                    logger.debug("HTTP index not found", url=url)
+                else:
+                    errors.append(f"{url}: HTTP {response.status_code}")
+                    logger.warning(
+                        "HTTP index request failed", url=url, status_code=response.status_code
+                    )
+                return None
+
+            body = bytearray()
+            too_large = False
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > _MAX_HTTP_INDEX_BYTES:
+                    too_large = True
+                    break
+            if too_large:
+                errors.append(f"{url}: response exceeds {_MAX_HTTP_INDEX_BYTES} bytes")
+                logger.warning("HTTP index response too large", url=url, cap=_MAX_HTTP_INDEX_BYTES)
+                return None
+
+        data = json.loads(bytes(body))
+        agents = parse_http_index(data)
+        logger.info("HTTP index fetched successfully", url=url, agent_count=len(agents))
+        return agents
+    except httpx.TimeoutException:
+        errors.append(f"{url}: Timeout")
+        logger.warning("HTTP index request timed out", url=url)
+    except httpx.ConnectError as e:
+        errors.append(f"{url}: Connection error - {e}")
+        logger.warning("HTTP index connection failed", url=url, error=str(e))
+    except Exception as e:  # noqa: BLE001 — one bad endpoint must not abort the sweep
+        errors.append(f"{url}: {e}")
+        logger.warning("HTTP index request failed", url=url, error=str(e))
+    return None
+
+
 async def fetch_http_index(
     domain: str,
     timeout: float = DEFAULT_TIMEOUT,
     verify_ssl: bool = True,
+    *,
+    catalog_url: str | None = None,
 ) -> list[HttpIndexAgent]:
     """
-    Fetch agent list from HTTP index endpoint.
+    Fetch agent list from an HTTP index / ARD catalog endpoint.
 
-    Tries multiple URL patterns in order until one succeeds:
-    1. ANS-style: https://_index._aiagents.{domain}/index-wellknown
-    2. Well-known: https://{domain}/.well-known/agents-index.json
-    3. Fallback: https://{domain}/.well-known/agents.json
+    When ``catalog_url`` is supplied (typically resolved from a
+    ``_catalog._agents`` / ``_index._agents`` DNS pointer) it is tried
+    FIRST — DNS is authoritative for the catalog's location. Otherwise, and
+    on pointer-fetch failure, the well-known ``HTTP_INDEX_PATTERNS`` are
+    tried in order (legacy index locations, then the ARD well-known path).
 
     Args:
         domain: Domain to fetch index from (e.g., "example.com")
         timeout: HTTP request timeout in seconds
         verify_ssl: Whether to verify SSL certificates
+        catalog_url: Optional pre-resolved catalog URL to try before the
+            well-known patterns.
 
     Returns:
         List of HttpIndexAgent objects
 
     Raises:
         HttpIndexError: If all endpoints fail
-
-    Example:
-        >>> agents = await fetch_http_index("example.com")
-        >>> for agent in agents:
-        ...     print(f"{agent.name}: {agent.description}")
     """
     domain = domain.lower().rstrip(".")
     errors: list[str] = []
@@ -594,73 +645,24 @@ async def fetch_http_index(
         follow_redirects=True,
         max_redirects=3,
     ) as client:
-        for pattern in HTTP_INDEX_PATTERNS:
-            # Build URL from pattern
-            host = pattern["host"].format(domain=domain)
-            path = pattern["path"]
-            url = f"https://{host}{path}"
-
-            logger.debug("Trying HTTP index endpoint", url=url, pattern_type=pattern["type"])
-
-            try:
-                # Stream the body with a byte cap so a hostile endpoint can't
-                # force an OOM — the oversized payload never fully lands in
-                # memory.
-                async with client.stream("GET", url) as response:
-                    if response.status_code != 200:
-                        if response.status_code == 404:
-                            errors.append(f"{url}: Not found (404)")
-                            logger.debug("HTTP index not found", url=url)
-                        else:
-                            errors.append(f"{url}: HTTP {response.status_code}")
-                            logger.warning(
-                                "HTTP index request failed",
-                                url=url,
-                                status_code=response.status_code,
-                            )
-                        continue
-
-                    body = bytearray()
-                    too_large = False
-                    async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > _MAX_HTTP_INDEX_BYTES:
-                            too_large = True
-                            break
-                    if too_large:
-                        errors.append(f"{url}: response exceeds {_MAX_HTTP_INDEX_BYTES} bytes")
-                        logger.warning(
-                            "HTTP index response too large",
-                            url=url,
-                            cap=_MAX_HTTP_INDEX_BYTES,
-                        )
-                        continue
-
-                data = json.loads(bytes(body))
-                agents = parse_http_index(data)
-                logger.info(
-                    "HTTP index fetched successfully",
-                    url=url,
-                    agent_count=len(agents),
-                )
+        # DNS pointer first: the domain owner authoritatively declared where
+        # the catalog lives, which overrides the well-known path convention.
+        if catalog_url:
+            logger.debug("Trying DNS-pointer catalog URL", url=catalog_url)
+            agents = await _fetch_and_parse(client, catalog_url, errors)
+            if agents is not None:
                 return agents
 
-            except httpx.TimeoutException:
-                errors.append(f"{url}: Timeout")
-                logger.warning("HTTP index request timed out", url=url)
-            except httpx.ConnectError as e:
-                errors.append(f"{url}: Connection error - {e}")
-                logger.warning("HTTP index connection failed", url=url, error=str(e))
-            except Exception as e:
-                errors.append(f"{url}: {e}")
-                logger.warning("HTTP index request failed", url=url, error=str(e))
+        for pattern in HTTP_INDEX_PATTERNS:
+            host = pattern["host"].format(domain=domain)
+            url = f"https://{host}{pattern['path']}"
+            logger.debug("Trying HTTP index endpoint", url=url, pattern_type=pattern["type"])
+            agents = await _fetch_and_parse(client, url, errors)
+            if agents is not None:
+                return agents
 
     # All endpoints failed
-    logger.warning(
-        "All HTTP index endpoints failed",
-        domain=domain,
-        errors=errors,
-    )
+    logger.warning("All HTTP index endpoints failed", domain=domain, errors=errors)
     raise HttpIndexError(f"No HTTP index found at {domain}. Tried: {', '.join(errors)}")
 
 
@@ -728,6 +730,8 @@ async def fetch_http_index_or_empty(
     domain: str,
     timeout: float = DEFAULT_TIMEOUT,
     verify_ssl: bool = True,
+    *,
+    catalog_url: str | None = None,
 ) -> list[HttpIndexAgent]:
     """
     Fetch HTTP index, returning empty list on failure.
@@ -739,12 +743,14 @@ async def fetch_http_index_or_empty(
         domain: Domain to fetch index from
         timeout: HTTP request timeout in seconds
         verify_ssl: Whether to verify SSL certificates
+        catalog_url: Optional pre-resolved catalog URL (from a DNS pointer)
+            tried before the well-known patterns.
 
     Returns:
         List of HttpIndexAgent objects (empty on failure)
     """
     try:
-        return await fetch_http_index(domain, timeout, verify_ssl)
+        return await fetch_http_index(domain, timeout, verify_ssl, catalog_url=catalog_url)
     except HttpIndexError:
         return []
     except Exception as e:
