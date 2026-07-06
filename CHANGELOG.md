@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-06
+
+### Added
+
+- **ARD ai-catalog discovery support.** HTTP-index discovery now auto-detects
+  [ARD (Agentic Resource Discovery)](https://agenticresourcediscovery.org/spec/)
+  ai-catalog manifests (`specVersion: "1.0"` + `entries[]`) alongside the
+  legacy keyed-object index format, with zero new flags — the library
+  `discover(..., use_http_index=True)`, the CLI `--use-http-index` option and
+  the MCP `discover_agents_via_dns` tool all inherit it transparently:
+  - The ARD well-known location `https://{domain}/.well-known/ai-catalog.json`
+    is probed after the existing index endpoints (legacy precedence preserved).
+  - ARD `CatalogEntry` objects with MCP/A2A card artifact types map into the
+    existing discovery pipeline; agent name derives from the `urn:air:`
+    identifier's terminal segment and protocol from the artifact media type.
+  - Entry `trustManifest` data (publisher identity, SOC 2 / ISO 27001 / GDPR
+    attestations, provenance links, detached signature) is preserved on the
+    new `AgentRecord.trust_manifest` field via the new `TrustManifest`,
+    `TrustAttestation`, `ProvenanceLink` and `TrustSchema` models —
+    pass-through of published claims, never verified by dns-aid.
+  - New `capability_source` value `ard_catalog` marks ARD-sourced records.
+  - Inline nested catalogs recurse to depth 3 under the shared 500-agent
+    budget; registry entries (`application/ai-registry+json`), non-agent
+    artifacts and URL-referenced sub-catalogs are skipped with structured
+    log reasons; the existing 1 MB streaming size cap applies unchanged.
+  - Tolerant parsing per verified spec discrepancies: `attestations[].mediaType`
+    optional on read, unknown entry fields ignored, `representativeQueries`
+    count not enforced.
+
+### Security
+
+- ARD parsing introduces no new network calls: URL-referenced nested catalogs
+  are never fetched from the parse path, recursion depth is bounded, and the
+  agent-count budget is shared across nesting levels so nested floods cannot
+  amplify discovery fan-out.
+
 ## [0.25.0] - 2026-06-10
 
 ### Added
