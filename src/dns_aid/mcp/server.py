@@ -568,6 +568,13 @@ def discover_agents_via_dns(
                     "realm": agent.realm,
                     "description": agent.description,
                     "fqdn": agent.fqdn,
+                    # ARD-sourced agents only — key omitted otherwise so
+                    # legacy output stays byte-identical.
+                    **(
+                        {"trust_manifest": agent.trust_manifest.model_dump()}
+                        if agent.trust_manifest is not None
+                        else {}
+                    ),
                 }
                 for agent in result.agents
             ],
