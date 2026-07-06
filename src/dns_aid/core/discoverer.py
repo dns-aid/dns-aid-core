@@ -28,7 +28,13 @@ import structlog
 from dns_aid.core.a2a_card import A2AAgentCard, fetch_agent_card
 from dns_aid.core.cap_fetcher import fetch_cap_document
 from dns_aid.core.filters import apply_filters
-from dns_aid.core.http_index import HttpIndexAgent, fetch_http_index_or_empty
+from dns_aid.core.http_index import (
+    HttpIndexAgent,
+    _ard_domains_aligned,
+    _ard_identity_domain,
+    _name_from_urn,
+    fetch_http_index_or_empty,
+)
 from dns_aid.core.models import (
     AgentRecord,
     CapabilitySource,
@@ -975,6 +981,14 @@ def _validated_trust_manifest(http_agent: HttpIndexAgent) -> TrustManifest | Non
 
     Invalid manifests never fail the agent — they degrade to ``None``
     with a structured warning (feature contract C5).
+
+    Additionally checks the ARD alignment rule ("the trust domain MUST
+    align with the URN's <publisher> domain"): a mismatch — e.g. a
+    catalog on evil.com claiming ``spiffe://acme.com/...`` — logs a
+    structured warning. Warning-only in 0.26: the manifest is still
+    passed through (it is pass-through data, never verified here), but
+    operators get a machine-greppable impersonation signal. Identity
+    schemes we can't parse (``identityType: other``) skip the check.
     """
     if http_agent.trust_manifest is None:
         return None
@@ -985,6 +999,20 @@ def _validated_trust_manifest(http_agent: HttpIndexAgent) -> TrustManifest | Non
             agent=http_agent.name,
             identifier=http_agent.identifier,
         )
+        return None
+
+    if http_agent.identifier:
+        _, publisher = _name_from_urn(http_agent.identifier)
+        identity_domain = _ard_identity_domain(manifest.identity)
+        if publisher and identity_domain and not _ard_domains_aligned(identity_domain, publisher):
+            logger.warning(
+                "http_index.ard_trust_identity_mismatch",
+                agent=http_agent.name,
+                identifier=http_agent.identifier,
+                identity=manifest.identity,
+                identity_domain=identity_domain,
+                publisher=publisher,
+            )
     return manifest
 
 

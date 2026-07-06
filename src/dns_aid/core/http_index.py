@@ -30,7 +30,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 import structlog
@@ -251,6 +251,40 @@ def _name_from_urn(identifier: str) -> tuple[str | None, str | None]:
     # DNS labels cap at 63 octets — truncate before AgentRecord validation.
     name = re.sub(r"[^a-z0-9-]", "-", segments[-1].lower()).strip("-")[:63].strip("-")
     return (name or None), publisher
+
+
+def _ard_identity_domain(identity: str) -> str | None:
+    """Extract the trust domain from an ARD trustManifest identity URI.
+
+    Supports the three identity schemes the ARD spec names: SPIFFE ID
+    (``spiffe://domain/...``), ``did:web`` (``did:web:domain[:path]``,
+    RFC 3986 %-encoding for ports), and HTTPS FQDN URIs. Returns ``None``
+    for other/unparseable schemes — callers must then skip alignment
+    checking rather than guess.
+    """
+    if identity.startswith(("spiffe://", "https://")):
+        host = urlparse(identity).netloc.split(":")[0].lower().strip(".")
+        return host or None
+    if identity.startswith("did:web:"):
+        # did:web encodes ports as %3A and path segments as further colons.
+        host = unquote(identity[len("did:web:") :].split(":")[0]).split(":")[0]
+        host = host.lower().strip(".")
+        return host or None
+    return None
+
+
+def _ard_domains_aligned(identity_domain: str, publisher: str) -> bool:
+    """True when a trust-identity domain aligns with the URN publisher domain.
+
+    Aligned means equal, or one is a subdomain of the other (a SPIFFE
+    trust domain is typically the org apex while agents publish under
+    sub-zones, and vice versa).
+    """
+    return (
+        identity_domain == publisher
+        or identity_domain.endswith("." + publisher)
+        or publisher.endswith("." + identity_domain)
+    )
 
 
 def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, str | None]:

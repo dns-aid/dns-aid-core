@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are never fetched from the parse path, recursion depth is bounded, and the
   agent-count budget is shared across nesting levels so nested floods cannot
   amplify discovery fan-out.
+- **Trust-identity alignment check (warning-only).** Per the ARD spec's
+  alignment rule, a trust manifest whose identity domain (SPIFFE / did:web /
+  HTTPS) does not align with the entry URN's publisher domain — e.g. a catalog
+  on one domain claiming another domain's SPIFFE identity — logs a structured
+  `http_index.ard_trust_identity_mismatch` warning. The manifest is still
+  passed through unchanged; trust manifests remain published claims that
+  dns-aid does not cryptographically verify in this release.
 
 ## [0.25.0] - 2026-06-10
 

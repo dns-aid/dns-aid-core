@@ -628,6 +628,75 @@ class TestArdTrustManifest:
         assert record.trust_manifest is None
 
 
+class TestArdIdentityAlignment:
+    """ARD alignment rule: trust domain MUST align with the URN publisher."""
+
+    def test_identity_domain_extraction(self):
+        from dns_aid.core.http_index import _ard_identity_domain
+
+        assert _ard_identity_domain("spiffe://acme.com/agents/x") == "acme.com"
+        assert _ard_identity_domain("spiffe://sub.acme.com:8443/x") == "sub.acme.com"
+        assert _ard_identity_domain("https://acme.com/.well-known/id") == "acme.com"
+        assert _ard_identity_domain("did:web:acme.com") == "acme.com"
+        assert _ard_identity_domain("did:web:acme.com:users:alice") == "acme.com"
+        assert _ard_identity_domain("did:web:acme.com%3A8443:x") == "acme.com"
+        assert _ard_identity_domain("did:key:z6Mkf...") is None  # unparseable scheme
+        assert _ard_identity_domain("urn:whatever") is None
+
+    def test_domains_aligned(self):
+        from dns_aid.core.http_index import _ard_domains_aligned
+
+        assert _ard_domains_aligned("acme.com", "acme.com")
+        assert _ard_domains_aligned("spiffe-td.acme.com", "acme.com")  # subdomain of publisher
+        assert _ard_domains_aligned("acme.com", "agents.acme.com")  # publisher under trust domain
+        assert not _ard_domains_aligned("evil.com", "acme.com")
+        assert not _ard_domains_aligned("notacme.com", "acme.com")  # no suffix trickery
+
+    def _record_for(self, trust_manifest: dict):
+        from dns_aid.core.discoverer import _http_agent_to_record
+        from dns_aid.core.models import Protocol
+
+        entry = _ard_agent_entry(trustManifest=trust_manifest)
+        http_agent = parse_http_index(_ard_catalog([entry]))[0]
+        return _http_agent_to_record(http_agent, "acme.com", http_agent.name, Protocol.MCP)
+
+    def test_aligned_identity_no_warning(self):
+        from dns_aid.core import discoverer as disc
+
+        with patch.object(disc.logger, "warning") as warn:
+            record = self._record_for({"identity": "spiffe://acme.com/agents/weather"})
+        assert record.trust_manifest is not None
+        events = [c.args[0] for c in warn.call_args_list]
+        assert "http_index.ard_trust_identity_mismatch" not in events
+
+    def test_mismatched_identity_warns_but_passes_through(self):
+        from dns_aid.core import discoverer as disc
+
+        with patch.object(disc.logger, "warning") as warn:
+            record = self._record_for({"identity": "spiffe://evil.com/agents/weather"})
+        # Pass-through preserved — the manifest is NOT dropped (warning-only)
+        assert record.trust_manifest is not None
+        assert record.trust_manifest.identity == "spiffe://evil.com/agents/weather"
+        events = [c.args[0] for c in warn.call_args_list]
+        assert "http_index.ard_trust_identity_mismatch" in events
+        kwargs = next(
+            c.kwargs
+            for c in warn.call_args_list
+            if c.args[0] == "http_index.ard_trust_identity_mismatch"
+        )
+        assert kwargs["identity_domain"] == "evil.com"
+        assert kwargs["publisher"] == "acme.com"
+
+    def test_unparseable_identity_scheme_skips_check(self):
+        from dns_aid.core import discoverer as disc
+
+        with patch.object(disc.logger, "warning") as warn:
+            record = self._record_for({"identity": "did:key:z6MkfDx", "identityType": "other"})
+        assert record.trust_manifest is not None
+        events = [c.args[0] for c in warn.call_args_list]
+        assert "http_index.ard_trust_identity_mismatch" not in events
+
+
 class TestArdNesting:
     """Inline nested catalogs (user story 3, contract C3)."""
 
