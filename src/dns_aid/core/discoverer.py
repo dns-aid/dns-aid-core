@@ -35,6 +35,7 @@ from dns_aid.core.models import (
     DiscoveryResult,
     DNSSECError,
     Protocol,
+    TrustManifest,
 )
 
 logger = structlog.get_logger(__name__)
@@ -969,6 +970,24 @@ def _parse_fqdn(fqdn: str) -> tuple[str | None, str | None]:
     return parsed.name, parsed.protocol
 
 
+def _validated_trust_manifest(http_agent: HttpIndexAgent) -> TrustManifest | None:
+    """Validate an ARD trustManifest wire dict at the AgentRecord boundary.
+
+    Invalid manifests never fail the agent — they degrade to ``None``
+    with a structured warning (feature contract C5).
+    """
+    if http_agent.trust_manifest is None:
+        return None
+    manifest = TrustManifest.from_wire(http_agent.trust_manifest)
+    if manifest is None:
+        logger.warning(
+            "http_index.ard_trust_manifest_invalid",
+            agent=http_agent.name,
+            identifier=http_agent.identifier,
+        )
+    return manifest
+
+
 def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> None:
     """Merge HTTP index metadata into a DNS-discovered agent record."""
     if http_agent.description:
@@ -983,12 +1002,19 @@ def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> N
     # Merge HTTP index capabilities (only if agent has none from higher-priority source)
     if not agent.capabilities and http_agent.capability and http_agent.capability.capabilities:
         agent.capabilities = http_agent.capability.capabilities
-        agent.capability_source = "http_index"
+        agent.capability_source = (
+            "ard_catalog" if http_agent.source_format == "ard" else "http_index"
+        )
         logger.debug(
             "Merged HTTP index capabilities",
             agent=agent.name,
             capabilities=agent.capabilities,
         )
+
+    # Preserve ARD trust manifest on DNS-discovered agents too — the
+    # catalog is enriching an authoritative DNS answer.
+    if http_agent.trust_manifest is not None and agent.trust_manifest is None:
+        agent.trust_manifest = _validated_trust_manifest(http_agent)
 
     if http_agent.endpoint and not agent.endpoint_override:
         parsed = urlparse(http_agent.endpoint)
@@ -1011,6 +1037,11 @@ async def _process_http_agent(
     """Process a single HTTP index entry: parse FQDN, filter, resolve via DNS."""
     if name and http_agent.name != name:
         return None
+
+    # ARD catalog entries carry artifact locators (card URLs), not DNS-AID
+    # FQDNs — route them through the ARD path instead of FQDN parsing.
+    if http_agent.source_format == "ard":
+        return await _process_ard_agent(http_agent, domain, protocol)
 
     dns_agent_name, fqdn_protocol_str = _parse_fqdn(http_agent.fqdn)
     if not dns_agent_name:
@@ -1066,6 +1097,48 @@ async def _process_http_agent(
         fqdn=http_agent.fqdn,
     )
     return _http_agent_to_record(http_agent, domain, dns_agent_name, agent_protocol)
+
+
+async def _process_ard_agent(
+    http_agent: HttpIndexAgent,
+    domain: str,
+    protocol: Protocol | None,
+) -> AgentRecord | None:
+    """Process an ARD ai-catalog entry: filter, DNS-first resolve, fallback.
+
+    ARD entries name agents by URN and locate artifacts by URL, so the
+    legacy FQDN-parsing path doesn't apply. The authoritative DNS answer
+    still wins: try a SVCB lookup for the ARD agent name under the queried
+    domain first, and enrich it from the catalog; otherwise surface the
+    catalog data directly (``endpoint_source="http_index_fallback"``).
+    """
+    proto_str = http_agent.primary_protocol
+    if not proto_str:
+        return None
+    try:
+        ard_protocol = Protocol(proto_str.lower())
+    except ValueError:
+        logger.debug(
+            "Unknown protocol for ARD entry",
+            agent=http_agent.name,
+            identifier=http_agent.identifier,
+            protocol=proto_str,
+        )
+        return None
+    if protocol and ard_protocol != protocol:
+        return None
+
+    agent = await _query_single_agent(domain, http_agent.name, ard_protocol)
+    if agent:
+        _enrich_from_http_index(agent, http_agent)
+        return agent
+
+    logger.debug(
+        "DNS lookup failed for ARD catalog agent, using catalog data only",
+        agent=http_agent.name,
+        identifier=http_agent.identifier,
+    )
+    return _http_agent_to_record(http_agent, domain, http_agent.name, ard_protocol)
 
 
 async def _discover_via_http_index(
@@ -1165,11 +1238,13 @@ def _http_agent_to_record(
             target_host = http_agent.fqdn.rstrip(".")
 
     # Extract capabilities from HTTP index if available
+    is_ard = http_agent.source_format == "ard"
     http_capabilities: list[str] = []
-    cap_source: CapabilitySource = "none"
+    cap_source: CapabilitySource = "ard_catalog" if is_ard else "none"
     if http_agent.capability and http_agent.capability.capabilities:
         http_capabilities = http_agent.capability.capabilities
-        cap_source = "http_index"
+        if not is_ard:
+            cap_source = "http_index"
 
     return AgentRecord(
         name=agent_name,
@@ -1180,8 +1255,10 @@ def _http_agent_to_record(
         capabilities=http_capabilities,
         capability_source=cap_source,
         description=http_agent.description,
+        use_cases=list(http_agent.use_cases),
         endpoint_override=http_agent.endpoint,
         endpoint_source="http_index_fallback",
+        trust_manifest=_validated_trust_manifest(http_agent) if is_ard else None,
     )
 
 

@@ -830,3 +830,107 @@ class TestSplitBapToken:
 
         # ``mcp=`` is unusual but defensive — keep the proto, no version.
         assert split_bap_token("mcp=") == ("mcp", None)
+
+
+class TestTrustManifest:
+    """ARD trustManifest models (spec 007 — pass-through trust claims)."""
+
+    WIRE = {
+        "identity": "spiffe://acme.com/registry/global",
+        "identityType": "spiffe",
+        "trustSchema": {
+            "identifier": "acme-trust-v1",
+            "version": "1.0",
+            "governanceUri": "https://acme.com/governance",
+            "verificationMethods": ["did", "x509", "dns-01"],
+        },
+        "attestations": [
+            {"type": "SPIFFE-X509", "uri": "https://acme.com/.well-known/spiffe/jwks"},
+            {
+                "type": "SOC2-Type2",
+                "uri": "https://trust.acme.com/reports/soc2.pdf",
+                "mediaType": "application/pdf",
+                "digest": "deadbeef",
+            },
+        ],
+        "provenance": [
+            {"relation": "derivedFrom", "sourceId": "urn:air:acme.com:src:x", "sourceDigest": "ab"}
+        ],
+        "signature": "eyJhbGciOiJFZERTQSJ9..sig",
+    }
+
+    def test_full_wire_round_trip(self):
+        from dns_aid.core.models import TrustManifest
+
+        tm = TrustManifest.from_wire(self.WIRE)
+        assert tm is not None
+        assert tm.identity == "spiffe://acme.com/registry/global"
+        assert tm.identity_type == "spiffe"
+        assert tm.trust_schema is not None
+        assert tm.trust_schema.governance_uri == "https://acme.com/governance"
+        assert tm.trust_schema.verification_methods == ["did", "x509", "dns-01"]
+        assert [a.type for a in tm.attestations] == ["SPIFFE-X509", "SOC2-Type2"]
+        assert tm.attestations[0].media_type is None  # optional on read
+        assert tm.attestations[1].digest == "deadbeef"
+        assert tm.provenance[0].relation == "derivedFrom"
+        assert tm.signature == "eyJhbGciOiJFZERTQSJ9..sig"
+
+    def test_snake_case_construction(self):
+        from dns_aid.core.models import TrustAttestation, TrustManifest
+
+        tm = TrustManifest(
+            identity="did:web:acme.com",
+            identity_type="did",
+            attestations=[TrustAttestation(type="GDPR", uri="https://x", media_type="text/html")],
+        )
+        assert tm.identity_type == "did"
+        assert tm.attestations[0].media_type == "text/html"
+
+    def test_unknown_fields_ignored(self):
+        from dns_aid.core.models import TrustManifest
+
+        tm = TrustManifest.from_wire({"identity": "https://acme.com", "futureField": 42})
+        assert tm is not None
+        assert not hasattr(tm, "futureField")
+
+    def test_missing_identity_returns_none(self):
+        from dns_aid.core.models import TrustManifest
+
+        assert TrustManifest.from_wire({"identityType": "spiffe"}) is None
+        assert TrustManifest.from_wire("not-a-dict") is None
+        assert TrustManifest.from_wire(None) is None
+
+    def test_malformed_items_dropped_not_fatal(self):
+        from dns_aid.core.models import TrustManifest
+
+        wire = {
+            "identity": "spiffe://acme.com/x",
+            "attestations": [
+                {"type": "SOC2-Type2", "uri": "https://ok"},
+                {"type": "broken-no-uri"},
+                "not-a-dict",
+            ],
+            "provenance": [{"relation": "copiedFrom"}],  # missing sourceId
+        }
+        tm = TrustManifest.from_wire(wire)
+        assert tm is not None
+        assert [a.type for a in tm.attestations] == ["SOC2-Type2"]
+        assert tm.provenance == []
+
+    def test_agent_record_serializes_trust_manifest(self):
+        from dns_aid.core.models import AgentRecord, Protocol, TrustManifest
+
+        record = AgentRecord(
+            name="weather",
+            domain="acme.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.acme.com",
+            capability_source="ard_catalog",
+            trust_manifest=TrustManifest.from_wire(self.WIRE),
+        )
+        dumped = record.model_dump()
+        assert dumped["capability_source"] == "ard_catalog"
+        assert dumped["trust_manifest"]["identity"] == "spiffe://acme.com/registry/global"
+        # Default remains None → no serialization change for non-ARD records
+        plain = AgentRecord(name="a", domain="b.com", protocol=Protocol.MCP, target_host="c.b.com")
+        assert plain.model_dump()["trust_manifest"] is None
