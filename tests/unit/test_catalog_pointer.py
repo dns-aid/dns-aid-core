@@ -14,6 +14,7 @@ from dns_aid.core.catalog_pointer import (
     DEFAULT_CATALOG_FILENAME,
     publish_catalog_pointer,
     resolve_catalog_pointer,
+    unpublish_catalog_pointer,
 )
 
 
@@ -342,6 +343,71 @@ class TestPublishCatalogPointer:
         backend.zone_exists = AsyncMock(return_value=False)
         with pytest.raises(ValueError, match="does not exist"):
             await publish_catalog_pointer("acme.com", "ard.acme.com", backend=backend)
+
+
+class TestUnpublishCatalogPointer:
+    def _mock_backend(self, deleted: bool = True):
+        backend = MagicMock()
+        backend.delete_record = AsyncMock(return_value=deleted)
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_dual_label_unpublish(self):
+        backend = self._mock_backend(deleted=True)
+        removed = await unpublish_catalog_pointer("acme.com", backend=backend)
+        assert removed == ["_catalog._agents.acme.com", "_index._agents.acme.com"]
+        # both deletes were SVCB deletes at the right owner names in the zone
+        names = set()
+        for c in backend.delete_record.await_args_list:
+            args = (
+                c.args if c.args else (c.kwargs["zone"], c.kwargs["name"], c.kwargs["record_type"])
+            )
+            assert args[0] == "acme.com" and args[2] == "SVCB"
+            names.add(args[1])
+        assert names == set(CATALOG_POINTER_LABELS)
+
+    @pytest.mark.asyncio
+    async def test_catalog_only_unpublish(self):
+        backend = self._mock_backend(deleted=True)
+        removed = await unpublish_catalog_pointer(
+            "acme.com", labels=("_catalog._agents",), backend=backend
+        )
+        assert removed == ["_catalog._agents.acme.com"]
+        assert backend.delete_record.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_idempotent_no_records(self):
+        # delete_record returns False when nothing was there → empty result, no error
+        backend = self._mock_backend(deleted=False)
+        removed = await unpublish_catalog_pointer("acme.com", backend=backend)
+        assert removed == []
+
+    @pytest.mark.asyncio
+    async def test_per_label_error_tolerated(self):
+        # _catalog delete raises; _index still removed.
+        backend = MagicMock()
+
+        async def _delete(zone, name, record_type):
+            if name == "_catalog._agents":
+                raise RuntimeError("backend hiccup")
+            return True
+
+        backend.delete_record = AsyncMock(side_effect=_delete)
+        removed = await unpublish_catalog_pointer("acme.com", backend=backend)
+        assert removed == ["_index._agents.acme.com"]
+
+    @pytest.mark.asyncio
+    async def test_round_trip_with_mock_backend(self):
+        # Real stateful mock backend: publish then unpublish leaves nothing.
+        from dns_aid.backends import create_backend
+
+        backend = create_backend("mock")
+        written = await publish_catalog_pointer("acme.com", "catalogue.acme.com", backend=backend)
+        assert len(written) == 2
+        removed = await unpublish_catalog_pointer("acme.com", backend=backend)
+        assert set(removed) == set(written)
+        # unpublishing again is a no-op
+        assert await unpublish_catalog_pointer("acme.com", backend=backend) == []
 
 
 class TestPointerDrivenDiscovery:

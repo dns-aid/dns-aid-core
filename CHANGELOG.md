@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-07-06
+
+### Added
+
+- **`unpublish_catalog_pointer` — remove an ARD catalog DNS pointer.** The
+  inverse of `publish_catalog_pointer`, available across all three interfaces:
+  the library `unpublish_catalog_pointer(domain, ...)`, the CLI
+  `dns-aid index unpublish-catalog <domain>`, and the MCP
+  `unpublish_catalog_pointer` tool. Deletes the SVCB records under
+  `_catalog._agents.{domain}` and `_index._agents.{domain}` (`--catalog-only`
+  to leave the latter). Only the SVCB pointer is removed — any TXT at
+  `_index._agents` (org-index listing) is left intact. Idempotent: missing
+  records are a no-op.
+
 ## [0.26.0] - 2026-07-06
 
 ### Added

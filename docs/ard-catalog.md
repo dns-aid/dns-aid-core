@@ -74,6 +74,24 @@ catalog over HTTPS at `/.well-known/ai-catalog.json`.
 Library and MCP equivalents: `dns_aid.core.catalog_pointer.publish_catalog_pointer(...)`
 and the MCP `publish_catalog_pointer` tool.
 
+#### Removing a catalog pointer
+
+The inverse operation removes the pointer SVCB records — available on all three
+interfaces, and idempotent (missing records are a no-op):
+
+```bash
+# Remove both _catalog._agents and _index._agents SVCB records
+dns-aid index unpublish-catalog example.com
+
+# Remove only the ARD _catalog._agents label (leave _index._agents in place)
+dns-aid index unpublish-catalog example.com --catalog-only
+```
+
+Only the SVCB pointer is deleted — any TXT at `_index._agents` (a DNS-AID
+org-index listing) is left intact. Library and MCP equivalents:
+`dns_aid.core.catalog_pointer.unpublish_catalog_pointer(...)` and the MCP
+`unpublish_catalog_pointer` tool.
+
 ### Compatibility
 
 - **Pure-DNS discovery is untouched.** Publishing a pointer only affects

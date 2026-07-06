@@ -1397,6 +1397,55 @@ def index_publish_catalog(
     console.print(f"\n[dim]Catalog: https://{catalog_host}/.well-known/{filename}[/dim]")
 
 
+@index_app.command("unpublish-catalog")
+def index_unpublish_catalog(
+    domain: Annotated[str, typer.Argument(help="Domain to remove the catalog pointer from")],
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", "-b", help="DNS backend, or set DNS_AID_BACKEND env var"),
+    ] = None,
+    catalog_only: Annotated[
+        bool,
+        typer.Option(
+            "--catalog-only",
+            help="Remove only _catalog._agents (leave _index._agents in place)",
+        ),
+    ] = False,
+):
+    """
+    Remove ARD catalog DNS pointer records for a domain.
+
+    Deletes the SVCB records under _catalog._agents.{domain} and
+    _index._agents.{domain}. Any TXT at _index._agents (org-index listing)
+    is left intact. Idempotent — missing records are a no-op.
+
+    Example:
+        dns-aid index unpublish-catalog example.com
+    """
+    from dns_aid.core.catalog_pointer import (
+        CATALOG_POINTER_LABELS,
+        unpublish_catalog_pointer,
+    )
+
+    dns_backend = _get_backend(backend)
+    labels = ("_catalog._agents",) if catalog_only else CATALOG_POINTER_LABELS
+
+    console.print(f"\n[bold]Removing ARD catalog pointer for {domain}...[/bold]\n")
+
+    try:
+        removed = run_async(unpublish_catalog_pointer(domain, labels=labels, backend=dns_backend))
+    except Exception as e:
+        error_console.print(f"[red]✗ Failed to remove catalog pointer: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    if removed:
+        console.print("[green]✓ Catalog pointer removed![/green]\n")
+        for fqdn in removed:
+            console.print(f"  [dim]deleted SVCB[/dim] {fqdn}")
+    else:
+        console.print("[yellow]No catalog pointer records found to remove.[/yellow]")
+
+
 # ============================================================================
 # KEYS COMMANDS (JWS Signing)
 # ============================================================================

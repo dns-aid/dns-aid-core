@@ -322,3 +322,40 @@ async def publish_catalog_pointer(
             filename=filename,
         )
     return written
+
+
+async def unpublish_catalog_pointer(
+    domain: str,
+    *,
+    labels: tuple[str, ...] = CATALOG_POINTER_LABELS,
+    backend: DNSBackend | None = None,
+) -> list[str]:
+    """Remove ARD catalog pointer SVCB records for a domain.
+
+    The inverse of :func:`publish_catalog_pointer`: deletes the SVCB record
+    under each label in ``labels`` (default both ``_catalog._agents`` and
+    ``_index._agents``). Only the SVCB pointer is removed — any TXT at
+    ``_index._agents`` (e.g. a DNS-AID org-index listing) is left intact.
+
+    Best-effort and idempotent: a label with no existing SVCB record — or a
+    per-label backend error — is skipped, and the other labels are still
+    removed. Returns the list of FQDNs actually removed.
+    """
+    domain = domain.lower().rstrip(".")
+    dns_backend = backend or get_default_backend()
+
+    removed: list[str] = []
+    for label in labels:
+        try:
+            deleted = await dns_backend.delete_record(domain, label, "SVCB")
+        except Exception as e:  # noqa: BLE001 — one label's failure must not block the others
+            logger.warning(
+                "catalog_pointer.unpublish_error", domain=domain, label=label, error=str(e)
+            )
+            continue
+        if deleted:
+            removed.append(f"{label}.{domain}")
+            logger.info("catalog_pointer.unpublished", domain=domain, label=label)
+        else:
+            logger.debug("catalog_pointer.unpublish_noop", domain=domain, label=label)
+    return removed

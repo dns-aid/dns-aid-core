@@ -500,6 +500,51 @@ def publish_catalog_pointer(
 
 
 @mcp.tool(
+    title="Unpublish ARD Catalog Pointer",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+def unpublish_catalog_pointer(
+    domain: str,
+    catalog_only: bool = False,
+    backend: Literal[
+        "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", "mock"
+    ] = "route53",
+) -> dict:
+    """Remove ARD catalog DNS pointer records for a domain.
+
+    Deletes the SVCB records under ``_catalog._agents.{domain}`` and, unless
+    ``catalog_only`` is set, ``_index._agents.{domain}``. Any TXT at
+    ``_index._agents`` (org-index listing) is left intact. Idempotent —
+    missing records are a no-op.
+    """
+    from dns_aid.core.catalog_pointer import (
+        CATALOG_POINTER_LABELS,
+        unpublish_catalog_pointer,
+    )
+
+    try:
+        dns_backend = _get_dns_backend(backend)
+        labels = ("_catalog._agents",) if catalog_only else CATALOG_POINTER_LABELS
+        removed = _run_async(unpublish_catalog_pointer(domain, labels=labels, backend=dns_backend))
+        return {
+            "success": True,
+            "domain": domain,
+            "removed": removed,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "unpublish_catalog_error",
+            "message": str(e),
+        }
+
+
+@mcp.tool(
     title="Discover Agents via DNS",
     annotations=ToolAnnotations(
         readOnlyHint=True,
