@@ -189,6 +189,11 @@ class HttpIndexAgent:
     identifier: str | None = None  # full ARD URN (urn:air:...) for diagnostics
     source_format: str = "legacy"  # "legacy" | "ard"
     use_cases: list[str] = field(default_factory=list)  # ARD representativeQueries
+    # ARD entry artifact locator (§3.4 Value-or-Reference). Per §4.2.1 the
+    # identifier is an abstract name, NOT a network locator — the agent's real
+    # endpoint lives in the referenced/inline card, resolved from exactly one of:
+    card_url: str | None = None  # `url`: dereference to fetch the card
+    card_data: dict[str, Any] | None = None  # `data`: the card given inline
 
     @classmethod
     def from_dict(cls, name: str, data: dict[str, Any]) -> HttpIndexAgent:
@@ -414,7 +419,9 @@ def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, s
         HttpIndexAgent(
             name=name,
             fqdn=fqdn,
-            endpoint=url,
+            # ARD entries never declare a service endpoint directly; the real
+            # endpoint is resolved from the card (card_url / card_data).
+            endpoint=None,
             description=description,
             protocols=[protocol],
             model_card=model_card,
@@ -423,6 +430,8 @@ def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, s
             identifier=identifier,
             source_format="ard",
             use_cases=use_cases,
+            card_url=url if isinstance(url, str) else None,
+            card_data=inline_data if isinstance(inline_data, dict) else None,
         ),
         None,
     )

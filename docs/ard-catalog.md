@@ -25,18 +25,21 @@ flowchart TD
     C --> E["parse catalog → entries"]
     D --> E
     E --> F["for each agent entry"]
-    F --> G{"authoritative DNS<br/>SVCB record?"}
-    G -- "yes" --> H["DNS record WINS<br/>catalog enriches it"]
-    G -- "no" --> I["fetch the entry's card<br/>(A2A / MCP, SSRF-checked, no redirects)"]
-    I --> J["apply REAL endpoint + skills/tools + auth<br/>endpoint_source = ard_card"]
-    H --> K["AgentRecord"]
-    J --> K
+    F --> G{"card carried inline (data)<br/>or referenced by url?"}
+    G -- "data" --> H["read the inline card<br/>endpoint_source = ard_inline"]
+    G -- "url" --> I["fetch the card<br/>(A2A / MCP, SSRF-checked, no redirects)<br/>endpoint_source = ard_card"]
+    H --> J["apply REAL endpoint + skills/tools + auth"]
+    I --> J
+    J --> K["AgentRecord"]
 ```
 
 Key invariants:
 
-- **DNS is authoritative per agent.** If a catalog agent also has a real DNS
-  SVCB record, that record wins and the catalog only enriches it (Step G→H).
+- **The identifier is a name, not a locator (ARD §4.2.1).** A catalog agent's
+  endpoint comes from its card — read inline (`data`) or dereferenced (`url`) —
+  never by turning the `urn:air:…` identifier into a DNS hostname. DNS-AID's
+  authoritative per-agent DNS discovery is the *separate* pure-DNS plane
+  (`discover(domain)` over SVCB records).
 - **The pointer is authoritative for *location*.** Publishing a `_catalog._agents`
   / `_index._agents` SVCB tells discovery where the catalog is; without one,
   discovery falls back to the well-known path on the domain itself.

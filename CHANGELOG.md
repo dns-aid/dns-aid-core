@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.2] - 2026-07-06
+
+### Fixed
+
+- **ARD entry resolution now follows the spec's identity/location separation.**
+  Per ARD §4.2.1 an entry's `identifier` (`urn:air:…`) is an abstract, stable
+  name — *not* a network locator — and per §3.4 the agent's card is carried by
+  exactly one of `url` (fetch) or `data` (inline). Discovery previously
+  synthesized `{name}.{domain}` from the identifier and preferred a DNS SVCB
+  lookup for it, which (a) conflated identity with location against §4.2.1 and
+  (b) could overwrite a real endpoint with the card-locator URL when a domain
+  published both flat DNS records and an ARD catalog. ARD entries are now
+  resolved purely from their card: inline `data` (`endpoint_source="ard_inline"`)
+  or a dereferenced `url` (`endpoint_source="ard_card"`). The identifier is never
+  turned into a DNS query. DNS-AID's authoritative per-agent DNS discovery is
+  unchanged and remains the separate pure-DNS plane (`discover(domain)` over
+  SVCB records).
+
+### Added
+
+- Inline agent cards (ARD `data`) are now dereferenced (previously dropped);
+  new `endpoint_source="ard_inline"`.
+
 ## [0.26.1] - 2026-07-06
 
 ### Added

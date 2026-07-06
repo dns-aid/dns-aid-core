@@ -529,7 +529,9 @@ class TestArdEntryMapping:
         assert by_name["assistant"].primary_protocol == "a2a"
         assert by_name["weather"].primary_protocol == "mcp"
         assert by_name["weather"].fqdn == "api.acme.com"
-        assert by_name["weather"].endpoint == "https://api.acme.com/mcp/weather.json"
+        # ARD `url` is a card locator (§3.4), captured as card_url — NOT endpoint.
+        assert by_name["weather"].card_url == "https://api.acme.com/mcp/weather.json"
+        assert by_name["weather"].endpoint is None
         assert by_name["weather"].capability.capabilities == ["WeatherTool", "ForecastTool"]
         assert by_name["weather"].identifier == "urn:air:acme.com:server:weather"
         assert len(by_name["weather"].use_cases) == 2
@@ -555,6 +557,9 @@ class TestArdEntryMapping:
         # Inline artifact → fqdn from URN publisher domain
         assert agents[0].fqdn == "acme.com"
         assert agents[0].endpoint is None
+        # Inline card captured as card_data (no url locator).
+        assert agents[0].card_data == {"some": "card"}
+        assert agents[0].card_url is None
 
     def test_version_maps_to_model_card(self):
         agents = parse_http_index(_ard_catalog([_ard_agent_entry(version="2.1.0")]))
@@ -979,38 +984,44 @@ class TestArdFetchEndToEnd:
         assert record.capability_source == "ard_catalog"
         assert record.capabilities == ["WeatherTool"]
         assert record.endpoint_source == "http_index_fallback"
-        assert record.endpoint_override == "https://api.acme.com/mcp/weather.json"
+        # Card unreachable → no fabricated endpoint (pre-0.26.2 stuffed the card URL here).
+        assert record.endpoint_override is None
         assert record.trust_manifest is not None
         assert record.trust_manifest.identity == "spiffe://acme.com/agents/weather"
 
     @pytest.mark.asyncio
-    async def test_discoverer_dns_answer_wins_and_is_enriched(self):
-        """DNS hit → authoritative record enriched with ARD trust data."""
+    async def test_dns_record_present_but_ard_uses_card(self):
+        """Even when a DNS SVCB record exists for the ARD agent's name, ARD
+        resolution ignores it (no identifier→hostname synthesis, §4.2.1) and
+        resolves the endpoint from the card; catalog trust still attaches."""
         from dns_aid.core import discoverer as disc
+        from dns_aid.core.cap_fetcher import CapabilityDocument
         from dns_aid.core.models import AgentRecord, Protocol
 
         dns_record = AgentRecord(
-            name="weather",
-            domain="acme.com",
-            protocol=Protocol.MCP,
-            target_host="mcp.acme.com",
+            name="weather", domain="acme.com", protocol=Protocol.MCP, target_host="mcp.acme.com"
         )
         entry = _ard_agent_entry(
             capabilities=["WeatherTool"],
             trustManifest=TestArdTrustManifest.SPIFFE_MANIFEST,
         )
         http_agents = parse_http_index(_ard_catalog([entry]))
+        card_doc = CapabilityDocument(
+            raw_data={"endpoint": "https://weather.acme.com/mcp", "tools": [{"name": "forecast"}]}
+        )
         with (
             patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
-            patch.object(disc, "_query_single_agent", AsyncMock(return_value=dns_record)),
             patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "fetch_cap_document", AsyncMock(return_value=card_doc)),
+            patch.object(disc, "_query_single_agent", AsyncMock(return_value=dns_record)) as qsa,
         ):
             records = await disc._discover_via_http_index("acme.com")
-        assert len(records) == 1
         record = records[0]
-        assert record.target_host == "mcp.acme.com"  # DNS answer preserved
-        assert record.capability_source == "ard_catalog"
+        qsa.assert_not_called()  # DNS never consulted for an ARD entry
+        assert record.target_host == "weather.acme.com"  # endpoint from the card
+        assert record.endpoint_source == "ard_card"
         assert record.trust_manifest is not None
+        assert record.trust_manifest.identity == "spiffe://acme.com/agents/weather"
 
     @pytest.mark.asyncio
     async def test_protocol_filter_applies_to_ard_agents(self):
@@ -1113,8 +1124,74 @@ class TestArdCardDereference:
         ):
             records = await disc._discover_via_http_index("acme.com")
         r = records[0]
-        # Falls back to catalog-level data: card URL stays as the endpoint.
-        assert r.endpoint_override == "https://api.acme.com/mcp/weather.json"
+        # Card unreachable → NO fabricated endpoint. The record keeps its
+        # catalog-level data (caps, trust) but must not masquerade the card
+        # URL as the service endpoint (the pre-0.26.2 bug).
+        assert r.endpoint_override is None
         assert r.endpoint_source == "http_index_fallback"
         assert r.capability_source == "ard_catalog"
         assert r.capabilities == ["invoicing"]
+
+    @pytest.mark.asyncio
+    async def test_inline_data_card_resolved_without_fetch(self):
+        # §3.4: an entry may carry its card INLINE via `data` — resolve it
+        # directly, no network fetch, endpoint_source="ard_inline".
+        from dns_aid.core import discoverer as disc
+
+        entry = {
+            "identifier": "urn:air:acme.com:agents:inline-bot",
+            "displayName": "Inline Bot",
+            "type": "application/a2a-agent-card+json",
+            "data": {
+                "name": "Inline Bot",
+                "url": "https://inline-bot.acme.com/a2a",
+                "skills": [{"id": "greet", "name": "Greet"}],
+            },
+        }
+        http_agents = parse_http_index(_ard_catalog([entry]))
+        with (
+            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "fetch_cap_document", AsyncMock()) as fc,
+        ):
+            records = await disc._discover_via_http_index("acme.com")
+        r = records[0]
+        assert r.endpoint_override == "https://inline-bot.acme.com/a2a"
+        assert r.endpoint_source == "ard_inline"
+        assert r.target_host == "inline-bot.acme.com"
+        assert r.capabilities == ["greet"]
+        assert r.capability_source == "agent_card"
+        fc.assert_not_awaited()  # inline data → zero network fetches
+
+    @pytest.mark.asyncio
+    async def test_identifier_never_synthesizes_dns_lookup(self):
+        # ARD §4.2.1: the identifier is an abstract name, NOT a locator. Even
+        # when a DNS SVCB record EXISTS for {name}.{domain}, ARD resolution must
+        # NOT query it or prefer it — the endpoint comes from the entry's card.
+        from dns_aid.core import discoverer as disc
+        from dns_aid.core.cap_fetcher import CapabilityDocument
+
+        entry = {
+            "identifier": "urn:air:acme.com:agents:billing",
+            "displayName": "Billing",
+            "type": "application/mcp-server-card+json",
+            "url": "https://cards.acme.com/billing.json",
+        }
+        http_agents = parse_http_index(_ard_catalog([entry]))
+        card_doc = CapabilityDocument(
+            raw_data={"endpoint": "https://billing.acme.com/mcp", "tools": [{"name": "invoice"}]}
+        )
+        decoy = object()  # what a DNS lookup would return — must never be used
+        with (
+            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "fetch_cap_document", AsyncMock(return_value=card_doc)),
+            patch.object(disc, "_query_single_agent", AsyncMock(return_value=decoy)) as qsa,
+        ):
+            records = await disc._discover_via_http_index("acme.com")
+        r = records[0]
+        assert r is not decoy  # resolved from the card, not a DNS record
+        assert r.endpoint_override == "https://billing.acme.com/mcp"
+        assert r.endpoint_source == "ard_card"
+        qsa.assert_not_called()  # the identifier was never turned into a DNS query

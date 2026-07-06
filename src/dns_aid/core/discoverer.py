@@ -1159,40 +1159,48 @@ _MAX_ARD_CARD_CAPABILITIES = 256
 
 
 async def _apply_ard_card(record: AgentRecord, http_agent: HttpIndexAgent) -> None:
-    """Dereference an ARD entry's referenced card into the discovered record.
+    """Resolve an ARD entry's artifact (its card) into the discovered record.
 
-    An ARD catalog entry's ``url`` points at the agent's CARD (an A2A agent
-    card or MCP server card), not its service endpoint — so the catalog-only
-    record currently carries the card URL as its endpoint. Fetch that card
-    (SSRF-guarded + size-capped via ``fetch_cap_document``; redirects refused
-    since the URL is catalog-controlled) and dereference it: set the real
-    service endpoint, skills/tools → capabilities, and auth.
+    Per ARD §3.4 an entry carries its agent's card by exactly one of ``data``
+    (the card inline) or ``url`` (a locator to fetch it). Per §4.2.1 the entry's
+    ``identifier`` is an abstract, stable name — NOT a network locator — so the
+    real service endpoint comes from the card, never from the identifier. This
+    reads the inline card directly, or dereferences the card URL (SSRF-guarded +
+    size-capped via ``fetch_cap_document``; redirects refused since the URL is
+    catalog-controlled), then sets the real endpoint, skills/tools →
+    capabilities, and auth.
 
-    Best-effort: on any failure the record keeps its catalog-level data (the
-    card URL stays as the endpoint fallback). Runs under the shared per-agent
-    Semaphore, so N card fetches are already bounded.
+    Best-effort: on any failure the record keeps its catalog-level data. Runs
+    under the shared per-agent Semaphore, so N card fetches are already bounded.
     """
-    card_url = http_agent.endpoint
-    if not card_url:
+    source: Literal["ard_card", "ard_inline"]
+    if http_agent.card_data is not None:
+        raw = http_agent.card_data
+        source = "ard_inline"
+    elif http_agent.card_url:
+        try:
+            cap_doc = await asyncio.wait_for(
+                fetch_cap_document(http_agent.card_url, follow_redirects=False),
+                timeout=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
+            )
+        except Exception as e:  # noqa: BLE001 — a bad card must not drop the agent
+            logger.debug(
+                "ard_card.fetch_error", agent=record.name, url=http_agent.card_url, error=str(e)
+            )
+            return
+        if not cap_doc or not cap_doc.raw_data:
+            return
+        raw = cap_doc.raw_data
+        source = "ard_card"
+    else:
         return
-    try:
-        cap_doc = await asyncio.wait_for(
-            fetch_cap_document(card_url, follow_redirects=False),
-            timeout=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
-        )
-    except Exception as e:  # noqa: BLE001 — a bad card must not drop the agent
-        logger.debug("ard_card.fetch_error", agent=record.name, url=card_url, error=str(e))
-        return
-    if not cap_doc or not cap_doc.raw_data:
-        return
-    raw = cap_doc.raw_data
 
     def _set_endpoint(url: str) -> None:
         parsed = urlparse(url)
         if not parsed.hostname:
             return
         record.endpoint_override = url
-        record.endpoint_source = "ard_card"
+        record.endpoint_source = source
         record.target_host = parsed.hostname
         record.port = parsed.port or 443
 
@@ -1210,7 +1218,7 @@ async def _apply_ard_card(record: AgentRecord, http_agent: HttpIndexAgent) -> No
         if card.authentication and card.authentication.schemes:
             record.auth_type = card.authentication.schemes[0]
             record.auth_config = {"schemes": list(card.authentication.schemes)}
-        logger.debug("ard_card.applied", agent=record.name, protocol="a2a")
+        logger.debug("ard_card.applied", agent=record.name, protocol="a2a", source=source)
     else:  # MCP server card — no typed parser exists; extract minimally
         endpoint = raw.get("endpoint") or raw.get("url")
         if isinstance(endpoint, str) and endpoint.startswith("https://"):
@@ -1222,7 +1230,7 @@ async def _apply_ard_card(record: AgentRecord, http_agent: HttpIndexAgent) -> No
             if names:
                 record.capabilities = names
                 record.capability_source = "agent_card"
-        logger.debug("ard_card.applied", agent=record.name, protocol="mcp")
+        logger.debug("ard_card.applied", agent=record.name, protocol="mcp", source=source)
 
 
 async def _process_ard_agent(
@@ -1230,13 +1238,18 @@ async def _process_ard_agent(
     domain: str,
     protocol: Protocol | None,
 ) -> AgentRecord | None:
-    """Process an ARD ai-catalog entry: filter, DNS-first resolve, fallback.
+    """Resolve an ARD ai-catalog entry via its artifact (the card).
 
-    ARD entries name agents by URN and locate artifacts by URL, so the
-    legacy FQDN-parsing path doesn't apply. The authoritative DNS answer
-    still wins: try a SVCB lookup for the ARD agent name under the queried
-    domain first, and enrich it from the catalog; otherwise surface the
-    catalog data directly (``endpoint_source="http_index_fallback"``).
+    Per ARD §4.2.1 the entry's ``identifier`` is an abstract, stable name — not
+    a network locator — so we do NOT synthesize ``{name}.{domain}`` and prefer a
+    DNS SVCB lookup for it (that re-conflates identity with location, the exact
+    anti-pattern §4.2.1 warns against). The endpoint/skills/auth come from the
+    entry's card (§3.4): inline ``data`` or a dereferenced ``url``.
+
+    DNS-AID's authoritative-DNS discovery stays a separate plane — the pure-DNS
+    ``discover(domain)`` path (SVCB records) and the DNSSEC-signed
+    ``_catalog._agents`` pointer — never reached by guessing a hostname from a
+    catalog identifier.
     """
     proto_str = http_agent.primary_protocol
     if not proto_str:
@@ -1254,20 +1267,11 @@ async def _process_ard_agent(
     if protocol and ard_protocol != protocol:
         return None
 
-    agent = await _query_single_agent(domain, http_agent.name, ard_protocol)
-    if agent:
-        _enrich_from_http_index(agent, http_agent)
-        return agent
-
-    logger.debug(
-        "DNS lookup failed for ARD catalog agent, dereferencing catalog card",
-        agent=http_agent.name,
-        identifier=http_agent.identifier,
-    )
     record = _http_agent_to_record(http_agent, domain, http_agent.name, ard_protocol)
-    if record is not None:
-        # Dereference the ARD entry's card URL to the real endpoint/skills/auth.
-        await _apply_ard_card(record, http_agent)
+    if record is None:
+        return None
+    # Resolve the real endpoint/skills/auth from the entry's card artifact.
+    await _apply_ard_card(record, http_agent)
     return record
 
 
