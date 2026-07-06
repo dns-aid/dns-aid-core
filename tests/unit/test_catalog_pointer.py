@@ -78,7 +78,7 @@ class TestResolveCatalogPointer:
             return_value=_resolver_returning(mapping),
         ):
             url = await resolve_catalog_pointer("acme.com")
-        assert "cat.acme.com" in url
+        assert url == "https://cat.acme.com/.well-known/ai-catalog.json"
 
     @pytest.mark.asyncio
     async def test_falls_back_to_index_label(self):

@@ -18,6 +18,7 @@ Gated behind DNS_AID_LIVE_TESTS=1 so CI stays hermetic:
 """
 
 import os
+from urllib.parse import urlparse
 
 import pytest
 
@@ -66,7 +67,7 @@ async def test_live_discover_via_library():
         "every ARD agent's card should be dereferenced to its real endpoint"
     )
     billing = by_name["billing"]
-    assert billing.endpoint_url.startswith("https://billing.highvelocitynetworking.com")
+    assert urlparse(billing.endpoint_url).hostname == "billing.highvelocitynetworking.com"
     assert "create_invoice" in billing.capabilities  # tools from the fetched card
     assert billing.capability_source == "agent_card"
 
