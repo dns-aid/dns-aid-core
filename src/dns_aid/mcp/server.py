@@ -442,6 +442,7 @@ def publish_catalog_pointer(
     catalog_host: str,
     filename: str = "ai-catalog.json",
     catalog_only: bool = False,
+    force_index: bool = False,
     port: int = 443,
     ipv4_hint: str | None = None,
     ipv6_hint: str | None = None,
@@ -480,6 +481,7 @@ def publish_catalog_pointer(
                 port=port,
                 ipv4_hint=ipv4_hint,
                 ipv6_hint=ipv6_hint,
+                force_index=force_index,
             )
         )
         return {

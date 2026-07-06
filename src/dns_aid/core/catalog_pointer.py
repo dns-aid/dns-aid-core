@@ -43,7 +43,11 @@ from dns_aid.backends.base import DNSBackend
 from dns_aid.core.models import SVCB_SERVICE_MODE
 from dns_aid.core.publisher import get_default_backend
 from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url
-from dns_aid.utils.validation import validate_no_underscore_in_target, validate_well_known_path
+from dns_aid.utils.validation import (
+    validate_no_underscore_in_target,
+    validate_svcparam_value,
+    validate_well_known_path,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -59,6 +63,16 @@ DEFAULT_CATALOG_FILENAME = "ai-catalog.json"
 _WELL_KNOWN_KEY = 65409
 
 DEFAULT_RESOLVE_TIMEOUT = 5.0
+
+# Cap SVCB records inspected per resolution (across both labels). An attacker
+# who controls a domain's DNS could publish a large SVCB RRset; each record
+# otherwise triggers a (DNS-resolving) SSRF validation, so bound the work.
+_MAX_POINTER_RECORDS = 4
+
+# Per-URL SSRF-validation budget. validate_fetch_url does a blocking
+# getaddrinfo with no timeout of its own; bound it so a slow/blackholed
+# authoritative server for the target host can't stall discovery.
+_VALIDATE_TIMEOUT = 3.0
 
 
 async def _resolve_svcb(
@@ -79,8 +93,11 @@ async def _resolve_svcb(
 def _read_wellknown_filename(rdata: object) -> str | None:
     """Read an optional catalog-filename override from the well-known SvcParam.
 
-    Returns a validated single-segment filename, or None to use the default.
-    Never returns a path with separators / traversal (RFC 8615 single-segment).
+    Runs the decoded value through the SAME validator the publish side uses
+    (``validate_well_known_path`` — RFC 8615 single-segment, length-bounded,
+    control-char / separator / traversal rejecting) so a forged inbound SVCB
+    can't push an oversized or control-laden path into the URL. Returns None
+    (→ caller uses the default filename) on any non-conforming value.
     """
     params = getattr(rdata, "params", None) or {}
     param = params.get(_WELL_KNOWN_KEY)
@@ -94,10 +111,10 @@ def _read_wellknown_filename(rdata: object) -> str | None:
             return None
     else:
         text = str(value)
-    text = text.strip().lstrip("/")
-    if not text or "/" in text or "\\" in text or ".." in text:
+    try:
+        return validate_well_known_path(text.strip().lstrip("/"))
+    except Exception:  # noqa: BLE001 — any invalid value → fall back to default
         return None
-    return text
 
 
 async def resolve_catalog_pointer(
@@ -116,6 +133,7 @@ async def resolve_catalog_pointer(
     domain = domain.lower().rstrip(".")
     resolver = dns.asyncresolver.Resolver()
     resolver.lifetime = timeout
+    records_seen = 0
 
     for label in CATALOG_POINTER_LABELS:
         fqdn = f"{label}.{domain}"
@@ -127,6 +145,15 @@ async def resolve_catalog_pointer(
         if answers is None:
             continue
         for rdata in answers:
+            # Bound total records inspected — a hostile large SVCB RRset must
+            # not fan out into unbounded SSRF-validation work.
+            if records_seen >= _MAX_POINTER_RECORDS:
+                logger.warning(
+                    "catalog_pointer.records_capped", domain=domain, cap=_MAX_POINTER_RECORDS
+                )
+                return None
+            records_seen += 1
+
             # AliasMode (priority 0) does not carry a target endpoint here.
             if getattr(rdata, "priority", SVCB_SERVICE_MODE) == 0:
                 continue
@@ -137,12 +164,19 @@ async def resolve_catalog_pointer(
             url = f"https://{target}/.well-known/{filename}"
             # SSRF guard: a pointer targets an arbitrary host (host-anywhere),
             # so reject one that resolves to a private/loopback/link-local/
-            # reserved address before we fetch it. On rejection, skip this
-            # pointer and fall through to the queried domain's well-known
-            # paths (which are inherently safe). Runs off-loop — validation
-            # does a blocking DNS resolution.
+            # reserved address before we fetch it. On rejection (or any
+            # validation error — getaddrinfo can raise beyond gaierror), skip
+            # this pointer and fall through to the queried domain's well-known
+            # paths (inherently safe). Runs off-loop under a time budget so a
+            # slow authoritative server for the target can't stall discovery.
+            # NOTE: this validates the host's CURRENT resolution; a DNS-rebinding
+            # attacker (TTL 0) could still return a different IP at httpx connect
+            # time — a limitation shared with all validate_fetch_url callers, to
+            # be closed globally by a pinned-IP transport.
             try:
-                await asyncio.to_thread(validate_fetch_url, url)
+                await asyncio.wait_for(
+                    asyncio.to_thread(validate_fetch_url, url), timeout=_VALIDATE_TIMEOUT
+                )
             except UnsafeURLError as e:
                 logger.warning(
                     "catalog_pointer.unsafe_target",
@@ -152,9 +186,41 @@ async def resolve_catalog_pointer(
                     error=str(e),
                 )
                 continue
+            except Exception as e:  # noqa: BLE001 — never break discovery on validation error
+                logger.warning(
+                    "catalog_pointer.validation_error",
+                    domain=domain,
+                    label=label,
+                    url=url,
+                    error=str(e),
+                )
+                continue
             logger.info("catalog_pointer.resolved", domain=domain, label=label, url=url)
             return url
     return None
+
+
+async def _existing_svcb_target(backend: DNSBackend, zone: str, name: str) -> str | None:
+    """Return the current SVCB target host at ``name`` in ``zone``, or None.
+
+    Used to avoid clobbering an existing org-index pointer. Best-effort:
+    on any backend error, returns None (treated as "no existing record").
+    """
+    try:
+        record = await backend.get_record(zone, name, "SVCB")
+    except Exception as e:  # noqa: BLE001 — a read failure must not block publish
+        logger.debug("catalog_pointer.existing_read_error", zone=zone, name=name, error=str(e))
+        return None
+    if not record:
+        return None
+    values = record.get("values") or []
+    if not values:
+        return None
+    # SVCB presentation: "<priority> <target> [params...]" — target is token 1.
+    tokens = str(values[0]).split()
+    if len(tokens) < 2:
+        return None
+    return tokens[1].rstrip(".").lower()
 
 
 async def publish_catalog_pointer(
@@ -169,6 +235,7 @@ async def publish_catalog_pointer(
     alpn: str = "h2",
     ipv4_hint: str | None = None,
     ipv6_hint: str | None = None,
+    force_index: bool = False,
 ) -> list[str]:
     """Publish ARD catalog pointer SVCB records for a domain.
 
@@ -183,10 +250,13 @@ async def publish_catalog_pointer(
     for a fixed-IP origin; OMIT for CDN-fronted catalogs (e.g. CloudFront),
     whose edge IPs rotate and would make the hint stale. Default off.
 
-    Note: ``_index._agents`` is DNS-AID's generic org-index pointer; writing
-    it makes the ARD catalog serve as the domain's DNS-AID index and will
-    UPSERT (replace) any existing ``_index._agents`` SVCB. Pass
-    ``labels=("_catalog._agents",)`` to publish only the ARD-specific label.
+    Note: ``_index._agents`` is DNS-AID's generic org-index pointer; it may
+    already be owned by the domain's indexer. To avoid silently repointing an
+    existing org index, this refuses to overwrite an ``_index._agents`` SVCB
+    that already points at a DIFFERENT target — it logs a warning and skips
+    that label (still publishing ``_catalog._agents``). Pass
+    ``force_index=True`` to replace it anyway, or ``labels=("_catalog._agents",)``
+    to publish only the ARD-specific label.
 
     Returns the list of created FQDNs. Raises ValueError if the zone does
     not exist or an address hint is malformed; the catalog host must not
@@ -196,6 +266,10 @@ async def publish_catalog_pointer(
     domain = domain.lower().rstrip(".")
     validate_no_underscore_in_target(catalog_host)
     filename = validate_well_known_path(filename)
+    # SvcParam quote-breakout guard — alpn is otherwise emitted verbatim as
+    # key="value" by the backend, so a value with a quote could inject a
+    # sibling SvcParamKey into the authoritative record.
+    alpn = validate_svcparam_value(alpn, field="alpn")
 
     dns_backend = backend or get_default_backend()
     if not await dns_backend.zone_exists(domain):
@@ -217,6 +291,20 @@ async def publish_catalog_pointer(
 
     written: list[str] = []
     for label in labels:
+        # Anti-clobber: never silently replace an existing _index._agents
+        # pointer that targets a different host (it may be a live org index).
+        if label == "_index._agents" and not force_index:
+            existing = await _existing_svcb_target(dns_backend, domain, label)
+            if existing is not None and existing != target.rstrip("."):
+                logger.warning(
+                    "catalog_pointer.index_pointer_preserved",
+                    domain=domain,
+                    existing_target=existing,
+                    would_be_target=target.rstrip("."),
+                    hint="pass force_index=True to replace, or ignore to keep the existing index",
+                )
+                continue
+
         fqdn = await dns_backend.create_svcb_record(
             zone=domain,
             name=label,

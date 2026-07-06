@@ -33,6 +33,7 @@ def _stream_response(payload, status: int = 200):
 
     resp = MagicMock()
     resp.status_code = status
+    resp.is_redirect = 300 <= status < 400
     resp.aiter_bytes = _aiter_bytes
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=resp)

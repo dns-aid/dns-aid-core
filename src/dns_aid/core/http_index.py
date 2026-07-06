@@ -541,17 +541,35 @@ def _ard_parse_into(data: dict[str, Any], state: _ArdParseState, depth: int) -> 
 
 
 async def _fetch_and_parse(
-    client: httpx.AsyncClient, url: str, errors: list[str]
+    client: httpx.AsyncClient,
+    url: str,
+    errors: list[str],
+    *,
+    follow_redirects: bool = True,
 ) -> list[HttpIndexAgent] | None:
     """Fetch one URL under the byte cap and parse it, or record why it failed.
 
     Returns the parsed agents on HTTP 200 + valid JSON; ``None`` on any
     failure (appending a diagnostic to ``errors``). Never raises.
+
+    ``follow_redirects=False`` is used for a DNS-pointer-resolved catalog URL:
+    its host is attacker-influenceable (an SVCB target), and the pre-flight
+    SSRF check only validated the pre-redirect host — following a redirect to
+    an internal/metadata endpoint would bypass it. On a redirect the fetch is
+    treated as a failure and discovery falls through to the well-known paths.
     """
     try:
         # Stream the body with a byte cap so a hostile endpoint can't
         # force an OOM — the oversized payload never fully lands in memory.
-        async with client.stream("GET", url) as response:
+        async with client.stream("GET", url, follow_redirects=follow_redirects) as response:
+            if response.is_redirect:
+                errors.append(f"{url}: refused redirect to {response.headers.get('location', '?')}")
+                logger.warning(
+                    "http_index.redirect_refused",
+                    url=url,
+                    location=response.headers.get("location"),
+                )
+                return None
             if response.status_code != 200:
                 if response.status_code == 404:
                     errors.append(f"{url}: Not found (404)")
@@ -649,7 +667,9 @@ async def fetch_http_index(
         # the catalog lives, which overrides the well-known path convention.
         if catalog_url:
             logger.debug("Trying DNS-pointer catalog URL", url=catalog_url)
-            agents = await _fetch_and_parse(client, catalog_url, errors)
+            # No redirects: the catalog host came from an (attacker-influenceable)
+            # SVCB target and was SSRF-validated pre-redirect only.
+            agents = await _fetch_and_parse(client, catalog_url, errors, follow_redirects=False)
             if agents is not None:
                 return agents
 

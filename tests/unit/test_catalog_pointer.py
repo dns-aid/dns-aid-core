@@ -163,6 +163,31 @@ class TestResolveSsrf:
             assert await resolve_catalog_pointer("evil.com") is None
 
     @pytest.mark.asyncio
+    async def test_record_flood_capped(self):
+        # adv-3: a large SVCB RRset must not fan out into unbounded validation.
+        from dns_aid.core.catalog_pointer import _MAX_POINTER_RECORDS
+
+        flood = [_svcb_rdata(f"h{i}.evil.com.") for i in range(_MAX_POINTER_RECORDS + 20)]
+        mapping = {"_catalog._agents.evil.com": flood}
+        calls = {"n": 0}
+
+        def _count(url):
+            calls["n"] += 1
+            raise __import__(
+                "dns_aid.utils.url_safety", fromlist=["UnsafeURLError"]
+            ).UnsafeURLError("blocked")
+
+        with (
+            patch(
+                "dns_aid.core.catalog_pointer.dns.asyncresolver.Resolver",
+                return_value=_resolver_returning(mapping),
+            ),
+            patch("dns_aid.core.catalog_pointer.validate_fetch_url", side_effect=_count),
+        ):
+            assert await resolve_catalog_pointer("evil.com") is None
+        assert calls["n"] <= _MAX_POINTER_RECORDS
+
+    @pytest.mark.asyncio
     async def test_unsafe_catalog_falls_through_to_safe_index(self):
         from dns_aid.utils.url_safety import UnsafeURLError
 
@@ -194,6 +219,7 @@ class TestPublishCatalogPointer:
         backend.create_svcb_record = AsyncMock(
             side_effect=lambda **kw: f"{kw['name']}.{kw['zone']}"
         )
+        backend.get_record = AsyncMock(return_value=None)  # no existing _index by default
         return backend
 
     @pytest.mark.asyncio
@@ -260,6 +286,50 @@ class TestPublishCatalogPointer:
         backend.create_svcb_record.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_alpn_quote_breakout_rejected(self):
+        # adv-4: an alpn value that could break SVCB param quoting is rejected.
+        backend = self._mock_backend()
+        with pytest.raises(Exception):  # noqa: B017 — ValidationError from validate_svcparam_value
+            await publish_catalog_pointer(
+                "acme.com", "ard.acme.com", alpn='h2" ipv4hint="1.2.3.4', backend=backend
+            )
+        backend.create_svcb_record.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_index_clobber_prevented(self):
+        # adv-5: existing _index._agents SVCB with a DIFFERENT target is preserved.
+        backend = self._mock_backend()
+        backend.get_record = AsyncMock(
+            return_value={"values": ['1 other-index.acme.com. alpn="h2" port="443"']}
+        )
+        written = await publish_catalog_pointer("acme.com", "ard.acme.com", backend=backend)
+        # _catalog written, _index skipped (would clobber)
+        assert written == ["_catalog._agents.acme.com"]
+        names = [c.kwargs["name"] for c in backend.create_svcb_record.await_args_list]
+        assert names == ["_catalog._agents"]
+
+    @pytest.mark.asyncio
+    async def test_index_same_target_not_skipped(self):
+        # If the existing _index points at the SAME host, dual publish proceeds.
+        backend = self._mock_backend()
+        backend.get_record = AsyncMock(
+            return_value={"values": ['1 ard.acme.com. alpn="h2" port="443"']}
+        )
+        written = await publish_catalog_pointer("acme.com", "ard.acme.com", backend=backend)
+        assert written == ["_catalog._agents.acme.com", "_index._agents.acme.com"]
+
+    @pytest.mark.asyncio
+    async def test_force_index_overrides_clobber_guard(self):
+        backend = self._mock_backend()
+        backend.get_record = AsyncMock(
+            return_value={"values": ['1 other-index.acme.com. alpn="h2" port="443"']}
+        )
+        written = await publish_catalog_pointer(
+            "acme.com", "ard.acme.com", backend=backend, force_index=True
+        )
+        assert written == ["_catalog._agents.acme.com", "_index._agents.acme.com"]
+
+    @pytest.mark.asyncio
     async def test_underscore_host_rejected(self):
         backend = self._mock_backend()
         with pytest.raises(Exception):  # noqa: B017 — validation error type is backend-internal
@@ -285,6 +355,7 @@ class TestPointerDrivenDiscovery:
 
         resp = MagicMock()
         resp.status_code = status
+        resp.is_redirect = 300 <= status < 400
         resp.aiter_bytes = _aiter_bytes
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=resp)
@@ -318,6 +389,29 @@ class TestPointerDrivenDiscovery:
         assert [a.name for a in agents] == ["weather"]
         assert client.stream.call_count == 1
         assert client.stream.call_args[0][1] == "https://cat.acme.com/.well-known/ai-catalog.json"
+
+    @pytest.mark.asyncio
+    async def test_catalog_url_redirect_refused(self):
+        # adv-1: a 302 from the pointer host is refused (no redirect follow),
+        # so fetch fails over to the well-known patterns instead.
+        from dns_aid.core.http_index import HttpIndexError, fetch_http_index
+
+        client = MagicMock()
+        # catalog_url → 302; all 5 well-known patterns → 404
+        client.stream = MagicMock(
+            side_effect=[self._stream_response({}, status=302)]
+            + [self._stream_response({}, status=404) for _ in range(5)]
+        )
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        with patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=client):
+            with pytest.raises(HttpIndexError):
+                await fetch_http_index(
+                    "acme.com", catalog_url="https://evil.acme.com/.well-known/ai-catalog.json"
+                )
+        # First call was the catalog_url with follow_redirects disabled
+        first = client.stream.call_args_list[0]
+        assert first.kwargs.get("follow_redirects") is False
 
     @pytest.mark.asyncio
     async def test_discover_resolves_pointer_then_fetches(self):

@@ -418,8 +418,11 @@ def discover(
     """
     from dns_aid.core.discoverer import discover as do_discover
 
-    method = "HTTP index" if use_http_index else "DNS"
-    console.print(f"\n[bold]Discovering agents at {domain} via {method}...[/bold]\n")
+    # Human-readable status header — suppressed in --json mode so stdout stays
+    # a single machine-parseable JSON document.
+    if not json_output:
+        method = "HTTP index" if use_http_index else "DNS"
+        console.print(f"\n[bold]Discovering agents at {domain} via {method}...[/bold]\n")
 
     try:
         result = run_async(
@@ -1327,6 +1330,14 @@ def index_publish_catalog(
             "generic org-index pointer and would be replaced)",
         ),
     ] = False,
+    force_index: Annotated[
+        bool,
+        typer.Option(
+            "--force-index",
+            help="Replace an existing _index._agents pointer even if it targets a different "
+            "host (default: preserve it and warn)",
+        ),
+    ] = False,
     port: Annotated[int, typer.Option("--port", help="Catalog host port")] = 443,
     ipv4_hint: Annotated[
         str | None,
@@ -1372,6 +1383,7 @@ def index_publish_catalog(
                 port=port,
                 ipv4_hint=ipv4_hint,
                 ipv6_hint=ipv6_hint,
+                force_index=force_index,
             )
         )
     except Exception as e:
