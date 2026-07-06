@@ -1154,6 +1154,77 @@ async def _process_http_agent(
     return _http_agent_to_record(http_agent, domain, dns_agent_name, agent_protocol)
 
 
+# Cap tools/skills lifted from a fetched ARD card onto a record.
+_MAX_ARD_CARD_CAPABILITIES = 256
+
+
+async def _apply_ard_card(record: AgentRecord, http_agent: HttpIndexAgent) -> None:
+    """Dereference an ARD entry's referenced card into the discovered record.
+
+    An ARD catalog entry's ``url`` points at the agent's CARD (an A2A agent
+    card or MCP server card), not its service endpoint — so the catalog-only
+    record currently carries the card URL as its endpoint. Fetch that card
+    (SSRF-guarded + size-capped via ``fetch_cap_document``; redirects refused
+    since the URL is catalog-controlled) and dereference it: set the real
+    service endpoint, skills/tools → capabilities, and auth.
+
+    Best-effort: on any failure the record keeps its catalog-level data (the
+    card URL stays as the endpoint fallback). Runs under the shared per-agent
+    Semaphore, so N card fetches are already bounded.
+    """
+    card_url = http_agent.endpoint
+    if not card_url:
+        return
+    try:
+        cap_doc = await asyncio.wait_for(
+            fetch_cap_document(card_url, follow_redirects=False),
+            timeout=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
+        )
+    except Exception as e:  # noqa: BLE001 — a bad card must not drop the agent
+        logger.debug("ard_card.fetch_error", agent=record.name, url=card_url, error=str(e))
+        return
+    if not cap_doc or not cap_doc.raw_data:
+        return
+    raw = cap_doc.raw_data
+
+    def _set_endpoint(url: str) -> None:
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            return
+        record.endpoint_override = url
+        record.endpoint_source = "ard_card"
+        record.target_host = parsed.hostname
+        record.port = parsed.port or 443
+
+    if record.protocol == Protocol.A2A:
+        try:
+            card = A2AAgentCard.from_dict(raw)
+        except Exception:  # noqa: BLE001 — not a valid A2A card; keep catalog data
+            return
+        record.agent_card = card
+        if isinstance(card.url, str) and card.url.startswith("https://"):
+            _set_endpoint(card.url)
+        if card.skills:
+            record.capabilities = card.to_capabilities()[:_MAX_ARD_CARD_CAPABILITIES]
+            record.capability_source = "agent_card"
+        if card.authentication and card.authentication.schemes:
+            record.auth_type = card.authentication.schemes[0]
+            record.auth_config = {"schemes": list(card.authentication.schemes)}
+        logger.debug("ard_card.applied", agent=record.name, protocol="a2a")
+    else:  # MCP server card — no typed parser exists; extract minimally
+        endpoint = raw.get("endpoint") or raw.get("url")
+        if isinstance(endpoint, str) and endpoint.startswith("https://"):
+            _set_endpoint(endpoint)
+        tools = raw.get("tools")
+        if isinstance(tools, list) and tools:
+            names = [t.get("name") if isinstance(t, dict) else t for t in tools]
+            names = [str(n) for n in names if n][:_MAX_ARD_CARD_CAPABILITIES]
+            if names:
+                record.capabilities = names
+                record.capability_source = "agent_card"
+        logger.debug("ard_card.applied", agent=record.name, protocol="mcp")
+
+
 async def _process_ard_agent(
     http_agent: HttpIndexAgent,
     domain: str,
@@ -1189,11 +1260,15 @@ async def _process_ard_agent(
         return agent
 
     logger.debug(
-        "DNS lookup failed for ARD catalog agent, using catalog data only",
+        "DNS lookup failed for ARD catalog agent, dereferencing catalog card",
         agent=http_agent.name,
         identifier=http_agent.identifier,
     )
-    return _http_agent_to_record(http_agent, domain, http_agent.name, ard_protocol)
+    record = _http_agent_to_record(http_agent, domain, http_agent.name, ard_protocol)
+    if record is not None:
+        # Dereference the ARD entry's card URL to the real endpoint/skills/auth.
+        await _apply_ard_card(record, http_agent)
+    return record
 
 
 async def _discover_via_http_index(

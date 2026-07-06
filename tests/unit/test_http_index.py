@@ -966,6 +966,10 @@ class TestArdFetchEndToEnd:
         with (
             patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(
+                disc, "fetch_cap_document", AsyncMock(return_value=None)
+            ),  # card unfetchable
         ):
             records = await disc._discover_via_http_index("acme.com")
         assert len(records) == 1
@@ -999,6 +1003,7 @@ class TestArdFetchEndToEnd:
         with (
             patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=dns_record)),
+            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
         ):
             records = await disc._discover_via_http_index("acme.com")
         assert len(records) == 1
@@ -1016,6 +1021,100 @@ class TestArdFetchEndToEnd:
         with (
             patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
         ):
             records = await disc._discover_via_http_index("acme.com", protocol=Protocol.A2A)
         assert records == []
+
+
+class TestArdCardDereference:
+    """B: fetch the ARD entry's referenced card → real endpoint/skills/auth."""
+
+    @pytest.mark.asyncio
+    async def test_a2a_card_dereferenced(self):
+        from dns_aid.core import discoverer as disc
+        from dns_aid.core.cap_fetcher import CapabilityDocument
+
+        entry = {
+            "identifier": "urn:air:acme.com:agents:assistant",
+            "displayName": "Assistant",
+            "type": "application/a2a-agent-card+json",
+            "url": "https://cards.acme.com/assistant.json",
+        }
+        http_agents = parse_http_index(_ard_catalog([entry]))
+        card_doc = CapabilityDocument(
+            raw_data={
+                "name": "Assistant",
+                "url": "https://assistant.acme.com/a2a",
+                "skills": [{"id": "chat", "name": "Chat"}, {"id": "summarize", "name": "Sum"}],
+                "authentication": {"schemes": ["bearer"]},
+            }
+        )
+        with (
+            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "fetch_cap_document", AsyncMock(return_value=card_doc)) as fc,
+        ):
+            records = await disc._discover_via_http_index("acme.com")
+        r = records[0]
+        assert (
+            r.endpoint_override == "https://assistant.acme.com/a2a"
+        )  # real endpoint, not card URL
+        assert r.endpoint_source == "ard_card"
+        assert r.target_host == "assistant.acme.com"
+        assert r.capabilities == ["chat", "summarize"]
+        assert r.capability_source == "agent_card"
+        assert r.auth_type == "bearer"
+        assert fc.call_args.kwargs.get("follow_redirects") is False  # SSRF: redirects refused
+
+    @pytest.mark.asyncio
+    async def test_mcp_card_dereferenced(self):
+        from dns_aid.core import discoverer as disc
+        from dns_aid.core.cap_fetcher import CapabilityDocument
+
+        entry = {
+            "identifier": "urn:air:acme.com:agents:billing",
+            "displayName": "Billing",
+            "type": "application/mcp-server-card+json",
+            "url": "https://cards.acme.com/billing.json",
+        }
+        http_agents = parse_http_index(_ard_catalog([entry]))
+        card_doc = CapabilityDocument(
+            raw_data={
+                "name": "Billing",
+                "endpoint": "https://billing.acme.com/mcp",
+                "tools": [{"name": "create_invoice"}, {"name": "list_payments"}],
+            }
+        )
+        with (
+            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "fetch_cap_document", AsyncMock(return_value=card_doc)),
+        ):
+            records = await disc._discover_via_http_index("acme.com")
+        r = records[0]
+        assert r.endpoint_override == "https://billing.acme.com/mcp"
+        assert r.endpoint_source == "ard_card"
+        assert r.capabilities == ["create_invoice", "list_payments"]
+
+    @pytest.mark.asyncio
+    async def test_card_fetch_failure_keeps_catalog_data(self):
+        from dns_aid.core import discoverer as disc
+
+        entry = _ard_agent_entry(capabilities=["invoicing"])
+        http_agents = parse_http_index(_ard_catalog([entry]))
+        with (
+            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "fetch_cap_document", AsyncMock(return_value=None)),  # fetch fails
+        ):
+            records = await disc._discover_via_http_index("acme.com")
+        r = records[0]
+        # Falls back to catalog-level data: card URL stays as the endpoint.
+        assert r.endpoint_override == "https://api.acme.com/mcp/weather.json"
+        assert r.endpoint_source == "http_index_fallback"
+        assert r.capability_source == "ard_catalog"
+        assert r.capabilities == ["invoicing"]

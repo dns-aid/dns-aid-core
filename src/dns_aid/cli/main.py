@@ -460,6 +460,7 @@ def discover(
                     "name": a.name,
                     "protocol": a.protocol.value,
                     "endpoint": a.endpoint_url,
+                    "endpoint_source": a.endpoint_source,
                     "capabilities": a.capabilities,
                     "capability_source": a.capability_source,
                     "cap_uri": a.cap_uri,

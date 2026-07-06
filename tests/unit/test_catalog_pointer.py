@@ -440,9 +440,15 @@ class TestPointerDrivenDiscovery:
             ),
             patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=client),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
+            patch.object(
+                disc, "fetch_cap_document", AsyncMock(return_value=None)
+            ),  # card unfetchable
         ):
             records = await disc._discover_via_http_index("acme.com")
         assert [r.name for r in records] == ["weather"]
         assert records[0].capability_source == "ard_catalog"
-        # The pointer URL was fetched, not a well-known pattern
-        assert client.stream.call_args[0][1] == "https://cat.acme.com/.well-known/ai-catalog.json"
+        # The pointer URL was fetched (not a well-known pattern) — it's the first stream call.
+        assert (
+            client.stream.call_args_list[0][0][1]
+            == "https://cat.acme.com/.well-known/ai-catalog.json"
+        )

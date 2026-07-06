@@ -52,15 +52,26 @@ async def test_live_ard_catalog_fetch():
 
 
 async def test_live_discover_via_library():
-    """SDK surface: discover() returns ARD agents with trust manifests."""
+    """SDK surface: discover() returns ARD agents, cards dereferenced (B)."""
     from dns_aid import discover
 
     result = await discover(ARD_ONLY_DOMAIN, use_http_index=True)
-    ard_records = [a for a in result.agents if a.capability_source == "ard_catalog"]
-    assert {a.name for a in ard_records} == EXPECTED_ARD_AGENTS
-    with_trust = {a.name: a for a in ard_records if a.trust_manifest is not None}
-    assert "chat-assistant" in with_trust, "chat-assistant publishes a trust manifest"
-    tm = with_trust["chat-assistant"].trust_manifest
+    by_name = {a.name: a for a in result.agents}
+    assert set(by_name) == EXPECTED_ARD_AGENTS
+
+    # B: each ARD entry's card was fetched and its REAL service endpoint applied,
+    # not the shallow card URL.
+    assert all(a.endpoint_source == "ard_card" for a in result.agents), (
+        "every ARD agent's card should be dereferenced to its real endpoint"
+    )
+    billing = by_name["billing"]
+    assert billing.endpoint_url.startswith("https://billing.highvelocitynetworking.com")
+    assert "create_invoice" in billing.capabilities  # tools from the fetched card
+    assert billing.capability_source == "agent_card"
+
+    # The catalogue entry's trust manifest survives card enrichment.
+    tm = by_name["chat-assistant"].trust_manifest
+    assert tm is not None
     assert tm.identity == "spiffe://highvelocitynetworking.com/agents/chat-assistant"
     assert {a.type for a in tm.attestations} == {"SOC2-Type2", "ISO27001", "GDPR"}
 

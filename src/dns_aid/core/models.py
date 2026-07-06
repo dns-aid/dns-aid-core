@@ -706,6 +706,7 @@ class AgentRecord(BaseModel):
             "dns_svcb_enriched",
             "http_index",
             "http_index_fallback",
+            "ard_card",
             "direct",
             "directory",
         ]
@@ -715,7 +716,9 @@ class AgentRecord(BaseModel):
         description="Source of endpoint: 'dns_svcb' (from DNS SVCB record), "
         "'dns_svcb_enriched' (DNS + .well-known/agent-card.json path), "
         "'http_index' (DNS + HTTP index endpoint), "
-        "'http_index_fallback' (HTTP index without DNS), 'direct' (explicitly provided), "
+        "'http_index_fallback' (HTTP index without DNS), "
+        "'ard_card' (real endpoint from the fetched ARD agent/server card), "
+        "'direct' (explicitly provided), "
         "'directory' (from directory API search, Phase 5.7)",
     )
 
