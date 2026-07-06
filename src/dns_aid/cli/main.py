@@ -418,8 +418,11 @@ def discover(
     """
     from dns_aid.core.discoverer import discover as do_discover
 
-    method = "HTTP index" if use_http_index else "DNS"
-    console.print(f"\n[bold]Discovering agents at {domain} via {method}...[/bold]\n")
+    # Human-readable status header — suppressed in --json mode so stdout stays
+    # a single machine-parseable JSON document.
+    if not json_output:
+        method = "HTTP index" if use_http_index else "DNS"
+        console.print(f"\n[bold]Discovering agents at {domain} via {method}...[/bold]\n")
 
     try:
         result = run_async(
@@ -457,6 +460,7 @@ def discover(
                     "name": a.name,
                     "protocol": a.protocol.value,
                     "endpoint": a.endpoint_url,
+                    "endpoint_source": a.endpoint_source,
                     "capabilities": a.capabilities,
                     "capability_source": a.capability_source,
                     "cap_uri": a.cap_uri,
@@ -466,6 +470,13 @@ def discover(
                     "policy_uri": a.policy_uri,
                     "realm": a.realm,
                     "description": a.description,
+                    # ARD-sourced agents only — key omitted otherwise so
+                    # legacy output stays byte-identical.
+                    **(
+                        {"trust_manifest": a.trust_manifest.model_dump()}
+                        if a.trust_manifest is not None
+                        else {}
+                    ),
                 }
                 for a in result.agents
             ],
@@ -1297,6 +1308,93 @@ def index_sync(
     else:
         error_console.print(f"[red]✗ Sync failed: {result.message}[/red]")
         raise typer.Exit(1)
+
+
+@index_app.command("publish-catalog")
+def index_publish_catalog(
+    domain: Annotated[str, typer.Argument(help="Domain to publish the catalog pointer under")],
+    catalog_host: Annotated[
+        str, typer.Argument(help="Host that serves the ARD catalog over HTTPS (no underscores)")
+    ],
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", "-b", help="DNS backend, or set DNS_AID_BACKEND env var"),
+    ] = None,
+    filename: Annotated[
+        str, typer.Option("--filename", help="Catalog filename under /.well-known/")
+    ] = "ai-catalog.json",
+    catalog_only: Annotated[
+        bool,
+        typer.Option(
+            "--catalog-only",
+            help="Publish only _catalog._agents (skip _index._agents, which is DNS-AID's "
+            "generic org-index pointer and would be replaced)",
+        ),
+    ] = False,
+    force_index: Annotated[
+        bool,
+        typer.Option(
+            "--force-index",
+            help="Replace an existing _index._agents pointer even if it targets a different "
+            "host (default: preserve it and warn)",
+        ),
+    ] = False,
+    port: Annotated[int, typer.Option("--port", help="Catalog host port")] = 443,
+    ipv4_hint: Annotated[
+        str | None,
+        typer.Option(
+            "--ipv4-hint",
+            help="RFC 9460 IPv4 address hint (fixed-IP origins only; omit for CDN-fronted hosts)",
+        ),
+    ] = None,
+    ipv6_hint: Annotated[
+        str | None, typer.Option("--ipv6-hint", help="RFC 9460 IPv6 address hint")
+    ] = None,
+    ttl: Annotated[int, typer.Option("--ttl", help="TTL for the pointer records")] = 3600,
+):
+    """
+    Publish ARD catalog DNS pointer records for a domain.
+
+    Writes SVCB records under _catalog._agents.{domain} (ARD §6.1) and
+    _index._agents.{domain} (DNS-AID draft-02 §3.2) pointing at the catalog
+    host, so DNS-AID and ARD clients both discover the catalog via DNS.
+
+    Example:
+        dns-aid index publish-catalog example.com ard.example.com
+    """
+    from dns_aid.core.catalog_pointer import (
+        CATALOG_POINTER_LABELS,
+        publish_catalog_pointer,
+    )
+
+    dns_backend = _get_backend(backend)
+    labels = ("_catalog._agents",) if catalog_only else CATALOG_POINTER_LABELS
+
+    console.print(f"\n[bold]Publishing ARD catalog pointer for {domain}...[/bold]\n")
+
+    try:
+        written = run_async(
+            publish_catalog_pointer(
+                domain,
+                catalog_host,
+                filename=filename,
+                labels=labels,
+                backend=dns_backend,
+                ttl=ttl,
+                port=port,
+                ipv4_hint=ipv4_hint,
+                ipv6_hint=ipv6_hint,
+                force_index=force_index,
+            )
+        )
+    except Exception as e:
+        error_console.print(f"[red]✗ Failed to publish catalog pointer: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    console.print("[green]✓ Catalog pointer published![/green]\n")
+    for fqdn in written:
+        console.print(f"  [dim]SVCB[/dim] {fqdn} → {catalog_host}")
+    console.print(f"\n[dim]Catalog: https://{catalog_host}/.well-known/{filename}[/dim]")
 
 
 # ============================================================================

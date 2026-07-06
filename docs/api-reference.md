@@ -241,6 +241,15 @@ When every filter is unset, the input list is returned unchanged with no allocat
 |--------|----------|----------|
 | **DNS (default)** | `_index._agents.{domain}` TXT record | Decentralized, cached, minimal round trips |
 | **HTTP Index** | `https://_index._aiagents.{domain}/index-wellknown` | ANS-compatible, rich metadata (descriptions, model cards) |
+| **ARD ai-catalog** | `https://{domain}/.well-known/ai-catalog.json` | [ARD](https://agenticresourcediscovery.org/spec/) catalogs, auto-detected via `use_http_index=True`; carries publisher trust manifests |
+
+With `use_http_index=True` the fetcher probes the legacy index locations first and the ARD well-known
+location last, then auto-detects the document format (`specVersion: "1.0"` + `entries[]` → ARD;
+keyed object → legacy). ARD entries whose artifact type is `application/mcp-server-card+json` or
+`application/a2a-agent-card+json` become agents (protocol inferred from the media type); inline
+nested catalogs recurse (depth ≤ 3); registry entries and non-agent artifacts are skipped. An
+entry's `trustManifest` is preserved on `AgentRecord.trust_manifest` (pass-through — dns-aid does
+not verify signatures, attestation digests, or identity↔publisher alignment).
 
 #### Returns
 
@@ -574,8 +583,11 @@ agent = AgentRecord(
 | `bap` | `list[str]` | No | `[]` | Supported protocols with versions |
 | `policy_uri` | `str` | No | `None` | URI to agent policy document |
 | `realm` | `str` | No | `None` | Multi-tenant scope identifier |
-| `capability_source` | `str` | No | `None` | Where capabilities came from: `cap_uri`, `agent_card`, `http_index`, `txt_fallback`, `none` |
-| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `direct` |
+| `capability_source` | `str` | No | `None` | Where capabilities came from: `cap_uri`, `well_known`, `agent_card`, `http_index`, `ard_catalog`, `txt_fallback`, `none` |
+| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `ard_card` (real endpoint from a fetched ARD agent/server card), `direct` |
+| `trust_manifest` | `TrustManifest` | No | `None` | Publisher trust claims from an ARD ai-catalog entry (identity, attestations, provenance, signature) — pass-through, not verified |
+
+The [ARD ai-catalog guide](ard-catalog.md) covers the full discovery flow (DNS pointer → catalog → per-agent DNS-first → card dereferencing), publishing the host-anywhere `_catalog._agents` / `_index._agents` pointer (`dns-aid index publish-catalog`, `publish_catalog_pointer` library/MCP), and the trust model.
 
 #### Properties
 

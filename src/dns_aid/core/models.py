@@ -14,9 +14,12 @@ import os
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+import structlog
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from dns_aid.utils.validation import validate_connect_class
+
+logger = structlog.get_logger(__name__)
 
 # Capability provenance — single source of truth.
 #
@@ -27,8 +30,12 @@ from dns_aid.utils.validation import validate_connect_class
 # symbol so adding a value automatically widens every type-check site.
 #
 # Priority (most trusted → least): cap_uri > well_known > agent_card
-# > http_index > txt_fallback. ``descriptor_unreachable`` is a
-# diagnostic source: the SVCB record declared a cap/well-known
+# > ard_catalog ≈ http_index > txt_fallback. ``ard_catalog`` records
+# that capabilities came from an ARD ai-catalog entry
+# (https://agenticresourcediscovery.org/spec/) — like http_index it is
+# publisher-asserted index data; the entry's trustManifest is carried
+# separately on AgentRecord.trust_manifest. ``descriptor_unreachable``
+# is a diagnostic source: the SVCB record declared a cap/well-known
 # locator but the fetch failed (timeout, TLS error, 5xx). Recording
 # this as a distinct source lets callers tell "no descriptor
 # declared" from "descriptor declared but unreachable right now"
@@ -38,6 +45,7 @@ CapabilitySource = Literal[
     "well_known",
     "agent_card",
     "http_index",
+    "ard_catalog",
     "txt_fallback",
     "descriptor_unreachable",
     "none",
@@ -373,6 +381,136 @@ class SvcbRecord(BaseModel):
         return params
 
 
+class TrustAttestation(BaseModel):
+    """Single compliance/security attestation from an ARD trustManifest.
+
+    Per the ARD ai-catalog schema an attestation carries a free-form
+    ``type`` (e.g. ``SOC2-Type2``, ``ISO27001``, ``GDPR``, ``SPIFFE-X509``)
+    and the ``uri`` of the attestation document. ``mediaType`` is required
+    by the ARD JSON Schema but absent from the spec's prose table and its
+    own examples, so it is optional on read (tolerant parsing).
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    type: str = Field(..., min_length=1, description="Attestation type (e.g. 'SOC2-Type2')")
+    uri: str = Field(..., min_length=1, description="Location of the attestation document")
+    media_type: str | None = Field(
+        default=None,
+        alias="mediaType",
+        description="Media type of the attestation document (e.g. 'application/pdf')",
+    )
+    digest: str | None = Field(
+        default=None,
+        description="Digest of the attestation document as published (NOT verified)",
+    )
+
+
+class ProvenanceLink(BaseModel):
+    """Provenance link from an ARD trustManifest.
+
+    Relates the catalog entry to its source. The ARD schema enumerates
+    ``derivedFrom``, ``publishedFrom`` and ``copiedFrom`` for ``relation``;
+    unknown values are accepted for forward compatibility.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    relation: str = Field(..., min_length=1, description="Relation to the source")
+    source_id: str = Field(..., alias="sourceId", min_length=1, description="Source identifier")
+    source_digest: str | None = Field(
+        default=None, alias="sourceDigest", description="Digest of the source as published"
+    )
+
+
+class TrustSchema(BaseModel):
+    """Trust-schema reference from an ARD trustManifest."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    identifier: str = Field(..., min_length=1, description="Trust schema identifier")
+    version: str = Field(..., min_length=1, description="Trust schema version")
+    governance_uri: str | None = Field(
+        default=None, alias="governanceUri", description="Governance document URI"
+    )
+    verification_methods: list[str] = Field(
+        default_factory=list,
+        alias="verificationMethods",
+        description="Supported verification methods (e.g. 'did', 'x509', 'dns-01')",
+    )
+
+
+class TrustManifest(BaseModel):
+    """Publisher trust claims from an ARD ai-catalog entry.
+
+    Pass-through of published claims per the ARD specification
+    (https://agenticresourcediscovery.org/spec/ — trustManifest object).
+    dns-aid-core does NOT verify signatures, attestation digests, or
+    identity↔publisher-domain alignment in this release; consumers making
+    trust decisions must verify these claims themselves.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    identity: str = Field(
+        ...,
+        min_length=1,
+        description="Cryptographic workload identity (SPIFFE ID, DID, or HTTPS FQDN URI)",
+    )
+    identity_type: str | None = Field(
+        default=None,
+        alias="identityType",
+        description="Identity scheme: 'spiffe', 'did', 'https', or 'other'",
+    )
+    trust_schema: TrustSchema | None = Field(
+        default=None, alias="trustSchema", description="Trust schema reference"
+    )
+    attestations: list[TrustAttestation] = Field(
+        default_factory=list, description="Compliance/security attestations as published"
+    )
+    provenance: list[ProvenanceLink] = Field(
+        default_factory=list, description="Provenance links as published"
+    )
+    signature: str | None = Field(
+        default=None,
+        description="Detached JWS over the trustManifest content, stored verbatim (NOT verified)",
+    )
+
+    @classmethod
+    def from_wire(cls, data: Any) -> TrustManifest | None:
+        """Tolerantly build a TrustManifest from a wire-format dict.
+
+        Returns ``None`` when the payload is not a dict or fails core
+        validation (e.g. missing ``identity``). Malformed individual
+        attestations / provenance links are dropped with a warning rather
+        than failing the whole manifest — per the feature contract a bad
+        attestation must never cost the agent its valid trust data.
+        """
+        if not isinstance(data, dict):
+            return None
+        payload = dict(data)
+        raw_attestations = payload.pop("attestations", None)
+        raw_provenance = payload.pop("provenance", None)
+        try:
+            manifest = cls.model_validate(payload)
+        except ValidationError as e:
+            logger.warning("trust_manifest.invalid", error=str(e))
+            return None
+        if isinstance(raw_attestations, list):
+            for item in raw_attestations:
+                try:
+                    manifest.attestations.append(TrustAttestation.model_validate(item))
+                except ValidationError as e:
+                    logger.warning("trust_manifest.attestation_dropped", error=str(e))
+        if isinstance(raw_provenance, list):
+            for item in raw_provenance:
+                try:
+                    manifest.provenance.append(ProvenanceLink.model_validate(item))
+                except ValidationError as e:
+                    logger.warning("trust_manifest.provenance_dropped", error=str(e))
+        return manifest
+
+
 class AgentRecord(BaseModel):
     """
     Represents an AI agent published via DNS-AID.
@@ -568,6 +706,7 @@ class AgentRecord(BaseModel):
             "dns_svcb_enriched",
             "http_index",
             "http_index_fallback",
+            "ard_card",
             "direct",
             "directory",
         ]
@@ -577,7 +716,9 @@ class AgentRecord(BaseModel):
         description="Source of endpoint: 'dns_svcb' (from DNS SVCB record), "
         "'dns_svcb_enriched' (DNS + .well-known/agent-card.json path), "
         "'http_index' (DNS + HTTP index endpoint), "
-        "'http_index_fallback' (HTTP index without DNS), 'direct' (explicitly provided), "
+        "'http_index_fallback' (HTTP index without DNS), "
+        "'ard_card' (real endpoint from the fetched ARD agent/server card), "
+        "'direct' (explicitly provided), "
         "'directory' (from directory API search, Phase 5.7)",
     )
 
@@ -639,6 +780,16 @@ class AgentRecord(BaseModel):
         description="JWS algorithm identifier (e.g., 'Ed25519', 'ES256') reported by a "
         "successful signature verification. None when verification did not succeed or was "
         "not attempted.",
+    )
+
+    # ARD trust manifest (populated when this agent was discovered from — or
+    # enriched by — an ARD ai-catalog entry carrying a trustManifest).
+    trust_manifest: TrustManifest | None = Field(
+        default=None,
+        description="Publisher trust manifest from an ARD ai-catalog entry (identity, "
+        "attestations, provenance, signature). Pass-through of published claims — "
+        "dns-aid does not verify signatures, digests, or identity↔publisher alignment "
+        "in this release.",
     )
 
     model_config = {"arbitrary_types_allowed": True}

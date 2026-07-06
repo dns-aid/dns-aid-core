@@ -37,6 +37,7 @@ Changes to protocol behavior should be discussed within the IETF.
 
 - [Getting Started Guide](docs/getting-started.md) — install, first agent publication, backend setup
 - [API Reference](docs/api-reference.md) — Python SDK, CLI, and MCP server tool reference
+- [ARD ai-catalog discovery](docs/ard-catalog.md) — interop with [Agentic Resource Discovery](https://agenticresourcediscovery.org/spec/): catalog discovery, the host-anywhere DNS pointer, and card dereferencing
 - [Architecture](docs/architecture.md) — protocol layers, metadata resolution, integration points
 - [Integrations](docs/integrations.md) — backend-specific setup notes
 - [Demo Guide](docs/demo-guide.md) — end-to-end walkthrough for talks and presentations
@@ -83,7 +84,8 @@ agents = await dns_aid.discover("example.com")
 for agent in agents:
     print(f"{agent.name}: {agent.endpoint_url}")
 
-# Discover via HTTP index (ANS-compatible, richer metadata)
+# Discover via HTTP index (ANS-compatible, richer metadata) — also auto-detects
+# and dereferences ARD ai-catalogs (see docs/ard-catalog.md)
 agents = await dns_aid.discover("example.com", use_http_index=True)
 
 # Filtered discovery — pure-Python predicates over the in-memory result (v0.19.0+)
@@ -295,6 +297,10 @@ dns-aid index list example.com
 
 # Sync index with actual DNS records (useful for repair)
 dns-aid index sync example.com
+
+# Advertise an ARD ai-catalog via DNS pointer (host-anywhere; v0.26.0+)
+# Publishes _catalog._agents + _index._agents SVCB → the catalog host.
+dns-aid index publish-catalog example.com catalogue.example.com
 
 # Publish without updating the index (for internal agents)
 dns-aid publish --name internal-bot --domain example.com --protocol mcp --no-update-index

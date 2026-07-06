@@ -27,14 +27,22 @@ import structlog
 
 from dns_aid.core.a2a_card import A2AAgentCard, fetch_agent_card
 from dns_aid.core.cap_fetcher import fetch_cap_document
+from dns_aid.core.catalog_pointer import resolve_catalog_pointer
 from dns_aid.core.filters import apply_filters
-from dns_aid.core.http_index import HttpIndexAgent, fetch_http_index_or_empty
+from dns_aid.core.http_index import (
+    HttpIndexAgent,
+    _ard_domains_aligned,
+    _ard_identity_domain,
+    _name_from_urn,
+    fetch_http_index_or_empty,
+)
 from dns_aid.core.models import (
     AgentRecord,
     CapabilitySource,
     DiscoveryResult,
     DNSSECError,
     Protocol,
+    TrustManifest,
 )
 
 logger = structlog.get_logger(__name__)
@@ -969,6 +977,72 @@ def _parse_fqdn(fqdn: str) -> tuple[str | None, str | None]:
     return parsed.name, parsed.protocol
 
 
+def _validated_trust_manifest(
+    http_agent: HttpIndexAgent, serving_domain: str | None = None
+) -> TrustManifest | None:
+    """Validate an ARD trustManifest wire dict at the AgentRecord boundary.
+
+    Invalid manifests never fail the agent — they degrade to ``None``
+    with a structured warning (feature contract C5).
+
+    Two warning-only trust signals are emitted (the manifest is always
+    passed through — it is unverified claims, not verified here):
+
+    * ``ard_trust_identity_mismatch`` — the ARD spec's alignment rule:
+      the trust identity's domain MUST align with the URN's ``<publisher>``
+      domain. Both fields live in the same (untrusted) catalog, so this
+      only catches an internally-inconsistent manifest.
+
+    * ``ard_trust_foreign_publisher`` — the URN publisher does not align
+      with ``serving_domain`` (the domain that actually served the catalog
+      over TLS — the only value with a real trust root). This is the true
+      impersonation signal: a catalog on ``evil.com`` asserting
+      ``urn:air:acme.com``/``spiffe://acme.com`` fires here. It may also be
+      legitimate cross-publisher federation, so it is advisory: operators
+      must verify (future work anchors this in DNSSEC/DANE).
+
+    Identity schemes we can't parse (``identityType: other``) skip the
+    identity check.
+    """
+    if http_agent.trust_manifest is None:
+        return None
+    manifest = TrustManifest.from_wire(http_agent.trust_manifest)
+    if manifest is None:
+        logger.warning(
+            "http_index.ard_trust_manifest_invalid",
+            agent=http_agent.name,
+            identifier=http_agent.identifier,
+        )
+        return None
+
+    if http_agent.identifier:
+        _, publisher = _name_from_urn(http_agent.identifier)
+        identity_domain = _ard_identity_domain(manifest.identity)
+        if publisher and identity_domain and not _ard_domains_aligned(identity_domain, publisher):
+            logger.warning(
+                "http_index.ard_trust_identity_mismatch",
+                agent=http_agent.name,
+                identifier=http_agent.identifier,
+                identity=manifest.identity,
+                identity_domain=identity_domain,
+                publisher=publisher,
+            )
+        if (
+            serving_domain
+            and publisher
+            and not _ard_domains_aligned(publisher, serving_domain.lower().rstrip("."))
+        ):
+            logger.warning(
+                "http_index.ard_trust_foreign_publisher",
+                agent=http_agent.name,
+                identifier=http_agent.identifier,
+                identity=manifest.identity,
+                publisher=publisher,
+                serving_domain=serving_domain,
+            )
+    return manifest
+
+
 def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> None:
     """Merge HTTP index metadata into a DNS-discovered agent record."""
     if http_agent.description:
@@ -983,12 +1057,19 @@ def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> N
     # Merge HTTP index capabilities (only if agent has none from higher-priority source)
     if not agent.capabilities and http_agent.capability and http_agent.capability.capabilities:
         agent.capabilities = http_agent.capability.capabilities
-        agent.capability_source = "http_index"
+        agent.capability_source = (
+            "ard_catalog" if http_agent.source_format == "ard" else "http_index"
+        )
         logger.debug(
             "Merged HTTP index capabilities",
             agent=agent.name,
             capabilities=agent.capabilities,
         )
+
+    # Preserve ARD trust manifest on DNS-discovered agents too — the
+    # catalog is enriching an authoritative DNS answer.
+    if http_agent.trust_manifest is not None and agent.trust_manifest is None:
+        agent.trust_manifest = _validated_trust_manifest(http_agent, agent.domain)
 
     if http_agent.endpoint and not agent.endpoint_override:
         parsed = urlparse(http_agent.endpoint)
@@ -1011,6 +1092,11 @@ async def _process_http_agent(
     """Process a single HTTP index entry: parse FQDN, filter, resolve via DNS."""
     if name and http_agent.name != name:
         return None
+
+    # ARD catalog entries carry artifact locators (card URLs), not DNS-AID
+    # FQDNs — route them through the ARD path instead of FQDN parsing.
+    if http_agent.source_format == "ard":
+        return await _process_ard_agent(http_agent, domain, protocol)
 
     dns_agent_name, fqdn_protocol_str = _parse_fqdn(http_agent.fqdn)
     if not dns_agent_name:
@@ -1068,6 +1154,123 @@ async def _process_http_agent(
     return _http_agent_to_record(http_agent, domain, dns_agent_name, agent_protocol)
 
 
+# Cap tools/skills lifted from a fetched ARD card onto a record.
+_MAX_ARD_CARD_CAPABILITIES = 256
+
+
+async def _apply_ard_card(record: AgentRecord, http_agent: HttpIndexAgent) -> None:
+    """Dereference an ARD entry's referenced card into the discovered record.
+
+    An ARD catalog entry's ``url`` points at the agent's CARD (an A2A agent
+    card or MCP server card), not its service endpoint — so the catalog-only
+    record currently carries the card URL as its endpoint. Fetch that card
+    (SSRF-guarded + size-capped via ``fetch_cap_document``; redirects refused
+    since the URL is catalog-controlled) and dereference it: set the real
+    service endpoint, skills/tools → capabilities, and auth.
+
+    Best-effort: on any failure the record keeps its catalog-level data (the
+    card URL stays as the endpoint fallback). Runs under the shared per-agent
+    Semaphore, so N card fetches are already bounded.
+    """
+    card_url = http_agent.endpoint
+    if not card_url:
+        return
+    try:
+        cap_doc = await asyncio.wait_for(
+            fetch_cap_document(card_url, follow_redirects=False),
+            timeout=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
+        )
+    except Exception as e:  # noqa: BLE001 — a bad card must not drop the agent
+        logger.debug("ard_card.fetch_error", agent=record.name, url=card_url, error=str(e))
+        return
+    if not cap_doc or not cap_doc.raw_data:
+        return
+    raw = cap_doc.raw_data
+
+    def _set_endpoint(url: str) -> None:
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            return
+        record.endpoint_override = url
+        record.endpoint_source = "ard_card"
+        record.target_host = parsed.hostname
+        record.port = parsed.port or 443
+
+    if record.protocol == Protocol.A2A:
+        try:
+            card = A2AAgentCard.from_dict(raw)
+        except Exception:  # noqa: BLE001 — not a valid A2A card; keep catalog data
+            return
+        record.agent_card = card
+        if isinstance(card.url, str) and card.url.startswith("https://"):
+            _set_endpoint(card.url)
+        if card.skills:
+            record.capabilities = card.to_capabilities()[:_MAX_ARD_CARD_CAPABILITIES]
+            record.capability_source = "agent_card"
+        if card.authentication and card.authentication.schemes:
+            record.auth_type = card.authentication.schemes[0]
+            record.auth_config = {"schemes": list(card.authentication.schemes)}
+        logger.debug("ard_card.applied", agent=record.name, protocol="a2a")
+    else:  # MCP server card — no typed parser exists; extract minimally
+        endpoint = raw.get("endpoint") or raw.get("url")
+        if isinstance(endpoint, str) and endpoint.startswith("https://"):
+            _set_endpoint(endpoint)
+        tools = raw.get("tools")
+        if isinstance(tools, list) and tools:
+            names = [t.get("name") if isinstance(t, dict) else t for t in tools]
+            names = [str(n) for n in names if n][:_MAX_ARD_CARD_CAPABILITIES]
+            if names:
+                record.capabilities = names
+                record.capability_source = "agent_card"
+        logger.debug("ard_card.applied", agent=record.name, protocol="mcp")
+
+
+async def _process_ard_agent(
+    http_agent: HttpIndexAgent,
+    domain: str,
+    protocol: Protocol | None,
+) -> AgentRecord | None:
+    """Process an ARD ai-catalog entry: filter, DNS-first resolve, fallback.
+
+    ARD entries name agents by URN and locate artifacts by URL, so the
+    legacy FQDN-parsing path doesn't apply. The authoritative DNS answer
+    still wins: try a SVCB lookup for the ARD agent name under the queried
+    domain first, and enrich it from the catalog; otherwise surface the
+    catalog data directly (``endpoint_source="http_index_fallback"``).
+    """
+    proto_str = http_agent.primary_protocol
+    if not proto_str:
+        return None
+    try:
+        ard_protocol = Protocol(proto_str.lower())
+    except ValueError:
+        logger.debug(
+            "Unknown protocol for ARD entry",
+            agent=http_agent.name,
+            identifier=http_agent.identifier,
+            protocol=proto_str,
+        )
+        return None
+    if protocol and ard_protocol != protocol:
+        return None
+
+    agent = await _query_single_agent(domain, http_agent.name, ard_protocol)
+    if agent:
+        _enrich_from_http_index(agent, http_agent)
+        return agent
+
+    logger.debug(
+        "DNS lookup failed for ARD catalog agent, dereferencing catalog card",
+        agent=http_agent.name,
+        identifier=http_agent.identifier,
+    )
+    record = _http_agent_to_record(http_agent, domain, http_agent.name, ard_protocol)
+    if record is not None:
+        # Dereference the ARD entry's card URL to the real endpoint/skills/auth.
+        await _apply_ard_card(record, http_agent)
+    return record
+
+
 async def _discover_via_http_index(
     domain: str,
     protocol: Protocol | None = None,
@@ -1088,7 +1291,11 @@ async def _discover_via_http_index(
     Returns:
         List of AgentRecord objects
     """
-    http_agents = await fetch_http_index_or_empty(domain)
+    # DNS pointer first: if the domain publishes a _catalog._agents /
+    # _index._agents SVCB pointer, it authoritatively declares where its
+    # catalog lives — resolve it and fetch there before the well-known paths.
+    catalog_url = await resolve_catalog_pointer(domain)
+    http_agents = await fetch_http_index_or_empty(domain, catalog_url=catalog_url)
 
     if not http_agents:
         logger.debug("No agents found in HTTP index", domain=domain)
@@ -1165,11 +1372,13 @@ def _http_agent_to_record(
             target_host = http_agent.fqdn.rstrip(".")
 
     # Extract capabilities from HTTP index if available
+    is_ard = http_agent.source_format == "ard"
     http_capabilities: list[str] = []
-    cap_source: CapabilitySource = "none"
+    cap_source: CapabilitySource = "ard_catalog" if is_ard else "none"
     if http_agent.capability and http_agent.capability.capabilities:
         http_capabilities = http_agent.capability.capabilities
-        cap_source = "http_index"
+        if not is_ard:
+            cap_source = "http_index"
 
     return AgentRecord(
         name=agent_name,
@@ -1180,8 +1389,10 @@ def _http_agent_to_record(
         capabilities=http_capabilities,
         capability_source=cap_source,
         description=http_agent.description,
+        use_cases=list(http_agent.use_cases),
         endpoint_override=http_agent.endpoint,
         endpoint_source="http_index_fallback",
+        trust_manifest=_validated_trust_manifest(http_agent, domain) if is_ard else None,
     )
 
 

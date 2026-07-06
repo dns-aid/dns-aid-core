@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-06
+
+### Added
+
+- **ARD ai-catalog discovery support.** HTTP-index discovery now auto-detects
+  [ARD (Agentic Resource Discovery)](https://agenticresourcediscovery.org/spec/)
+  ai-catalog manifests (`specVersion: "1.0"` + `entries[]`) alongside the
+  legacy keyed-object index format, with zero new flags — the library
+  `discover(..., use_http_index=True)`, the CLI `--use-http-index` option and
+  the MCP `discover_agents_via_dns` tool all inherit it transparently:
+  - The ARD well-known location `https://{domain}/.well-known/ai-catalog.json`
+    is probed after the existing index endpoints (legacy precedence preserved).
+  - ARD `CatalogEntry` objects with MCP/A2A card artifact types map into the
+    existing discovery pipeline; agent name derives from the `urn:air:`
+    identifier's terminal segment and protocol from the artifact media type.
+  - Entry `trustManifest` data (publisher identity, SOC 2 / ISO 27001 / GDPR
+    attestations, provenance links, detached signature) is preserved on the
+    new `AgentRecord.trust_manifest` field via the new `TrustManifest`,
+    `TrustAttestation`, `ProvenanceLink` and `TrustSchema` models —
+    pass-through of published claims, never verified by dns-aid.
+  - New `capability_source` value `ard_catalog` marks ARD-sourced records.
+  - Inline nested catalogs recurse to depth 3 under the shared 500-agent
+    budget; registry entries (`application/ai-registry+json`), non-agent
+    artifacts and URL-referenced sub-catalogs are skipped with structured
+    log reasons; the existing 1 MB streaming size cap applies unchanged.
+  - Tolerant parsing per verified spec discrepancies: `attestations[].mediaType`
+    optional on read, unknown entry fields ignored, `representativeQueries`
+    count not enforced.
+
+- **ARD catalog DNS pointer (host-anywhere discovery).** A domain can advertise
+  *where* its ARD catalog lives via SVCB records under two DNS-SD labels —
+  `_catalog._agents.{domain}` (ARD §6.1) and `_index._agents.{domain}`
+  (DNS-AID draft-02 §3.2, whose index format the draft leaves open). Discovery
+  resolves the pointer first and fetches the catalog there, so the catalog can
+  be hosted anywhere (a dedicated host, a CDN, an S3 bucket, or a different
+  domain) and DNS becomes the authoritative, DNSSEC-signable source for its
+  location. Publish via the library `publish_catalog_pointer`, the CLI
+  `dns-aid index publish-catalog <domain> <catalog-host>`, or the MCP
+  `publish_catalog_pointer` tool (dual-label by default; `--catalog-only` /
+  `--force-index` to control the `_index` label; optional RFC 9460
+  `ipv4hint`/`ipv6hint` for fixed-IP origins). Fully opt-in: a domain with no
+  pointer sees no change, and pure-DNS discovery never touches it.
+- **ARD agent-card dereferencing.** For a catalog agent resolved from catalog
+  data (no authoritative DNS record), discovery now fetches the entry's
+  referenced card (A2A agent card / MCP server card) and applies its **real**
+  service endpoint, skills/tools → capabilities, and auth — so ARD-discovered
+  agents are as complete as DNS-discovered ones (new `endpoint_source`
+  `ard_card`; `capability_source` becomes `agent_card`). The card fetch is
+  SSRF-validated, size-capped, and refuses redirects; a card that can't be
+  fetched leaves the agent with its catalog-level data. CLI `discover --json`
+  now includes `endpoint_source` (parity with the MCP tool).
+
+### Security
+
+- ARD parsing introduces no new network calls: URL-referenced nested catalogs
+  are never fetched from the parse path, recursion depth is bounded, and the
+  agent-count budget is shared across nesting levels so nested floods cannot
+  amplify discovery fan-out.
+- **Trust-identity alignment checks (warning-only).** Two structured signals
+  guard against catalog impersonation (manifests are still passed through —
+  they are unverified published claims): `http_index.ard_trust_identity_mismatch`
+  when a manifest's identity domain (SPIFFE / did:web / HTTPS, extracted via
+  URL host parsing that is immune to userinfo spoofing like
+  `spiffe://acme.com:1@evil.com`) does not align with the entry URN's publisher
+  domain; and `http_index.ard_trust_foreign_publisher` when the URN publisher
+  does not align with the domain that actually served the catalog over TLS —
+  the true impersonation signal (a catalog on `evil.com` asserting an
+  `acme.com` agent), advisory because it may also be legitimate cross-publisher
+  federation.
+- **Untrusted-input hardening for production.** Total entries visited per
+  catalog are capped (`_MAX_ARD_ENTRIES`, shared across nesting) so a document
+  of thousands of invalid/registry entries cannot amplify work; per-entry skip
+  reasons are aggregated into a single `http_index.ard_entries_skipped` summary
+  (not one log line per bad entry); logged identifiers are length-bounded and
+  newline-escaped (no log injection/flooding); per-entry `capabilities[]` /
+  `representativeQueries[]` arrays and free-text strings are length-capped
+  (defense-in-depth beyond the 1 MB document cap); and a malformed port in an
+  artifact URL (`https://h:notaport/x`) is a clean per-entry skip-with-warning
+  rather than a silently dropped agent.
+- **Catalog-pointer resolution is SSRF-guarded.** A pointer's SVCB target is
+  attacker-influenceable, so the resolved catalog URL is checked with
+  `validate_fetch_url` (rejects private/loopback/link-local/reserved hosts) and
+  fetched with redirects refused; the SVCB record count and per-URL validation
+  time are bounded; and publish refuses to silently overwrite an existing
+  `_index._agents` pointer that targets a different host. The ARD card fetch
+  reuses the same posture (SSRF-validated, size-capped, redirects refused).
+
 ## [0.25.0] - 2026-06-10
 
 ### Added

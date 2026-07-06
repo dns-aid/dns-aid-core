@@ -141,6 +141,8 @@ async def fetch_cap_document(
     cap_uri: str,
     timeout: float = 10.0,
     expected_sha256: str | None = None,
+    *,
+    follow_redirects: bool = True,
 ) -> CapabilityDocument | None:
     """
     Fetch and parse the capability document at the given URI.
@@ -177,8 +179,8 @@ async def fetch_cap_document(
             cap_uri,
             max_bytes=_MAX_CAP_RESPONSE_BYTES,
             timeout=timeout,
-            follow_redirects=True,
-            max_redirects=3,
+            follow_redirects=follow_redirects,
+            max_redirects=3 if follow_redirects else 0,
         )
         if body is None:
             logger.debug("Cap document fetch failed (non-200)", cap_uri=cap_uri)

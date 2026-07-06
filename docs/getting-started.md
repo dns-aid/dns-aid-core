@@ -768,6 +768,15 @@ DNS-AID supports HTTP-based agent discovery for compatibility with ANS-style sys
 
 The HTTP index is served at: `https://_index._aiagents.{domain}/index-wellknown`
 
+DNS-AID also auto-detects [ARD ai-catalog](https://agenticresourcediscovery.org/spec/) documents
+served at `https://{domain}/.well-known/ai-catalog.json` — no extra flags needed. Agents published
+in an ARD catalog appear in the same results, dereferenced to their real service endpoint
+(`endpoint_source: "ard_card"`) with skills/tools as capabilities, and — when the catalog provides
+one — a `trust_manifest` carrying the publisher's identity and compliance attestations (SOC 2,
+ISO 27001, GDPR, ...). A domain can host its catalog **anywhere** and advertise the location with a
+DNS pointer (`dns-aid index publish-catalog <domain> <catalog-host>`). See the
+[ARD ai-catalog guide](ard-catalog.md) for the full flow and diagram.
+
 ### Using HTTP Index Discovery
 
 ```bash
@@ -1520,14 +1529,16 @@ Each discovered agent includes transparency fields showing how data was resolved
 |-------|-------|---------|
 | `endpoint_source` | `dns_svcb` | Endpoint resolved via DNS SVCB lookup (proper DNS-AID flow) |
 | | `http_index_fallback` | DNS lookup failed, using HTTP index data only |
+| | `ard_card` | Real endpoint dereferenced from a fetched ARD agent/server card |
 | | `direct` | Endpoint was explicitly provided |
 | `capability_source` | `cap_uri` | Capabilities fetched from SVCB `cap` URI document |
 | | `agent_card` | Capabilities from A2A Agent Card skills (`.well-known/agent-card.json`) |
 | | `http_index` | Capabilities from HTTP index response |
+| | `ard_catalog` | Capabilities from an ARD ai-catalog entry (`/.well-known/ai-catalog.json`) |
 | | `txt_fallback` | Capabilities from DNS TXT record |
 | | `none` | No capabilities found |
 
-Agent name and protocol are extracted from the FQDN in the HTTP index — no separate `protocols` field needed. The FQDN is the single source of truth.
+Agent name and protocol are extracted from the FQDN in the HTTP index — no separate `protocols` field needed. The FQDN is the single source of truth. (ARD catalog entries instead carry a `urn:air:` identifier and an artifact media type — the agent name comes from the URN's terminal segment and the protocol from the media type.)
 
 Capabilities are resolved with priority: SVCB `cap` URI → A2A Agent Card skills → HTTP Index → TXT record fallback. When the cap URI points to an A2A Agent Card, the document is parsed once and reused — no redundant HTTP fetch for `.well-known/agent-card.json`.
 
