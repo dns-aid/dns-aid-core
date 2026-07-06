@@ -584,8 +584,10 @@ agent = AgentRecord(
 | `policy_uri` | `str` | No | `None` | URI to agent policy document |
 | `realm` | `str` | No | `None` | Multi-tenant scope identifier |
 | `capability_source` | `str` | No | `None` | Where capabilities came from: `cap_uri`, `well_known`, `agent_card`, `http_index`, `ard_catalog`, `txt_fallback`, `none` |
-| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `direct` |
+| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `ard_card` (real endpoint from a fetched ARD agent/server card), `direct` |
 | `trust_manifest` | `TrustManifest` | No | `None` | Publisher trust claims from an ARD ai-catalog entry (identity, attestations, provenance, signature) — pass-through, not verified |
+
+The [ARD ai-catalog guide](ard-catalog.md) covers the full discovery flow (DNS pointer → catalog → per-agent DNS-first → card dereferencing), publishing the host-anywhere `_catalog._agents` / `_index._agents` pointer (`dns-aid index publish-catalog`, `publish_catalog_pointer` library/MCP), and the trust model.
 
 #### Properties
 

@@ -36,6 +36,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     optional on read, unknown entry fields ignored, `representativeQueries`
     count not enforced.
 
+- **ARD catalog DNS pointer (host-anywhere discovery).** A domain can advertise
+  *where* its ARD catalog lives via SVCB records under two DNS-SD labels —
+  `_catalog._agents.{domain}` (ARD §6.1) and `_index._agents.{domain}`
+  (DNS-AID draft-02 §3.2, whose index format the draft leaves open). Discovery
+  resolves the pointer first and fetches the catalog there, so the catalog can
+  be hosted anywhere (a dedicated host, a CDN, an S3 bucket, or a different
+  domain) and DNS becomes the authoritative, DNSSEC-signable source for its
+  location. Publish via the library `publish_catalog_pointer`, the CLI
+  `dns-aid index publish-catalog <domain> <catalog-host>`, or the MCP
+  `publish_catalog_pointer` tool (dual-label by default; `--catalog-only` /
+  `--force-index` to control the `_index` label; optional RFC 9460
+  `ipv4hint`/`ipv6hint` for fixed-IP origins). Fully opt-in: a domain with no
+  pointer sees no change, and pure-DNS discovery never touches it.
+- **ARD agent-card dereferencing.** For a catalog agent resolved from catalog
+  data (no authoritative DNS record), discovery now fetches the entry's
+  referenced card (A2A agent card / MCP server card) and applies its **real**
+  service endpoint, skills/tools → capabilities, and auth — so ARD-discovered
+  agents are as complete as DNS-discovered ones (new `endpoint_source`
+  `ard_card`; `capability_source` becomes `agent_card`). The card fetch is
+  SSRF-validated, size-capped, and refuses redirects; a card that can't be
+  fetched leaves the agent with its catalog-level data. CLI `discover --json`
+  now includes `endpoint_source` (parity with the MCP tool).
+
 ### Security
 
 - ARD parsing introduces no new network calls: URL-referenced nested catalogs
@@ -63,6 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (defense-in-depth beyond the 1 MB document cap); and a malformed port in an
   artifact URL (`https://h:notaport/x`) is a clean per-entry skip-with-warning
   rather than a silently dropped agent.
+- **Catalog-pointer resolution is SSRF-guarded.** A pointer's SVCB target is
+  attacker-influenceable, so the resolved catalog URL is checked with
+  `validate_fetch_url` (rejects private/loopback/link-local/reserved hosts) and
+  fetched with redirects refused; the SVCB record count and per-URL validation
+  time are bounded; and publish refuses to silently overwrite an existing
+  `_index._agents` pointer that targets a different host. The ARD card fetch
+  reuses the same posture (SSRF-validated, size-capped, redirects refused).
 
 ## [0.25.0] - 2026-06-10
 

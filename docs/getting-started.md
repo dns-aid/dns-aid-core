@@ -770,9 +770,12 @@ The HTTP index is served at: `https://_index._aiagents.{domain}/index-wellknown`
 
 DNS-AID also auto-detects [ARD ai-catalog](https://agenticresourcediscovery.org/spec/) documents
 served at `https://{domain}/.well-known/ai-catalog.json` — no extra flags needed. Agents published
-in an ARD catalog appear in the same results with `capability_source: "ard_catalog"` and, when the
-catalog provides one, a `trust_manifest` carrying the publisher's identity and compliance
-attestations (SOC 2, ISO 27001, GDPR, ...).
+in an ARD catalog appear in the same results, dereferenced to their real service endpoint
+(`endpoint_source: "ard_card"`) with skills/tools as capabilities, and — when the catalog provides
+one — a `trust_manifest` carrying the publisher's identity and compliance attestations (SOC 2,
+ISO 27001, GDPR, ...). A domain can host its catalog **anywhere** and advertise the location with a
+DNS pointer (`dns-aid index publish-catalog <domain> <catalog-host>`). See the
+[ARD ai-catalog guide](ard-catalog.md) for the full flow and diagram.
 
 ### Using HTTP Index Discovery
 
@@ -1526,6 +1529,7 @@ Each discovered agent includes transparency fields showing how data was resolved
 |-------|-------|---------|
 | `endpoint_source` | `dns_svcb` | Endpoint resolved via DNS SVCB lookup (proper DNS-AID flow) |
 | | `http_index_fallback` | DNS lookup failed, using HTTP index data only |
+| | `ard_card` | Real endpoint dereferenced from a fetched ARD agent/server card |
 | | `direct` | Endpoint was explicitly provided |
 | `capability_source` | `cap_uri` | Capabilities fetched from SVCB `cap` URI document |
 | | `agent_card` | Capabilities from A2A Agent Card skills (`.well-known/agent-card.json`) |
