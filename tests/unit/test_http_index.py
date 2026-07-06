@@ -696,6 +696,150 @@ class TestArdIdentityAlignment:
         events = [c.args[0] for c in warn.call_args_list]
         assert "http_index.ard_trust_identity_mismatch" not in events
 
+    def test_userinfo_spoofing_does_not_suppress_warning(self):
+        """`spiffe://acme.com:1@evil.com` must resolve to evil.com, not acme.com."""
+        from dns_aid.core import discoverer as disc
+
+        with patch.object(disc.logger, "warning") as warn:
+            self._record_for({"identity": "spiffe://acme.com:1@evil.com/ns/agent"})
+        kwargs = next(
+            c.kwargs
+            for c in warn.call_args_list
+            if c.args[0] == "http_index.ard_trust_identity_mismatch"
+        )
+        assert kwargs["identity_domain"] == "evil.com"
+
+    def test_userinfo_extraction_direct(self):
+        from dns_aid.core.http_index import _ard_identity_domain
+
+        assert _ard_identity_domain("spiffe://acme.com:1@evil.com/x") == "evil.com"
+        assert _ard_identity_domain("https://acme.com:443@evil.com/x") == "evil.com"
+        assert _ard_identity_domain("spiffe://acme.com@evil.com/x") == "evil.com"
+
+    def test_foreign_publisher_warns_against_serving_domain(self):
+        """A catalog served by evil.com asserting an acme.com URN is flagged."""
+        from dns_aid.core import discoverer as disc
+        from dns_aid.core.models import Protocol
+
+        # URN publisher = acme.com, identity = acme.com (internally consistent),
+        # but the catalog was served from evil.com.
+        entry = _ard_agent_entry(trustManifest={"identity": "spiffe://acme.com/agents/weather"})
+        http_agent = parse_http_index(_ard_catalog([entry]))[0]
+        with patch.object(disc.logger, "warning") as warn:
+            record = disc._http_agent_to_record(
+                http_agent, "evil.com", http_agent.name, Protocol.MCP
+            )
+        assert record.trust_manifest is not None  # still pass-through
+        events = [c.args[0] for c in warn.call_args_list]
+        assert "http_index.ard_trust_foreign_publisher" in events
+        # Internally consistent, so the identity-vs-publisher check stays quiet
+        assert "http_index.ard_trust_identity_mismatch" not in events
+
+    def test_self_published_no_foreign_warning(self):
+        from dns_aid.core import discoverer as disc
+        from dns_aid.core.models import Protocol
+
+        entry = _ard_agent_entry(trustManifest={"identity": "spiffe://acme.com/agents/weather"})
+        http_agent = parse_http_index(_ard_catalog([entry]))[0]
+        with patch.object(disc.logger, "warning") as warn:
+            disc._http_agent_to_record(http_agent, "acme.com", http_agent.name, Protocol.MCP)
+        events = [c.args[0] for c in warn.call_args_list]
+        assert "http_index.ard_trust_foreign_publisher" not in events
+
+
+class TestArdHardening:
+    """Resource / log-flood hardening on untrusted catalogs (production)."""
+
+    def test_entry_cap_bounds_total_work(self):
+        from dns_aid.core.http_index import _MAX_ARD_ENTRIES
+
+        # All-invalid entries never append an agent, but must not iterate
+        # (or log) unboundedly — total entries seen is capped.
+        entries = [
+            {"type": "application/mcp-server-card+json"} for _ in range(_MAX_ARD_ENTRIES + 500)
+        ]
+        assert parse_http_index(_ard_catalog(entries)) == []
+
+    def test_skip_warnings_aggregated_not_per_entry(self):
+        import dns_aid.core.http_index as hi
+
+        entries = [{"type": "application/mcp-server-card+json"} for _ in range(50)]
+        with patch.object(hi.logger, "warning") as warn:
+            parse_http_index(_ard_catalog(entries))
+        # Exactly ONE aggregated summary, not 50 lines
+        skip_events = [
+            c for c in warn.call_args_list if c.args[0] == "http_index.ard_entries_skipped"
+        ]
+        assert len(skip_events) == 1
+        assert skip_events[0].kwargs["by_reason"]["missing_required"] == 50
+        assert skip_events[0].kwargs["skipped_total"] == 50
+
+    def test_logged_identifier_truncated_and_denewlined(self):
+        import dns_aid.core.http_index as hi
+        from dns_aid.core.http_index import _MAX_LOGGED_IDENTIFIER
+
+        # Newline placed early (before truncation) so escaping is exercised;
+        # trailing padding forces truncation.
+        evil_id = "urn:air:acme.com:x\ninjected-log-line" + "A" * 5000
+        entry = {
+            "identifier": evil_id,
+            "displayName": "x",
+            "type": "application/mcp-server-card+json",
+            # neither url nor data → locator_violation, identifier sampled
+        }
+        with patch.object(hi.logger, "warning") as warn:
+            parse_http_index(_ard_catalog([entry]))
+        summary = next(
+            c for c in warn.call_args_list if c.args[0] == "http_index.ard_entries_skipped"
+        )
+        sample = summary.kwargs["samples"][0]
+        assert "\n" not in sample  # no raw newline → no forged log lines
+        assert "\\n" in sample  # escaped instead
+        # reason prefix + capped identifier (+ ellipsis), nowhere near 5000
+        assert len(sample) <= len("locator_violation:") + _MAX_LOGGED_IDENTIFIER + 1
+
+    def test_per_entry_arrays_bounded(self):
+        from dns_aid.core.http_index import _MAX_ARD_LIST_ITEMS
+
+        entry = _ard_agent_entry(
+            capabilities=["c" + str(i) for i in range(_MAX_ARD_LIST_ITEMS * 10)],
+            representativeQueries=["q" + str(i) for i in range(_MAX_ARD_LIST_ITEMS * 10)],
+        )
+        agent = parse_http_index(_ard_catalog([entry]))[0]
+        assert len(agent.capability.capabilities) == _MAX_ARD_LIST_ITEMS
+        assert len(agent.use_cases) == _MAX_ARD_LIST_ITEMS
+
+    def test_string_lengths_bounded(self):
+        from dns_aid.core.http_index import _MAX_ARD_STR_LEN
+
+        entry = _ard_agent_entry(
+            description="D" * (_MAX_ARD_STR_LEN * 4),
+            capabilities=["C" * (_MAX_ARD_STR_LEN * 4)],
+        )
+        agent = parse_http_index(_ard_catalog([entry]))[0]
+        assert len(agent.description) == _MAX_ARD_STR_LEN
+        assert len(agent.capability.capabilities[0]) == _MAX_ARD_STR_LEN
+
+    def test_malformed_port_is_clean_skip_not_silent_drop(self):
+        entries = [
+            {
+                "identifier": "urn:air:acme.com:server:bad",
+                "displayName": "bad",
+                "type": "application/mcp-server-card+json",
+                "url": "https://acme.com:notaport/card.json",
+            },
+            _ard_agent_entry("good"),
+        ]
+        import dns_aid.core.http_index as hi
+
+        with patch.object(hi.logger, "warning") as warn:
+            agents = parse_http_index(_ard_catalog(entries))
+        assert {a.name for a in agents} == {"good"}
+        summary = next(
+            c for c in warn.call_args_list if c.args[0] == "http_index.ard_entries_skipped"
+        )
+        assert summary.kwargs["by_reason"]["locator_violation"] == 1
+
 
 class TestArdNesting:
     """Inline nested catalogs (user story 3, contract C3)."""

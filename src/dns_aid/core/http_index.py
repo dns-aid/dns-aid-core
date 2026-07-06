@@ -92,6 +92,24 @@ _ARD_REGISTRY_MEDIA_TYPES = {"application/ai-registry+json", "application/ai-reg
 # vector; 3 levels covers real-world department/bundle structures.
 _MAX_ARD_DEPTH = 3
 
+# Total entries VISITED across all nesting levels. The agent cap only
+# bounds *appended* agents — a catalog of thousands of invalid/registry
+# entries would otherwise iterate (and, before aggregation, log) per
+# entry. This bounds the work regardless of outcome. Well above any real
+# catalog; well below the ~24k minimal entries that fit the 1 MB byte cap.
+_MAX_ARD_ENTRIES = 5000
+
+# Per-entry list caps (defense-in-depth beyond the document byte cap):
+# one entry must not retain an unbounded capabilities[]/representativeQueries[]
+# array on a single AgentRecord (memory amplification through serialization,
+# telemetry, storage). Also bounds each retained string's length.
+_MAX_ARD_LIST_ITEMS = 256
+_MAX_ARD_STR_LEN = 1024
+
+# Attacker-controlled identifiers are logged; truncate so an oversized or
+# newline-laden identifier can't bloat or forge log lines.
+_MAX_LOGGED_IDENTIFIER = 256
+
 
 @dataclass
 class ModelCard:
@@ -253,6 +271,19 @@ def _name_from_urn(identifier: str) -> tuple[str | None, str | None]:
     return (name or None), publisher
 
 
+def _safe_log_str(value: Any) -> str:
+    """Bound and de-newline an attacker-controlled value for logging.
+
+    Prevents log flooding / forged-line injection from oversized or
+    newline-laden identifiers when a non-JSON structlog renderer is used.
+    """
+    text = value if isinstance(value, str) else repr(value)
+    text = text.replace("\n", "\\n").replace("\r", "\\r")
+    if len(text) > _MAX_LOGGED_IDENTIFIER:
+        text = text[:_MAX_LOGGED_IDENTIFIER] + "…"
+    return text
+
+
 def _ard_identity_domain(identity: str) -> str | None:
     """Extract the trust domain from an ARD trustManifest identity URI.
 
@@ -261,10 +292,15 @@ def _ard_identity_domain(identity: str) -> str | None:
     RFC 3986 %-encoding for ports), and HTTPS FQDN URIs. Returns ``None``
     for other/unparseable schemes — callers must then skip alignment
     checking rather than guess.
+
+    Uses ``urlparse().hostname`` (not ``netloc``) so userinfo cannot
+    spoof the authority: ``spiffe://acme.com:1@evil.com`` resolves to
+    ``evil.com``, not ``acme.com`` — otherwise the alignment check could
+    be silenced by embedding the impersonated domain as a username.
     """
     if identity.startswith(("spiffe://", "https://")):
-        host = urlparse(identity).netloc.split(":")[0].lower().strip(".")
-        return host or None
+        host = urlparse(identity).hostname
+        return host.strip(".") or None if host else None
     if identity.startswith("did:web:"):
         # did:web encodes ports as %3A and path segments as further colons.
         host = unquote(identity[len("did:web:") :].split(":")[0]).split(":")[0]
@@ -285,6 +321,32 @@ def _ard_domains_aligned(identity_domain: str, publisher: str) -> bool:
         or identity_domain.endswith("." + publisher)
         or publisher.endswith("." + identity_domain)
     )
+
+
+def _truncate(text: str | None) -> str | None:
+    """Bound a retained free-text string's length (defense-in-depth)."""
+    if text is None:
+        return None
+    return text if len(text) <= _MAX_ARD_STR_LEN else text[:_MAX_ARD_STR_LEN]
+
+
+def _ard_str_list(raw: Any) -> list[str]:
+    """Coerce an ARD string array to a bounded, cleaned list.
+
+    Caps both the number of items (``_MAX_ARD_LIST_ITEMS``) and each
+    item's length so one entry can't retain an unbounded array on a
+    single AgentRecord.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not item:
+            continue
+        out.append(str(item)[:_MAX_ARD_STR_LEN])
+        if len(out) >= _MAX_ARD_LIST_ITEMS:
+            break
+    return out
 
 
 def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, str | None]:
@@ -323,20 +385,23 @@ def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, s
 
     # fqdn: host of the artifact URL when referenced; the URN's publisher
     # domain for inline artifacts. Never empty (parse keep-filter).
+    # ``.hostname``/``.port`` reject userinfo spoofing and a malformed port
+    # (e.g. ``https://h:notaport/x``) here as a clean per-entry skip —
+    # otherwise the ValueError surfaces later in the DNS-fallback path and
+    # the agent is dropped silently, violating skip-with-warning.
     if url:
-        parsed = urlparse(url)
-        host = parsed.netloc.split(":")[0] if parsed.netloc else ""
-        fqdn = host or publisher
+        try:
+            parsed = urlparse(url)
+            _ = parsed.port  # forces validation; raises ValueError if malformed
+        except ValueError:
+            return None, "locator_violation"
+        fqdn = (parsed.hostname or "").strip(".") or publisher
     else:
         fqdn = publisher
 
-    description = entry.get("description") or display_name
-    raw_capabilities = entry.get("capabilities")
-    capabilities = (
-        [str(c) for c in raw_capabilities if c] if isinstance(raw_capabilities, list) else []
-    )
-    raw_queries = entry.get("representativeQueries")
-    use_cases = [str(q) for q in raw_queries if q] if isinstance(raw_queries, list) else []
+    description = _truncate(entry.get("description") or display_name)
+    capabilities = _ard_str_list(entry.get("capabilities"))
+    use_cases = _ard_str_list(entry.get("representativeQueries"))
     version = entry.get("version")
     trust_manifest = entry.get("trustManifest")
 
@@ -363,45 +428,82 @@ def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, s
     )
 
 
-def _parse_ard_catalog(
-    data: dict[str, Any],
-    *,
-    _depth: int = 0,
-    _agents: list[HttpIndexAgent] | None = None,
-) -> list[HttpIndexAgent]:
+@dataclass
+class _ArdParseState:
+    """Shared, mutable accounting for one catalog parse (incl. nesting).
+
+    ``entries_seen`` bounds total work regardless of per-entry outcome;
+    ``skips`` aggregates skip reasons so a hostile all-invalid catalog
+    produces ONE summary log line rather than thousands.
+    """
+
+    agents: list[HttpIndexAgent] = field(default_factory=list)
+    entries_seen: int = 0
+    skips: dict[str, int] = field(default_factory=dict)
+    sample_ids: list[str] = field(default_factory=list)
+
+    def skip(self, reason: str, identifier: Any) -> None:
+        self.skips[reason] = self.skips.get(reason, 0) + 1
+        if len(self.sample_ids) < 10 and identifier is not None:
+            self.sample_ids.append(f"{reason}:{_safe_log_str(identifier)}")
+
+
+def _parse_ard_catalog(data: dict[str, Any]) -> list[HttpIndexAgent]:
     """Parse an ARD ai-catalog manifest into HttpIndexAgent entries.
 
     Inline nested catalogs (``type == application/ai-catalog+json`` with
     ARD-shaped ``data``) recurse up to ``_MAX_ARD_DEPTH``; the agent
     count across ALL nesting levels shares the ``_MAX_HTTP_INDEX_AGENTS``
-    budget. Registry entries, non-agent artifacts, URL-only nested
-    catalogs and malformed entries are skipped individually — one bad
-    entry never fails the catalog.
+    budget and total entries visited share ``_MAX_ARD_ENTRIES``. Registry
+    entries, non-agent artifacts, URL-only nested catalogs and malformed
+    entries are skipped — one bad entry never fails the catalog, and skip
+    reasons are aggregated into a single summary warning.
     """
-    agents: list[HttpIndexAgent] = _agents if _agents is not None else []
     entries = data.get("entries")
     if not isinstance(entries, list):
-        return agents
+        return []
 
-    if _depth == 0:
-        logger.info(
-            "http_index.ard_catalog_detected",
-            entry_count=len(entries),
-            spec_version=data.get("specVersion"),
+    logger.info(
+        "http_index.ard_catalog_detected",
+        entry_count=len(entries),
+        spec_version=data.get("specVersion"),
+    )
+
+    state = _ArdParseState()
+    _ard_parse_into(data, state, depth=0)
+
+    if state.skips:
+        logger.warning(
+            "http_index.ard_entries_skipped",
+            skipped_total=sum(state.skips.values()),
+            by_reason=dict(state.skips),
+            samples=state.sample_ids,
         )
+    logger.debug(
+        "Parsed ARD catalog",
+        agent_count=len(state.agents),
+        entries_seen=state.entries_seen,
+    )
+    return state.agents
+
+
+def _ard_parse_into(data: dict[str, Any], state: _ArdParseState, depth: int) -> None:
+    """Recursive worker: accumulate agents into ``state`` from one level."""
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return
 
     for entry in entries:
-        if len(agents) >= _MAX_HTTP_INDEX_AGENTS:
-            logger.warning(
-                "http_index.ard_entry_skipped",
-                reason="agent_cap_reached",
-                cap=_MAX_HTTP_INDEX_AGENTS,
-                depth=_depth,
-            )
-            break
+        if len(state.agents) >= _MAX_HTTP_INDEX_AGENTS:
+            state.skips["agent_cap_reached"] = state.skips.get("agent_cap_reached", 0) + 1
+            return
+        if state.entries_seen >= _MAX_ARD_ENTRIES:
+            state.skips["entry_cap_reached"] = state.skips.get("entry_cap_reached", 0) + 1
+            return
+        state.entries_seen += 1
 
         if not isinstance(entry, dict):
-            logger.warning("http_index.ard_entry_skipped", reason="missing_required", depth=_depth)
+            state.skip("missing_required", None)
             continue
 
         identifier = entry.get("identifier")
@@ -412,59 +514,30 @@ def _parse_ard_catalog(
         if entry_type == _ARD_CATALOG_MEDIA_TYPE:
             inline_data = entry.get("data")
             if isinstance(inline_data, dict) and _is_ard_catalog(inline_data):
-                if _depth >= _MAX_ARD_DEPTH:
-                    logger.warning(
-                        "http_index.ard_entry_skipped",
-                        identifier=identifier,
-                        reason="depth_exceeded",
-                        depth=_depth,
-                    )
+                if depth >= _MAX_ARD_DEPTH:
+                    state.skip("depth_exceeded", identifier)
                     continue
-                _parse_ard_catalog(inline_data, _depth=_depth + 1, _agents=agents)
+                _ard_parse_into(inline_data, state, depth=depth + 1)
             else:
-                logger.debug(
-                    "http_index.ard_entry_skipped",
-                    identifier=identifier,
-                    reason="nested_url_not_followed",
-                    depth=_depth,
-                )
+                state.skip("nested_url_not_followed", identifier)
             continue
 
         # Registry endpoints (dynamic search APIs) are a separate future
         # feature — never mapped to agents.
         if entry_type in _ARD_REGISTRY_MEDIA_TYPES:
-            logger.debug(
-                "http_index.ard_entry_skipped",
-                identifier=identifier,
-                reason="registry_entry",
-                depth=_depth,
-            )
+            state.skip("registry_entry", identifier)
             continue
 
         # Non-agent artifacts (datasets, skills, ...).
         if not isinstance(entry_type, str) or entry_type not in _ARD_AGENT_MEDIA_TYPES:
-            logger.debug(
-                "http_index.ard_entry_skipped",
-                identifier=identifier,
-                reason="non_agent_artifact",
-                depth=_depth,
-            )
+            state.skip("non_agent_artifact", identifier)
             continue
 
         agent, skip_reason = _ard_entry_to_agent(entry)
         if agent is None:
-            logger.warning(
-                "http_index.ard_entry_skipped",
-                identifier=identifier,
-                reason=skip_reason,
-                depth=_depth,
-            )
+            state.skip(skip_reason or "unknown", identifier)
             continue
-        agents.append(agent)
-
-    if _depth == 0:
-        logger.debug("Parsed ARD catalog", agent_count=len(agents))
-    return agents
+        state.agents.append(agent)
 
 
 async def fetch_http_index(

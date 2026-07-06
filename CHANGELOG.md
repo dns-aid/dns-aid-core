@@ -42,13 +42,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are never fetched from the parse path, recursion depth is bounded, and the
   agent-count budget is shared across nesting levels so nested floods cannot
   amplify discovery fan-out.
-- **Trust-identity alignment check (warning-only).** Per the ARD spec's
-  alignment rule, a trust manifest whose identity domain (SPIFFE / did:web /
-  HTTPS) does not align with the entry URN's publisher domain — e.g. a catalog
-  on one domain claiming another domain's SPIFFE identity — logs a structured
-  `http_index.ard_trust_identity_mismatch` warning. The manifest is still
-  passed through unchanged; trust manifests remain published claims that
-  dns-aid does not cryptographically verify in this release.
+- **Trust-identity alignment checks (warning-only).** Two structured signals
+  guard against catalog impersonation (manifests are still passed through —
+  they are unverified published claims): `http_index.ard_trust_identity_mismatch`
+  when a manifest's identity domain (SPIFFE / did:web / HTTPS, extracted via
+  URL host parsing that is immune to userinfo spoofing like
+  `spiffe://acme.com:1@evil.com`) does not align with the entry URN's publisher
+  domain; and `http_index.ard_trust_foreign_publisher` when the URN publisher
+  does not align with the domain that actually served the catalog over TLS —
+  the true impersonation signal (a catalog on `evil.com` asserting an
+  `acme.com` agent), advisory because it may also be legitimate cross-publisher
+  federation.
+- **Untrusted-input hardening for production.** Total entries visited per
+  catalog are capped (`_MAX_ARD_ENTRIES`, shared across nesting) so a document
+  of thousands of invalid/registry entries cannot amplify work; per-entry skip
+  reasons are aggregated into a single `http_index.ard_entries_skipped` summary
+  (not one log line per bad entry); logged identifiers are length-bounded and
+  newline-escaped (no log injection/flooding); per-entry `capabilities[]` /
+  `representativeQueries[]` arrays and free-text strings are length-capped
+  (defense-in-depth beyond the 1 MB document cap); and a malformed port in an
+  artifact URL (`https://h:notaport/x`) is a clean per-entry skip-with-warning
+  rather than a silently dropped agent.
 
 ## [0.25.0] - 2026-06-10
 

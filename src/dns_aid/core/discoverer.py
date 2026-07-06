@@ -976,19 +976,32 @@ def _parse_fqdn(fqdn: str) -> tuple[str | None, str | None]:
     return parsed.name, parsed.protocol
 
 
-def _validated_trust_manifest(http_agent: HttpIndexAgent) -> TrustManifest | None:
+def _validated_trust_manifest(
+    http_agent: HttpIndexAgent, serving_domain: str | None = None
+) -> TrustManifest | None:
     """Validate an ARD trustManifest wire dict at the AgentRecord boundary.
 
     Invalid manifests never fail the agent — they degrade to ``None``
     with a structured warning (feature contract C5).
 
-    Additionally checks the ARD alignment rule ("the trust domain MUST
-    align with the URN's <publisher> domain"): a mismatch — e.g. a
-    catalog on evil.com claiming ``spiffe://acme.com/...`` — logs a
-    structured warning. Warning-only in 0.26: the manifest is still
-    passed through (it is pass-through data, never verified here), but
-    operators get a machine-greppable impersonation signal. Identity
-    schemes we can't parse (``identityType: other``) skip the check.
+    Two warning-only trust signals are emitted (the manifest is always
+    passed through — it is unverified claims, not verified here):
+
+    * ``ard_trust_identity_mismatch`` — the ARD spec's alignment rule:
+      the trust identity's domain MUST align with the URN's ``<publisher>``
+      domain. Both fields live in the same (untrusted) catalog, so this
+      only catches an internally-inconsistent manifest.
+
+    * ``ard_trust_foreign_publisher`` — the URN publisher does not align
+      with ``serving_domain`` (the domain that actually served the catalog
+      over TLS — the only value with a real trust root). This is the true
+      impersonation signal: a catalog on ``evil.com`` asserting
+      ``urn:air:acme.com``/``spiffe://acme.com`` fires here. It may also be
+      legitimate cross-publisher federation, so it is advisory: operators
+      must verify (future work anchors this in DNSSEC/DANE).
+
+    Identity schemes we can't parse (``identityType: other``) skip the
+    identity check.
     """
     if http_agent.trust_manifest is None:
         return None
@@ -1012,6 +1025,19 @@ def _validated_trust_manifest(http_agent: HttpIndexAgent) -> TrustManifest | Non
                 identity=manifest.identity,
                 identity_domain=identity_domain,
                 publisher=publisher,
+            )
+        if (
+            serving_domain
+            and publisher
+            and not _ard_domains_aligned(publisher, serving_domain.lower().rstrip("."))
+        ):
+            logger.warning(
+                "http_index.ard_trust_foreign_publisher",
+                agent=http_agent.name,
+                identifier=http_agent.identifier,
+                identity=manifest.identity,
+                publisher=publisher,
+                serving_domain=serving_domain,
             )
     return manifest
 
@@ -1042,7 +1068,7 @@ def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> N
     # Preserve ARD trust manifest on DNS-discovered agents too — the
     # catalog is enriching an authoritative DNS answer.
     if http_agent.trust_manifest is not None and agent.trust_manifest is None:
-        agent.trust_manifest = _validated_trust_manifest(http_agent)
+        agent.trust_manifest = _validated_trust_manifest(http_agent, agent.domain)
 
     if http_agent.endpoint and not agent.endpoint_override:
         parsed = urlparse(http_agent.endpoint)
@@ -1286,7 +1312,7 @@ def _http_agent_to_record(
         use_cases=list(http_agent.use_cases),
         endpoint_override=http_agent.endpoint,
         endpoint_source="http_index_fallback",
-        trust_manifest=_validated_trust_manifest(http_agent) if is_ard else None,
+        trust_manifest=_validated_trust_manifest(http_agent, domain) if is_ard else None,
     )
 
 
