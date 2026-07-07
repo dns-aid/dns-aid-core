@@ -93,6 +93,12 @@ agents = await dns_aid.discover("example.com", use_http_index=True)
 # and discovery falls back to the on-domain catalog. The trust basis is surfaced as
 # AgentRecord.catalog_trust (tls_domain | dnssec | jws). See docs/ard-catalog.md.
 
+# (0.26.4+) Opt-in DNSSEC/DANE hardening (SDK/CLI/MCP; all default off — DNSSEC is
+# never required). require_dnssec / min_dnssec enforce the resolver AD flag on
+# DNS-plane agents (ARD / HTTP-catalog agents are exempt — they carry no DNS SVCB
+# record). verify_dane binds each agent endpoint's TLS cert to its DANE/TLSA record
+# (defense-in-depth, meaningful only under DNSSEC) → AgentRecord.dane_verified.
+
 # Filtered discovery — pure-Python predicates over the in-memory result (v0.19.0+)
 result = await dns_aid.discover(
     "example.com",

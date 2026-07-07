@@ -617,9 +617,10 @@ wheels = [
 
 [[package]]
 name = "dns-aid"
-version = "0.26.3"
+version = "0.26.4"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "dnspython" },
     { name = "httpx" },
     { name = "pydantic" },
@@ -680,9 +681,6 @@ dev = [
     { name = "ruff" },
     { name = "urllib3" },
 ]
-jws = [
-    { name = "cryptography" },
-]
 mcp = [
     { name = "mcp" },
     { name = "pyjwt" },
@@ -711,9 +709,9 @@ requires-dist = [
     { name = "cel-python", marker = "extra == 'dev'", specifier = ">=0.5.0" },
     { name = "common-expression-language", marker = "extra == 'cel'", specifier = ">=0.5.0" },
     { name = "common-expression-language", marker = "extra == 'dev'", specifier = ">=0.5.0" },
+    { name = "cryptography", specifier = ">=46.0.7" },
     { name = "cryptography", marker = "extra == 'all'", specifier = ">=46.0.7" },
     { name = "cryptography", marker = "extra == 'dev'", specifier = ">=46.0.7" },
-    { name = "cryptography", marker = "extra == 'jws'", specifier = ">=46.0.7" },
     { name = "cyclonedx-bom", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "dnspython", specifier = ">=2.6.0" },
     { name = "google-auth", marker = "extra == 'all'", specifier = ">=2.30.0" },

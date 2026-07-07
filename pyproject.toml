@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dns-aid"
-version = "0.26.3"
+version = "0.26.4"
 description = "DNS-based Agent Identification and Discovery - Reference Implementation"
 readme = "README.md"
 license = "Apache-2.0"
@@ -40,6 +40,12 @@ dependencies = [
     "httpx>=0.27.0",
     "structlog>=24.0.0",
     "python-dotenv>=1.2.2",
+    # Core: JWS signature verification (core/jwks.py — imported at module level by
+    # the ``verify_signatures`` path, which is the default off-domain ARD trust
+    # anchor) and DANE/TLSA certificate matching (core/validator.py) both require
+    # cryptography. Previously only in the ``[jws]`` extra, which made a base
+    # install ImportError on ``verify_signatures=True``.
+    "cryptography>=46.0.7",
 ]
 
 [project.optional-dependencies]
@@ -78,8 +84,10 @@ ddns = [
     # Uses dnspython from core deps
 ]
 jws = [
-    # JWS signature support (alternative to DNSSEC)
-    "cryptography>=46.0.7",
+    # JWS signature support (alternative to DNSSEC).
+    # ``cryptography`` is now a CORE dependency (JWS verification is a core
+    # discovery trust anchor); this extra is retained as a compatibility alias so
+    # existing ``dns-aid[jws]`` installs keep working.
 ]
 sdk = [
     # SDK with protocol handlers, ranking, signals

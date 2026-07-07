@@ -16,7 +16,7 @@ list comprehensions remain the most readable expression of "select records match
 
 from __future__ import annotations
 
-from dns_aid.core.models import AgentRecord
+from dns_aid.core.models import CATALOG_ENDPOINT_SOURCES, AgentRecord
 
 
 def apply_filters(
@@ -53,7 +53,11 @@ def apply_filters(
     * ``transport`` — exact match against the agent's protocol identifier (Path A surfaces
       the agent protocol, not the underlying wire transport; see :func:`_matches_transport`).
     * ``realm`` — exact match against ``agent.realm``.
-    * ``min_dnssec`` — when ``True``, only records whose ``agent.dnssec_validated`` is True pass.
+    * ``min_dnssec`` — when ``True``, a record passes only if its
+      ``agent.dnssec_validated`` is True. HTTP-catalog / ARD records
+      (``endpoint_source`` in ``CATALOG_ENDPOINT_SOURCES``) are exempt — they have no
+      DNS SVCB record to validate (their trust is ``catalog_trust``) — so they pass
+      through rather than being silently dropped.
     * ``text_match`` — case-insensitive substring match across ``description``, ``use_cases``,
       and ``capabilities``. Empty string is a programming error and raises ``ValueError``.
     * ``require_signed`` — when ``True``, only records whose JWS signature verified pass.
@@ -165,6 +169,12 @@ def _matches_realm(record: AgentRecord, expected: str | None) -> bool:
 
 def _matches_min_dnssec(record: AgentRecord, required: bool) -> bool:
     if not required:
+        return True
+    # HTTP-catalog / ARD agents have no DNS SVCB owner name to validate (their trust
+    # is ``catalog_trust``), so they are exempt from this filter rather than silently
+    # dropped. Everything else — including unknown-provenance records — must still
+    # present a DNSSEC-validated response (fail-safe).
+    if record.endpoint_source in CATALOG_ENDPOINT_SOURCES:
         return True
     return record.dnssec_validated
 

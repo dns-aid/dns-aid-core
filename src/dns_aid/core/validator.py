@@ -482,7 +482,7 @@ async def _check_dane(target: str, port: int, *, verify_cert: bool = False) -> b
             # Full DANE cert matching
             try:
                 cert_match = await _match_dane_cert(
-                    target, port, rdata.selector, rdata.mtype, rdata.cert
+                    target, port, rdata.usage, rdata.selector, rdata.mtype, rdata.cert
                 )
                 if cert_match:
                     logger.info("DANE certificate match verified", fqdn=tlsa_fqdn)
@@ -511,6 +511,7 @@ async def _check_dane(target: str, port: int, *, verify_cert: bool = False) -> b
 async def _match_dane_cert(
     target: str,
     port: int,
+    usage: int,
     selector: int,
     mtype: int,
     tlsa_data: bytes,
@@ -518,9 +519,16 @@ async def _match_dane_cert(
     """
     Connect to ``target:port`` via TLS and compare cert against TLSA data.
 
+    Honors the TLSA certificate ``usage`` per RFC 6698: PKIX-TA(0) / PKIX-EE(1)
+    additionally require the certificate to pass normal PKIX + hostname
+    validation; DANE-TA(2) / DANE-EE(3) do NOT chain to a public CA (that is the
+    point of DANE), so the peer certificate is retrieved WITHOUT PKIX/hostname
+    enforcement before the TLSA association is compared.
+
     Args:
         target: Hostname to connect to.
         port: Port number.
+        usage: TLSA usage — 0 = PKIX-TA, 1 = PKIX-EE, 2 = DANE-TA, 3 = DANE-EE.
         selector: TLSA selector — 0 = full cert, 1 = SubjectPublicKeyInfo.
         mtype: TLSA matching type — 0 = exact, 1 = SHA-256, 2 = SHA-512.
         tlsa_data: Certificate association data from the TLSA record.
@@ -528,7 +536,15 @@ async def _match_dane_cert(
     Returns:
         True if the presented certificate matches the TLSA record.
     """
-    ctx = ssl.create_default_context()
+    if usage in (2, 3):
+        # DANE-TA / DANE-EE: cert need not be PKIX-valid; fetch it without
+        # verification so a self-signed / privately-issued cert can be matched.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    else:
+        # PKIX-TA / PKIX-EE: cert must also pass normal PKIX + hostname checks.
+        ctx = ssl.create_default_context()
     _, writer = await asyncio.open_connection(target, port, ssl=ctx)
 
     try:

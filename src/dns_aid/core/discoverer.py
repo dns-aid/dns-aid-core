@@ -38,6 +38,7 @@ from dns_aid.core.http_index import (
     is_on_domain,
 )
 from dns_aid.core.models import (
+    CATALOG_ENDPOINT_SOURCES,
     AgentRecord,
     CapabilitySource,
     DiscoveryResult,
@@ -106,31 +107,42 @@ async def _apply_post_discovery(
     enrich_endpoints: bool,
     verify_signatures: bool,
     domain: str,
+    min_dnssec: bool = False,
+    verify_dane: bool = False,
 ) -> bool:
-    """Apply DNSSEC enforcement, endpoint enrichment, and JWS verification.
+    """Apply DNSSEC enforcement, endpoint enrichment, JWS + DANE verification.
 
-    Under draft-02's flat-FQDN model each agent has its own owner name,
-    so DNSSEC is checked per agent rather than once for the zone. The
-    result-level boolean returned here is True only if every agent's
-    fqdn validated; per-agent state lives on ``AgentRecord.dnssec_validated``.
+    Under draft-02's flat-FQDN model each agent has its own owner name, so DNSSEC
+    is checked per agent rather than once for the zone. DNSSEC does NOT apply to
+    HTTP-catalog / ARD agents (``endpoint_source`` in ``CATALOG_ENDPOINT_SOURCES``):
+    they have no DNS SVCB owner name (their trust is ``catalog_trust``), so they are
+    exempt — ``require_dnssec`` never raises for them and their ``dnssec_validated``
+    stays at its default. Every other agent (a real ``dns_svcb`` record, or an
+    explicit ``direct`` / ``directory`` endpoint) IS checked, fail-safe.
 
-    Returns whether DNSSEC was validated across all agents.
+    The per-agent DNSSEC check runs when ``require_dnssec``, ``min_dnssec``, or
+    ``verify_dane`` is set (so the ``min_dnssec`` filter has real data and DANE can
+    be DNSSEC-anchored); ``require_dnssec`` additionally raises when an in-scope
+    agent is unvalidated.
+
+    Returns whether DNSSEC was validated across all in-scope (non-catalog) agents.
     """
     per_agent_dnssec: dict[str, bool] = {}
 
-    if agents and require_dnssec:
+    dnssec_scope = [a for a in agents if a.endpoint_source not in CATALOG_ENDPOINT_SOURCES]
+    if dnssec_scope and (require_dnssec or min_dnssec or verify_dane):
         from dns_aid.core.validator import _check_dnssec
 
         results = await asyncio.gather(
-            *[_check_dnssec(a.fqdn) for a in agents],
+            *[_check_dnssec(a.fqdn) for a in dnssec_scope],
             return_exceptions=True,
         )
-        for agent, outcome in zip(agents, results, strict=True):
+        for agent, outcome in zip(dnssec_scope, results, strict=True):
             ok = outcome is True
             per_agent_dnssec[agent.fqdn] = ok
             agent.dnssec_validated = ok
 
-        if not all(per_agent_dnssec.values()):
+        if require_dnssec and not all(per_agent_dnssec.values()):
             failed = sorted(f for f, ok in per_agent_dnssec.items() if not ok)
             raise DNSSECError(
                 f"DNSSEC validation required but the following agent "
@@ -146,7 +158,36 @@ async def _apply_post_discovery(
     if verify_signatures and agents:
         await _verify_agent_signatures(agents, domain, dnssec_validated=per_agent_dnssec)
 
+    if verify_dane and agents:
+        await _verify_agents_dane(agents)
+
     return bool(per_agent_dnssec) and all(per_agent_dnssec.values())
+
+
+async def _verify_agents_dane(agents: list[AgentRecord]) -> None:
+    """Opt-in DANE: bind each agent's endpoint TLS cert to its DANE/TLSA record.
+
+    Defense-in-depth on the *resolved endpoint* — it does NOT affect the catalog /
+    pointer trust decision. Like :func:`dns_aid.core.validator.verify`, DANE without
+    a DNSSEC-validated chain carries no integrity guarantee (RFC 6698 §10.1), so a
+    positive DANE result is demoted to ``None`` (unknown) unless the agent's DNS
+    response was DNSSEC-validated. Result is stamped on ``AgentRecord.dane_verified``.
+    """
+    from dns_aid.core.validator import _check_dane
+
+    for agent in agents:
+        target = agent.target_host
+        if not target:
+            continue
+        try:
+            dane = await _check_dane(target, agent.port, verify_cert=True)
+        except Exception:  # noqa: BLE001 — DANE is best-effort defense-in-depth
+            logger.debug("DANE verification failed", agent=agent.name, exc_info=True)
+            dane = None
+        # DANE without a DNSSEC-validated chain carries no integrity guarantee.
+        if dane is not None and not agent.dnssec_validated:
+            dane = None
+        agent.dane_verified = dane
 
 
 def _drop_unverified_off_domain(agents: list[AgentRecord], domain: str) -> list[AgentRecord]:
@@ -182,6 +223,7 @@ async def discover(
     enrich_endpoints: bool = True,
     verify_signatures: bool = False,
     trust_dnssec_pointers: bool = False,
+    verify_dane: bool = False,
     *,
     # Path A in-memory filter kwargs (FR-002, FR-021..FR-023). All optional; default
     # behavior is unchanged when none are passed.
@@ -229,6 +271,13 @@ async def discover(
             DoT / DoH) and following it redirects discovery to a foreign host —
             enable only when you run such a resolver. On-domain pointers and JWS do
             not require this.
+        verify_dane: Opt-in (default False). When True, each resolved agent's endpoint
+            TLS certificate is checked against its DANE/TLSA record — defense-in-depth on
+            the endpoint that does NOT change the catalog/pointer trust decision. A
+            positive result is demoted to unknown unless the agent's DNS response was
+            DNSSEC-validated (DANE without DNSSEC carries no integrity guarantee), so pair
+            it with ``require_dnssec`` / ``min_dnssec`` for a meaningful result. Surfaced
+            on ``AgentRecord.dane_verified``.
         capabilities: All-of capability match. Empty list explicitly matches no records.
         capabilities_any: Any-of capability match. Empty list explicitly matches no records.
         auth_type: Case-insensitive exact match against ``agent.auth_type``.
@@ -324,10 +373,16 @@ async def discover(
         agents = [a for a in agents if a.name.lower() == needle]
 
     dnssec_validated = await _apply_post_discovery(
-        agents, require_dnssec, enrich_endpoints, verify_signatures, domain
+        agents,
+        require_dnssec,
+        enrich_endpoints,
+        verify_signatures,
+        domain,
+        min_dnssec=min_dnssec,
+        verify_dane=verify_dane,
     )
-    # Per-agent `dnssec_validated` is set inside _apply_post_discovery
-    # when require_dnssec=True; no need to re-stamp at this level.
+    # Per-agent `dnssec_validated` is set inside _apply_post_discovery for DNS-plane
+    # agents when require_dnssec / min_dnssec / verify_dane is set; no re-stamp here.
 
     # Off-domain catalogs (catalog_trust=="jws") have their JWS signature as the
     # sole trust anchor — drop any that did not verify even when require_signed

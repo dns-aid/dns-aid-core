@@ -187,10 +187,16 @@ async def test_min_dnssec_propagates_from_dnssec_validated(
     under the per-agent model, not via a blanket loop in discover())."""
 
     async def fake_post_discovery(
-        agents, require_dnssec, enrich_endpoints, verify_signatures, domain
+        agents,
+        require_dnssec,
+        enrich_endpoints,
+        verify_signatures,
+        domain,
+        min_dnssec=False,
+        verify_dane=False,
     ):
         # Simulate the per-agent stamping that the real function does
-        # when require_dnssec=True and every per-agent check succeeds.
+        # when the DNSSEC check runs and every per-agent check succeeds.
         for a in agents:
             a.dnssec_validated = True
         return True
@@ -310,6 +316,8 @@ async def test_require_signed_implies_verify_signatures(
         enrich_endpoints: bool,
         verify_signatures: bool,
         domain: str,
+        min_dnssec: bool = False,
+        verify_dane: bool = False,
     ) -> bool:
         captured["verify_signatures"] = verify_signatures
         return False

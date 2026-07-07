@@ -187,6 +187,8 @@ async def discover(
     use_http_index: bool = False,
     enrich_endpoints: bool = True,
     verify_signatures: bool = False,
+    trust_dnssec_pointers: bool = False,
+    verify_dane: bool = False,
     *,
     # Path A in-memory filter kwargs (v0.19.0+)
     capabilities: list[str] | None = None,
@@ -211,10 +213,12 @@ async def discover(
 | `domain` | `str` | Yes | - | Domain to search for agents |
 | `protocol` | `str \| Protocol` | No | `None` | Filter by protocol (None for all) |
 | `name` | `str` | No | `None` | Filter by specific agent name (case-insensitive per RFC 1035) |
-| `require_dnssec` | `bool` | No | `False` | Require DNSSEC validation |
+| `require_dnssec` | `bool` | No | `False` | Require every **DNS-plane** agent's DNS response to carry the resolver AD flag; raises `DNSSECError` if any does not. ARD / HTTP-catalog agents are exempt (no DNS SVCB record — their trust is `catalog_trust`). Exposed on SDK, CLI (`--require-dnssec`), and MCP. |
 | `use_http_index` | `bool` | No | `False` | Use HTTP index endpoint instead of DNS-only discovery |
 | `enrich_endpoints` | `bool` | No | `True` | Fetch cap docs / agent cards to enrich AgentRecords |
 | `verify_signatures` | `bool` | No | `False` | Fetch JWKS and verify per-agent JWS signatures |
+| `trust_dnssec_pointers` | `bool` | No | `False` | Opt-in. Also follow an off-domain ARD catalog pointer when its pointer record is DNSSEC-validated (AD flag). Off by default — the AD flag is only trustworthy with a validating resolver over a secure path. |
+| `verify_dane` | `bool` | No | `False` | Opt-in. Check each resolved agent endpoint's TLS certificate against its DANE/TLSA record — defense-in-depth on the endpoint that does **not** change the catalog/pointer trust decision. Demoted to `None` unless the agent's DNS response is DNSSEC-validated (DANE without DNSSEC carries no integrity guarantee, RFC 6698 §10.1). Surfaced on `AgentRecord.dane_verified`. SDK / CLI (`--verify-dane`) / MCP. |
 
 **Filter kwargs (v0.19.0+, all keyword-only, all default no-op):**
 
@@ -226,7 +230,7 @@ async def discover(
 | `intent` | `str \| None` | Match against `agent.category`; falls back to substring match across capabilities. |
 | `transport` | `str \| None` | Match against the agent's protocol identifier (Path A surfaces protocol, not wire transport). |
 | `realm` | `str \| None` | Exact match against `agent.realm`. |
-| `min_dnssec` | `bool` | When `True`, only records whose DNS response was DNSSEC-validated pass. |
+| `min_dnssec` | `bool` | When `True`, only records whose DNS response was DNSSEC-validated (AD flag) pass. ARD / HTTP-catalog agents are exempt (no DNS SVCB record — their trust is `catalog_trust`) and pass through rather than being dropped. |
 | `text_match` | `str \| None` | Case-insensitive substring match across `description`, `use_cases`, and `capabilities`. Empty string raises `ValueError`. |
 | `require_signed` | `bool` | When `True`, only records whose JWS signature verified pass. Auto-enables `verify_signatures=True`. |
 | `require_signature_algorithm` | `list[str] \| None` | Restrict `require_signed` matches to records whose verified algorithm is in this allow-list. Requires `require_signed=True`. |
@@ -259,8 +263,8 @@ not verify signatures, attestation digests, or identity↔publisher alignment).
 
 - `ValueError` — `text_match` is an empty string, or `require_signature_algorithm`
   is set without `require_signed=True`.
-- `DNSSECError` — `require_dnssec=True` but the domain's response is not
-  authenticated.
+- `DNSSECError` — `require_dnssec=True` but a **DNS-plane** agent's response is not
+  authenticated (AD flag unset). ARD / HTTP-catalog agents are exempt.
 
 #### Example
 
@@ -584,8 +588,11 @@ agent = AgentRecord(
 | `policy_uri` | `str` | No | `None` | URI to agent policy document |
 | `realm` | `str` | No | `None` | Multi-tenant scope identifier |
 | `capability_source` | `str` | No | `None` | Where capabilities came from: `cap_uri`, `well_known`, `agent_card`, `http_index`, `ard_catalog`, `txt_fallback`, `none` |
-| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `ard_card` (real endpoint from a fetched ARD agent/server card), `direct` |
+| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `ard_card` (real endpoint from a fetched ARD agent/server card), `ard_inline`, `direct`, `directory` |
 | `trust_manifest` | `TrustManifest` | No | `None` | Publisher trust claims from an ARD ai-catalog entry (identity, attestations, provenance, signature) — pass-through, not verified |
+| `catalog_trust` | `str \| None` | No | `None` | ARD-sourced records only — how the catalog was trusted: `tls_domain` (on-domain), `dnssec` (DNSSEC-validated off-domain pointer), or `jws` (JWS-signed off-domain). `None` for pure-DNS records. |
+| `dnssec_validated` | `bool` | No | `False` | `True` when this agent's DNS response carried the resolver **AD flag**. Set for DNS-plane agents when `require_dnssec` / `min_dnssec` / `verify_dane` is used; ARD / HTTP-catalog agents are exempt and stay `False`. AD-flag based — not independent DNSKEY→DS→RRSIG chain validation. |
+| `dane_verified` | `bool \| None` | No | `None` | DANE/TLSA endpoint-certificate binding (opt-in `verify_dane=True`): `True` = endpoint cert matched its DNSSEC-anchored TLSA record; `False` = TLSA mismatch; `None` = not checked, no TLSA record, or not DNSSEC-anchored. |
 
 The [ARD ai-catalog guide](ard-catalog.md) covers the full discovery flow (DNS pointer → catalog → per-agent DNS-first → card dereferencing), publishing the host-anywhere `_catalog._agents` / `_index._agents` pointer (`dns-aid index publish-catalog`, `publish_catalog_pointer` library/MCP), and the trust model.
 

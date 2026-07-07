@@ -70,7 +70,9 @@ _index._agents.example.com.    SVCB 1 catalogue.example.com. alpn="h2" port="443
 ```
 
 The target host carries the public TLS cert and can hold a DANE/TLSA record
-(draft-02 §Known Organization). Any host works — a dedicated box, CloudFront,
+(draft-02 §Known Organization); pass `verify_dane=True` to bind each resolved
+agent endpoint's certificate to that TLSA record (defense-in-depth, meaningful
+only under DNSSEC — surfaced as `AgentRecord.dane_verified`). Any host works — a dedicated box, CloudFront,
 an S3 REST endpoint, or a partner-hosted origin — as long as it serves the
 catalog over HTTPS at `/.well-known/ai-catalog.json`.
 

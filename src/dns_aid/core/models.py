@@ -511,6 +511,19 @@ class TrustManifest(BaseModel):
         return manifest
 
 
+# Endpoint sources served from an HTTP catalog / ARD index rather than a genuine
+# DNS SVCB record. These agents have no DNS SVCB owner name to DNSSEC-validate —
+# their trust basis is ``catalog_trust`` (tls_domain / dnssec / jws) — so DNSSEC
+# enforcement (``require_dnssec`` / ``min_dnssec``) does not apply to them and they
+# are exempt rather than silently dropped. Every *other* source — a real
+# ``dns_svcb`` / ``dns_svcb_enriched`` record, or an explicit ``direct`` /
+# ``directory`` endpoint — IS subject to DNSSEC checking (fail-safe: an
+# unknown-provenance agent must still prove DNSSEC to satisfy ``min_dnssec``).
+CATALOG_ENDPOINT_SOURCES: frozenset[str] = frozenset(
+    {"http_index", "http_index_fallback", "ard_card", "ard_inline"}
+)
+
+
 class AgentRecord(BaseModel):
     """
     Represents an AI agent published via DNS-AID.
@@ -757,13 +770,29 @@ class AgentRecord(BaseModel):
     )
 
     # DNSSEC validation status for THIS agent's DNS lookup.
-    # Populated by the discoverer when DNSSEC validation runs (either via
-    # ``require_dnssec=True`` or the ``min_dnssec`` Path A filter). Default ``False`` matches
-    # the prior behavior for any caller that doesn't enable DNSSEC validation.
+    # Populated by the discoverer for agents subject to DNSSEC — i.e. every source
+    # EXCEPT the HTTP-catalog / ARD sources in CATALOG_ENDPOINT_SOURCES — when
+    # ``require_dnssec``, ``min_dnssec``, or ``verify_dane`` is set. Catalog / ARD
+    # agents have no DNS SVCB record to validate (their trust is ``catalog_trust``)
+    # and are exempt, so this stays ``False`` for them. Default ``False`` matches the
+    # prior behavior for any caller that doesn't enable DNSSEC validation.
     dnssec_validated: bool = Field(
         default=False,
         description="True when the domain hosting this agent presented a DNSSEC-validated "
         "response (AD flag set). False when validation did not occur or did not succeed.",
+    )
+
+    # DANE/TLSA endpoint-certificate binding result (opt-in via ``verify_dane=True``).
+    # None when DANE was not checked, no TLSA record exists, or the result was demoted
+    # because the agent's DNS response was not DNSSEC-validated (DANE without DNSSEC
+    # carries no integrity guarantee — RFC 6698 §10.1). True when the endpoint
+    # certificate matched its TLSA record; False when a TLSA record exists but the
+    # certificate did not match.
+    dane_verified: bool | None = Field(
+        default=None,
+        description="True when the agent endpoint's TLS certificate matched its "
+        "DNSSEC-validated TLSA record; False on a TLSA mismatch; None when DANE was "
+        "not checked, not configured, or not DNSSEC-anchored.",
     )
 
     legacy_resolved: bool = Field(

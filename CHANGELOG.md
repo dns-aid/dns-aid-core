@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.4] - 2026-07-07
+
+### Security
+
+- **DANE/TLSA certificate matching now honors the TLSA `usage` field (RFC 6698).**
+  `_match_dane_cert` previously always opened the endpoint with a PKIX-verifying
+  TLS context, so DANE-TA(2) / DANE-EE(3) associations — whose certificates are
+  self-signed or privately issued by design — failed the TLS handshake before the
+  certificate could be compared, silently yielding a mismatch. Usages 2/3 now
+  retrieve the peer certificate without PKIX/hostname enforcement and rely on the
+  DNSSEC-anchored TLSA digest as the trust anchor; usages 0/1 (PKIX-TA/PKIX-EE)
+  still additionally require PKIX + hostname validity.
+
+### Fixed
+
+- **`min_dnssec` no longer silently drops every ARD / HTTP-index agent.** DNSSEC
+  (`require_dnssec` / `min_dnssec`) is a property of the pure-DNS plane (agents
+  resolved from a DNS SVCB record). ARD / HTTP-index agents have no DNS SVCB owner
+  name to validate — their trust basis is `catalog_trust` — but the `min_dnssec`
+  filter matched on `dnssec_validated`, which is never set for them, so
+  `discover(..., min_dnssec=True)` returned an empty list against an all-ARD
+  catalog. ARD / HTTP-index agents (`endpoint_source` in `CATALOG_ENDPOINT_SOURCES`:
+  `ard_card`, `ard_inline`, `http_index`, `http_index_fallback`) are now exempt from
+  `min_dnssec` / `require_dnssec` — passed through rather than DNSSEC-failed — while
+  every other source (a real DNS SVCB record, or an explicit `direct` / `directory`
+  endpoint) must still present a DNSSEC-validated response (fail-safe). `min_dnssec`
+  also now actually triggers the DNSSEC check: previously it was gated behind
+  `require_dnssec`, so `min_dnssec=True` alone never stamped `dnssec_validated` and
+  dropped *every* agent, DNS-plane included.
+- **`require_dnssec=True` no longer raises `DNSSECError` for a working ARD catalog.**
+  For the same reason, an ARD-only discovery under `require_dnssec=True` previously
+  raised because the (never-validated) ARD agents were treated as DNSSEC failures.
+  DNSSEC enforcement is now scoped to DNS-plane agents; a mixed result raises only
+  when a genuine DNS-SVCB agent is unauthenticated.
+- **`cryptography` is now a core dependency, not a `[jws]` extra.** JWS signature
+  verification (`verify_signatures=True`) is the default off-domain ARD trust anchor
+  and imports `cryptography` at module load, so a base `pip install dns-aid` raised
+  `ImportError` the moment signatures were verified. `cryptography` moved into core
+  `dependencies`; the `[jws]` extra is retained as a compatibility alias.
+
+### Added
+
+- `discover(..., verify_dane=False)` — opt-in DANE/TLSA endpoint-certificate
+  verification for resolved agents, available across the SDK, the CLI
+  (`--verify-dane`), and the MCP `discover_agents_via_dns` tool. Defense-in-depth on
+  the endpoint that does NOT change the catalog/pointer trust decision; a positive
+  result is demoted to unknown unless the agent's DNS response was DNSSEC-validated
+  (DANE without DNSSEC carries no integrity guarantee, RFC 6698 §10.1), so pair it
+  with `require_dnssec` / `min_dnssec`.
+- `AgentRecord.dane_verified` (`bool | None`) surfaces the per-agent DANE result;
+  emitted in CLI `--json` and MCP discover output only when not `None`, keeping
+  legacy / pure-DNS output byte-identical.
+- The `verify` command and the `verify_agent_dns` MCP tool now surface
+  `dnssec_note`, `dnssec_detail`, and `dane_note`, making the AD-flag basis of the
+  DNSSEC verdict and the DANE result/demotion explicit.
+- **`require_dnssec` is now exposed on the CLI (`--require-dnssec`) and the MCP
+  `discover_agents_via_dns` tool**, closing a pre-existing gap where DNSSEC
+  enforcement was reachable only from the SDK. `require_dnssec`, `min_dnssec`, and
+  `verify_dane` now have full SDK / CLI / MCP parity.
+
 ## [0.26.3] - 2026-07-07
 
 ### Security

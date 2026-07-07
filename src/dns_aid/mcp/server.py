@@ -564,10 +564,12 @@ def discover_agents_via_dns(
     intent: Literal["query", "command", "transaction", "subscription"] | None = None,
     transport: str | None = None,
     realm: str | None = None,
+    require_dnssec: bool = False,
     min_dnssec: bool = False,
     text_match: str | None = None,
     require_signed: bool = False,
     require_signature_algorithm: list[str] | None = None,
+    verify_dane: bool = False,
 ) -> dict:
     """
     Discover AI agents at any public domain using the DNS-AID protocol (no credentials needed).
@@ -655,10 +657,12 @@ def discover_agents_via_dns(
             intent=intent,
             transport=transport,
             realm=realm,
+            require_dnssec=require_dnssec,
             min_dnssec=min_dnssec,
             text_match=text_match,
             require_signed=require_signed,
             require_signature_algorithm=require_signature_algorithm,
+            verify_dane=verify_dane,
         )
 
     try:
@@ -684,11 +688,16 @@ def discover_agents_via_dns(
                     "realm": agent.realm,
                     "description": agent.description,
                     "fqdn": agent.fqdn,
-                    # ARD-sourced agents only — keys omitted otherwise so
-                    # legacy output stays byte-identical.
+                    # ARD-sourced / opt-in keys only — omitted otherwise so legacy
+                    # output stays byte-identical.
                     **(
                         {"catalog_trust": agent.catalog_trust}
                         if agent.catalog_trust is not None
+                        else {}
+                    ),
+                    **(
+                        {"dane_verified": agent.dane_verified}
+                        if agent.dane_verified is not None
                         else {}
                     ),
                     **(
@@ -1048,7 +1057,11 @@ def verify_agent_dns(fqdn: str) -> dict:
         - record_exists: Whether the DNS record exists
         - svcb_valid: Whether the SVCB record is properly formatted
         - dnssec_valid: Whether DNSSEC validation passed (None if not checked)
+        - dnssec_note: Honest caveat on the DNSSEC check (AD-flag based; no
+          independent DNSKEY->DS->RRSIG chain validation)
+        - dnssec_detail: Algorithm, chain depth, NSEC3, AD flag (None if not checked)
         - dane_valid: Whether DANE/TLSA is configured (None if not checked)
+        - dane_note: Explanation of the DANE result / demotion
         - endpoint_reachable: Whether the endpoint responds
         - endpoint_latency_ms: Response latency if reachable
         - security_score: Score from 0-100
@@ -1073,7 +1086,12 @@ def verify_agent_dns(fqdn: str) -> dict:
             "record_exists": result.record_exists,
             "svcb_valid": result.svcb_valid,
             "dnssec_valid": result.dnssec_valid,
+            "dnssec_note": result.dnssec_note,
+            "dnssec_detail": (
+                result.dnssec_detail.model_dump() if result.dnssec_detail is not None else None
+            ),
             "dane_valid": result.dane_valid,
+            "dane_note": result.dane_note,
             "endpoint_reachable": result.endpoint_reachable,
             "endpoint_latency_ms": result.endpoint_latency_ms,
             "security_score": result.security_score,

@@ -373,6 +373,14 @@ def discover(
         str | None,
         typer.Option("--realm", help="Filter by realm."),
     ] = None,
+    require_dnssec: Annotated[
+        bool,
+        typer.Option(
+            "--require-dnssec",
+            help="Require every DNS-plane agent's response to be DNSSEC-validated; error "
+            "if any is not. ARD / HTTP-index agents (no DNS SVCB record) are exempt.",
+        ),
+    ] = False,
     min_dnssec: Annotated[
         bool,
         typer.Option(
@@ -401,6 +409,14 @@ def discover(
             help="Restrict --require-signed matches to records whose verified algorithm is in this allow-list (repeatable).",
         ),
     ] = None,
+    verify_dane: Annotated[
+        bool,
+        typer.Option(
+            "--verify-dane",
+            help="Check each agent endpoint's TLS cert against its DANE/TLSA record "
+            "(defense-in-depth; requires DNSSEC to be meaningful — pair with --min-dnssec).",
+        ),
+    ] = False,
 ):
     """
     Discover agents at a domain using DNS-AID protocol.
@@ -438,10 +454,12 @@ def discover(
                 intent=intent,
                 transport=transport,
                 realm=realm,
+                require_dnssec=require_dnssec,
                 min_dnssec=min_dnssec,
                 text_match=text_match,
                 require_signed=require_signed,
                 require_signature_algorithm=require_signature_algorithm,
+                verify_dane=verify_dane,
             )
         )
     except ValueError as exc:
@@ -470,9 +488,10 @@ def discover(
                     "policy_uri": a.policy_uri,
                     "realm": a.realm,
                     "description": a.description,
-                    # ARD-sourced agents only — keys omitted otherwise so
-                    # legacy output stays byte-identical.
+                    # ARD-sourced / opt-in keys only — omitted otherwise so legacy
+                    # output stays byte-identical.
                     **({"catalog_trust": a.catalog_trust} if a.catalog_trust is not None else {}),
+                    **({"dane_verified": a.dane_verified} if a.dane_verified is not None else {}),
                     **(
                         {"trust_manifest": a.trust_manifest.model_dump()}
                         if a.trust_manifest is not None
@@ -767,7 +786,17 @@ def verify(
     console.print(f"  {status(result.record_exists)} DNS record exists")
     console.print(f"  {status(result.svcb_valid)} SVCB record valid")
     console.print(f"  {status(result.dnssec_valid)} DNSSEC validated")
+    if result.dnssec_note:
+        console.print(f"    [dim]{result.dnssec_note}[/dim]")
+    if result.dnssec_detail and result.dnssec_detail.algorithm:
+        _d = result.dnssec_detail
+        console.print(
+            f"    [dim]algorithm: {_d.algorithm} ({_d.algorithm_strength}), "
+            f"chain depth: {_d.chain_depth}[/dim]"
+        )
     console.print(f"  {status(result.dane_valid)} DANE/TLSA configured")
+    if result.dane_note:
+        console.print(f"    [dim]{result.dane_note}[/dim]")
     console.print(f"  {status(result.endpoint_reachable)} Endpoint reachable")
 
     if result.endpoint_latency_ms:
