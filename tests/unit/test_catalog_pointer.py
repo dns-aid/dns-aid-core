@@ -12,6 +12,7 @@ import pytest
 from dns_aid.core.catalog_pointer import (
     CATALOG_POINTER_LABELS,
     DEFAULT_CATALOG_FILENAME,
+    PointerResolution,
     publish_catalog_pointer,
     resolve_catalog_pointer,
     unpublish_catalog_pointer,
@@ -501,8 +502,14 @@ class TestPointerDrivenDiscovery:
         with (
             patch.object(
                 disc,
-                "resolve_catalog_pointer",
-                AsyncMock(return_value="https://cat.acme.com/.well-known/ai-catalog.json"),
+                "resolve_catalog_pointer_detail",
+                AsyncMock(
+                    return_value=PointerResolution(
+                        url="https://cat.acme.com/.well-known/ai-catalog.json",
+                        target_host="cat.acme.com",
+                        pointer_fqdn="_catalog._agents.acme.com",
+                    )
+                ),
             ),
             patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=client),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),

@@ -470,8 +470,9 @@ def discover(
                     "policy_uri": a.policy_uri,
                     "realm": a.realm,
                     "description": a.description,
-                    # ARD-sourced agents only — key omitted otherwise so
+                    # ARD-sourced agents only — keys omitted otherwise so
                     # legacy output stays byte-identical.
+                    **({"catalog_trust": a.catalog_trust} if a.catalog_trust is not None else {}),
                     **(
                         {"trust_manifest": a.trust_manifest.model_dump()}
                         if a.trust_manifest is not None

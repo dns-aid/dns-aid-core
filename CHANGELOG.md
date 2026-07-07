@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.3] - 2026-07-07
+
+### Security
+
+- **Off-domain ARD catalog pointers are no longer followed unauthenticated.**
+  A `_catalog._agents` / `_index._agents` DNS pointer whose target is on a
+  *different* domain than the one queried is now trusted only when the catalog's
+  records are JWS-signed against the queried domain's JWKS (`verify_signatures=True`)
+  — the default, resolver-independent off-domain anchor — or, opt-in via
+  `trust_dnssec_pointers=True`, when the pointer record is DNSSEC-validated (the
+  library's canonical `_check_dnssec`; trustworthy only with a validating resolver
+  over a secure path).
+  Otherwise the off-domain target is ignored and discovery falls back to the
+  queried domain's own TLS-bound `/.well-known/ai-catalog.json`. This prevents a
+  spoofed or injected pointer from redirecting discovery to a forged off-domain
+  catalog. **Catalogs served on the queried domain (or a subdomain) are
+  unaffected** — TLS already binds them to the domain, and DNSSEC is never
+  required. An off-domain catalog followed under `verify_signatures` has its JWS
+  signature as its *only* trust anchor, so records that do not verify are dropped
+  automatically (regardless of `require_signed`).
+- The ARD `ard_trust_foreign_publisher` warning now anchors on the host that
+  actually served the catalog over TLS (not the queried domain), so it fires
+  correctly on the DNS-pointer path — where it was previously a no-op.
+
+### Fixed
+
+- **A valid-but-empty catalog source no longer shadows a real catalog.** The
+  HTTP-index fallback cascade stopped on the first source that returned HTTP 200
+  even when it parsed to zero agents (`[] is not None`), so a stale/empty pointer
+  or an empty legacy index silently suppressed a good `ai-catalog.json` further
+  down the cascade. The cascade now returns the first *non-empty* source and
+  yields an empty result only when every responding source is empty.
+
+### Added
+
+- `AgentRecord.catalog_trust` surfaces the trust basis by which an ARD /
+  HTTP-index catalog was served: `tls_domain`, `dnssec`, or `jws`.
+- `discover(..., trust_dnssec_pointers=False)` — opt-in to following an off-domain
+  ARD catalog pointer that is DNSSEC-validated. Off by default; JWS
+  (`verify_signatures`) is the default resolver-independent off-domain anchor.
+
 ## [0.26.2] - 2026-07-06
 
 ### Fixed

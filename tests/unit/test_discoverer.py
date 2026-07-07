@@ -24,7 +24,7 @@ from dns_aid.core.discoverer import (
     discover,
     discover_at_fqdn,
 )
-from dns_aid.core.http_index import HttpIndexAgent
+from dns_aid.core.http_index import HttpIndexAgent, HttpIndexResult
 from dns_aid.core.models import AgentRecord, Protocol
 
 
@@ -127,7 +127,9 @@ class TestDiscover:
             return_value=[],
         ) as mock_http:
             result = await discover("example.com", use_http_index=True)
-            mock_http.assert_called_once_with("example.com", None, None)
+            mock_http.assert_called_once_with(
+                "example.com", None, None, verify_signatures=False, trust_dnssec_pointers=False
+            )
             assert result.domain == "example.com"
 
     @pytest.mark.asyncio
@@ -462,9 +464,9 @@ class TestDiscoverViaHttpIndex:
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_http_agents(self):
         with patch(
-            "dns_aid.core.discoverer.fetch_http_index_or_empty",
+            "dns_aid.core.discoverer.fetch_http_index_result_or_empty",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=HttpIndexResult(agents=[], served_host=None),
         ):
             agents = await _discover_via_http_index("example.com")
             assert agents == []
@@ -484,9 +486,9 @@ class TestDiscoverViaHttpIndex:
 
         with (
             patch(
-                "dns_aid.core.discoverer.fetch_http_index_or_empty",
+                "dns_aid.core.discoverer.fetch_http_index_result_or_empty",
                 new_callable=AsyncMock,
-                return_value=http_agents,
+                return_value=HttpIndexResult(agents=http_agents, served_host="example.com"),
             ),
             patch(
                 "dns_aid.core.discoverer._query_single_agent",
@@ -513,9 +515,9 @@ class TestDiscoverViaHttpIndex:
 
         with (
             patch(
-                "dns_aid.core.discoverer.fetch_http_index_or_empty",
+                "dns_aid.core.discoverer.fetch_http_index_result_or_empty",
                 new_callable=AsyncMock,
-                return_value=http_agents,
+                return_value=HttpIndexResult(agents=http_agents, served_host="example.com"),
             ),
             patch(
                 "dns_aid.core.discoverer._query_single_agent",
@@ -538,9 +540,9 @@ class TestDiscoverViaHttpIndex:
         ]
 
         with patch(
-            "dns_aid.core.discoverer.fetch_http_index_or_empty",
+            "dns_aid.core.discoverer.fetch_http_index_result_or_empty",
             new_callable=AsyncMock,
-            return_value=http_agents,
+            return_value=HttpIndexResult(agents=http_agents, served_host="example.com"),
         ):
             agents = await _discover_via_http_index("example.com")
             assert agents == []
@@ -555,9 +557,9 @@ class TestDiscoverViaHttpIndex:
         ]
 
         with patch(
-            "dns_aid.core.discoverer.fetch_http_index_or_empty",
+            "dns_aid.core.discoverer.fetch_http_index_result_or_empty",
             new_callable=AsyncMock,
-            return_value=http_agents,
+            return_value=HttpIndexResult(agents=http_agents, served_host="example.com"),
         ):
             agents = await _discover_via_http_index("example.com")
             assert agents == []
@@ -574,9 +576,9 @@ class TestDiscoverViaHttpIndex:
 
         with (
             patch(
-                "dns_aid.core.discoverer.fetch_http_index_or_empty",
+                "dns_aid.core.discoverer.fetch_http_index_result_or_empty",
                 new_callable=AsyncMock,
-                return_value=http_agents,
+                return_value=HttpIndexResult(agents=http_agents, served_host="example.com"),
             ),
             patch(
                 "dns_aid.core.discoverer._query_single_agent",
@@ -600,9 +602,9 @@ class TestDiscoverViaHttpIndex:
 
         with (
             patch(
-                "dns_aid.core.discoverer.fetch_http_index_or_empty",
+                "dns_aid.core.discoverer.fetch_http_index_result_or_empty",
                 new_callable=AsyncMock,
-                return_value=http_agents,
+                return_value=HttpIndexResult(agents=http_agents, served_host="example.com"),
             ),
             patch(
                 "dns_aid.core.discoverer._query_single_agent",
