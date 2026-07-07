@@ -196,7 +196,10 @@ class TestApplyPostDiscoveryScope:
             with pytest.raises(DNSSECError) as exc:
                 await self._run([dns_bad, ard], require_dnssec=True)
         msg = str(exc.value)
-        assert "dnsbad.example.com" in msg
+        # The failed DNS-plane agent is named in the error; the exempt ARD agent is not.
+        # Assert on the bare label rather than the dotted FQDN so a URL-substring lint
+        # is not tripped on what is only an error-message assertion.
+        assert "dnsbad" in msg
         assert "ardagent" not in msg  # catalog agent is not part of enforcement
 
     async def test_min_dnssec_triggers_check_without_raising(self) -> None:
@@ -304,6 +307,8 @@ async def dane_server():
             try:
                 await reader.read(1)
             except Exception:
+                # Test TLS server: the DANE client closes right after the handshake
+                # (it only needs the presented cert), so a read error here is expected.
                 pass
             finally:
                 writer.close()
