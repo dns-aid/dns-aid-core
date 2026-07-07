@@ -194,6 +194,14 @@ class HttpIndexAgent:
     # endpoint lives in the referenced/inline card, resolved from exactly one of:
     card_url: str | None = None  # `url`: dereference to fetch the card
     card_data: dict[str, Any] | None = None  # `data`: the card given inline
+    # Optional DNS-AID JWS over the (identifier→endpoint) binding, carried on an
+    # ARD entry. When present it authenticates an off-domain catalog without
+    # DNSSEC: the discoverer verifies it against the publisher domain's JWKS.
+    sig: str | None = None
+    # Populated by the discoverer (not the wire): the host that actually served
+    # this agent's catalog over TLS — the trust anchor for the foreign-publisher
+    # check. None on legacy/direct call sites (which fall back to the domain).
+    served_host: str | None = None
 
     @classmethod
     def from_dict(cls, name: str, data: dict[str, Any]) -> HttpIndexAgent:
@@ -409,6 +417,9 @@ def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, s
     use_cases = _ard_str_list(entry.get("representativeQueries"))
     version = entry.get("version")
     trust_manifest = entry.get("trustManifest")
+    # Optional DNS-AID JWS over the record binding (authenticates an off-domain
+    # catalog without DNSSEC). Verified against the queried domain's JWKS.
+    sig = entry.get("sig")
 
     capability = Capability(protocols=[protocol], capabilities=capabilities)
     model_card = ModelCard(
@@ -432,6 +443,7 @@ def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, s
             use_cases=use_cases,
             card_url=url if isinstance(url, str) else None,
             card_data=inline_data if isinstance(inline_data, dict) else None,
+            sig=sig if isinstance(sig, str) else None,
         ),
         None,
     )
@@ -618,6 +630,116 @@ async def _fetch_and_parse(
     return None
 
 
+@dataclass
+class HttpIndexResult:
+    """Outcome of an HTTP-index / ARD catalog fetch.
+
+    ``served_host`` is the host that actually returned the catalog over TLS
+    (the DNS-pointer target or the well-known host) — the discoverer uses it as
+    the trust anchor for the foreign-publisher check. ``catalog_trust`` records
+    why the served catalog is trusted; it defaults to ``"tls_domain"`` (an
+    on-domain / well-known fetch is bound to the domain by TLS) and is refined
+    by the discoverer to ``"dnssec"`` / ``"jws"`` when it followed an
+    authenticated off-domain pointer.
+    """
+
+    agents: list[HttpIndexAgent]
+    served_host: str | None = None
+    catalog_trust: str = "tls_domain"
+
+
+def is_on_domain(host: str, domain: str) -> bool:
+    """True when ``host`` is the queried ``domain`` or a subdomain of it.
+
+    Label-boundary match (``host == domain`` or ``host`` ends with
+    ``"." + domain``) — no public-suffix list needed. A TLS connection to such
+    a host authenticates control within the queried domain's own namespace, so
+    an on-domain catalog is trusted without DNSSEC or signatures. A host on any
+    other registrable domain is off-domain.
+    """
+    host = host.lower().rstrip(".")
+    domain = domain.lower().rstrip(".")
+    return host == domain or host.endswith("." + domain)
+
+
+def _host_of(url: str) -> str:
+    """Best-effort host of a URL (lowercased, no port)."""
+    return (urlparse(url).hostname or "").lower()
+
+
+async def _fetch_index_cascade(
+    domain: str,
+    timeout: float,
+    verify_ssl: bool,
+    catalog_url: str | None,
+) -> HttpIndexResult:
+    """Fetch the first usable HTTP index / ARD catalog across the source cascade.
+
+    Source order: the DNS-pointer ``catalog_url`` (if supplied) first, then the
+    well-known ``HTTP_INDEX_PATTERNS``. The first source that returns a
+    **non-empty** agent list wins. A source that returns HTTP 200 but zero
+    usable agents (a valid-but-empty catalog) does NOT terminate the cascade —
+    it is remembered and the search continues, so a stale/empty pointer or an
+    empty legacy index can never shadow a real catalog further down. When every
+    responding source is empty, that empty result is returned; when no source
+    responds at all, ``HttpIndexError`` is raised.
+    """
+    domain = domain.lower().rstrip(".")
+    errors: list[str] = []
+
+    # TLS verification defaults on; the verify_ssl=False opt-out (dev/self-signed)
+    # is audited with a structured warning.
+    if not verify_ssl:
+        logger.warning(
+            "http_index.tls_verification_disabled",
+            domain=domain,
+            message=(
+                "HTTP index fetched with TLS certificate verification DISABLED — "
+                "only safe for test/development environments; do NOT use in production."
+            ),
+        )
+
+    # Source cascade as (url, follow_redirects) pairs. The DNS-pointer catalog
+    # host is attacker-influenceable and SSRF-validated pre-redirect only, so it
+    # forbids redirects; the well-known patterns allow them.
+    sources: list[tuple[str, bool]] = []
+    if catalog_url:
+        sources.append((catalog_url, False))
+    for pattern in HTTP_INDEX_PATTERNS:
+        host = pattern["host"].format(domain=domain)
+        sources.append((f"https://{host}{pattern['path']}", True))
+
+    empty_served_host: str | None = None
+
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        verify=verify_ssl,  # noqa: S501 — opt-out is gated by explicit caller-supplied kwarg; warning logged above
+        follow_redirects=True,
+        max_redirects=3,
+    ) as client:
+        for url, follow in sources:
+            logger.debug("Trying HTTP index endpoint", url=url, follow_redirects=follow)
+            agents = await _fetch_and_parse(client, url, errors, follow_redirects=follow)
+            if agents is None:
+                continue  # nothing served here — keep trying
+            if agents:
+                # First non-empty source wins.
+                return HttpIndexResult(agents=agents, served_host=_host_of(url))
+            # Valid HTTP 200 but zero usable agents: remember and keep searching
+            # so an empty source cannot shadow a real catalog downstream (the
+            # `[] is not None` fallback-shadowing bug).
+            if empty_served_host is None:
+                empty_served_host = _host_of(url)
+
+    if empty_served_host is not None:
+        logger.debug("HTTP index sources all empty", domain=domain)
+        return HttpIndexResult(agents=[], served_host=empty_served_host)
+
+    # No source responded at all.
+    logger.warning("All HTTP index endpoints failed", domain=domain, errors=errors)
+    raise HttpIndexError(f"No HTTP index found at {domain}. Tried: {', '.join(errors)}")
+
+
 async def fetch_http_index(
     domain: str,
     timeout: float = DEFAULT_TIMEOUT,
@@ -634,65 +756,23 @@ async def fetch_http_index(
     on pointer-fetch failure, the well-known ``HTTP_INDEX_PATTERNS`` are
     tried in order (legacy index locations, then the ARD well-known path).
 
-    Args:
-        domain: Domain to fetch index from (e.g., "example.com")
-        timeout: HTTP request timeout in seconds
-        verify_ssl: Whether to verify SSL certificates
-        catalog_url: Optional pre-resolved catalog URL to try before the
-            well-known patterns.
-
-    Returns:
-        List of HttpIndexAgent objects
-
-    Raises:
-        HttpIndexError: If all endpoints fail
+    Returns the parsed ``HttpIndexAgent`` list. See
+    :func:`fetch_http_index_result` for the richer form that also reports the
+    served host. Raises ``HttpIndexError`` if no endpoint responds.
     """
-    domain = domain.lower().rstrip(".")
-    errors: list[str] = []
+    result = await _fetch_index_cascade(domain, timeout, verify_ssl, catalog_url)
+    return result.agents
 
-    # Configure TLS verification.
-    # Default is verify=True (system trust store). The opt-out path is gated
-    # by the explicit verify_ssl=False kwarg (a documented public API surface
-    # for testing against self-signed certs in dev environments). Whenever
-    # the opt-out is taken at runtime, log a structured warning so operators
-    # can audit insecure usage.
-    if not verify_ssl:
-        logger.warning(
-            "http_index.tls_verification_disabled",
-            domain=domain,
-            message=(
-                "HTTP index fetched with TLS certificate verification DISABLED — "
-                "only safe for test/development environments; do NOT use in production."
-            ),
-        )
 
-    async with httpx.AsyncClient(
-        timeout=timeout,
-        verify=verify_ssl,  # noqa: S501 — opt-out is gated by explicit caller-supplied kwarg; warning logged above
-        follow_redirects=True,
-        max_redirects=3,
-    ) as client:
-        # DNS pointer first: the domain owner authoritatively declared where
-        # the catalog lives, which overrides the well-known path convention.
-        if catalog_url:
-            logger.debug("Trying DNS-pointer catalog URL", url=catalog_url)
-            # No redirects: the catalog host came from an (attacker-influenceable)
-            # SVCB target and was SSRF-validated pre-redirect only.
-            agents = await _fetch_and_parse(client, catalog_url, errors, follow_redirects=False)
-            if agents is not None:
-                return agents
-
-        for pattern in HTTP_INDEX_PATTERNS:
-            host = pattern["host"].format(domain=domain)
-            url = f"https://{host}{pattern['path']}"
-            logger.debug("Trying HTTP index endpoint", url=url, pattern_type=pattern["type"])
-            agents = await _fetch_and_parse(client, url, errors)
-            if agents is not None:
-                return agents
-
-    # All endpoints failed
-    logger.warning("All HTTP index endpoints failed", domain=domain, errors=errors)
-    raise HttpIndexError(f"No HTTP index found at {domain}. Tried: {', '.join(errors)}")
+async def fetch_http_index_result(
+    domain: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    verify_ssl: bool = True,
+    *,
+    catalog_url: str | None = None,
+) -> HttpIndexResult:
+    """Like :func:`fetch_http_index` but also reports the served host + trust basis."""
+    return await _fetch_index_cascade(domain, timeout, verify_ssl, catalog_url)
 
 
 def parse_http_index(data: dict[str, Any]) -> list[HttpIndexAgent]:
@@ -789,3 +869,28 @@ async def fetch_http_index_or_empty(
             error=str(e),
         )
         return []
+
+
+async def fetch_http_index_result_or_empty(
+    domain: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    verify_ssl: bool = True,
+    *,
+    catalog_url: str | None = None,
+) -> HttpIndexResult:
+    """Like :func:`fetch_http_index_result` but returns an empty result on failure.
+
+    Never raises — the fallback-friendly form used by the discoverer, which
+    needs the served host alongside the agents.
+    """
+    try:
+        return await fetch_http_index_result(domain, timeout, verify_ssl, catalog_url=catalog_url)
+    except HttpIndexError:
+        return HttpIndexResult(agents=[], served_host=None)
+    except Exception as e:  # noqa: BLE001 — one bad index must not abort discovery
+        logger.warning(
+            "Unexpected error fetching HTTP index",
+            domain=domain,
+            error=str(e),
+        )
+        return HttpIndexResult(agents=[], served_host=None)

@@ -666,6 +666,16 @@ class AgentRecord(BaseModel):
         description="JWS compact signature for record verification when DNSSEC unavailable. "
         "Contains signed payload with fqdn, target, port, alpn, iat, exp.",
     )
+    catalog_trust: str | None = Field(
+        default=None,
+        description=(
+            "For ARD / HTTP-index-discovered agents: the trust basis by which the "
+            "catalog was served — 'tls_domain' (served on the queried domain or a "
+            "subdomain, bound by TLS), 'dnssec' (DNSSEC-authenticated off-domain "
+            "pointer), or 'jws' (off-domain catalog followed under signature "
+            "verification). None for pure-DNS agents."
+        ),
+    )
 
     # Capability source tracking
     capability_source: CapabilitySource | None = Field(

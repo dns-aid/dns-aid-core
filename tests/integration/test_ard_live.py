@@ -66,6 +66,12 @@ async def test_live_discover_via_library():
     assert all(a.endpoint_source == "ard_card" for a in result.agents), (
         "every ARD agent's card should be dereferenced to its real endpoint"
     )
+
+    # spec 008: the catalog is served on the queried domain, so the trust basis
+    # is TLS-to-domain (no off-domain pointer, no regression to the DNS plane).
+    assert all(a.catalog_trust == "tls_domain" for a in result.agents), (
+        "on-domain catalog must surface catalog_trust=tls_domain"
+    )
     billing = by_name["billing"]
     assert urlparse(billing.endpoint_url).hostname == "billing.highvelocitynetworking.com"
     assert "create_invoice" in billing.capabilities  # tools from the fetched card

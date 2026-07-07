@@ -27,14 +27,15 @@ import structlog
 
 from dns_aid.core.a2a_card import A2AAgentCard, fetch_agent_card
 from dns_aid.core.cap_fetcher import fetch_cap_document
-from dns_aid.core.catalog_pointer import resolve_catalog_pointer
+from dns_aid.core.catalog_pointer import PointerResolution, resolve_catalog_pointer_detail
 from dns_aid.core.filters import apply_filters
 from dns_aid.core.http_index import (
     HttpIndexAgent,
     _ard_domains_aligned,
     _ard_identity_domain,
     _name_from_urn,
-    fetch_http_index_or_empty,
+    fetch_http_index_result_or_empty,
+    is_on_domain,
 )
 from dns_aid.core.models import (
     AgentRecord,
@@ -70,11 +71,19 @@ async def _execute_discovery(
     query: str,
     *,
     allow_legacy: bool | None = None,
+    verify_signatures: bool = False,
+    trust_dnssec_pointers: bool = False,
 ) -> list[AgentRecord]:
     """Execute the appropriate discovery strategy and handle DNS errors."""
     try:
         if use_http_index:
-            return await _discover_via_http_index(domain, protocol, name)
+            return await _discover_via_http_index(
+                domain,
+                protocol,
+                name,
+                verify_signatures=verify_signatures,
+                trust_dnssec_pointers=trust_dnssec_pointers,
+            )
         elif name and protocol:
             agent = await _query_single_agent(domain, name, protocol, allow_legacy=allow_legacy)
             return [agent] if agent else []
@@ -140,6 +149,26 @@ async def _apply_post_discovery(
     return bool(per_agent_dnssec) and all(per_agent_dnssec.values())
 
 
+def _drop_unverified_off_domain(agents: list[AgentRecord], domain: str) -> list[AgentRecord]:
+    """Drop off-domain (JWS-trust) records whose signature did not verify.
+
+    An off-domain catalog is followed only because the caller opted into
+    ``verify_signatures``; unlike a DNS-plane record it has NO authoritative-DNS
+    trust basis, so its per-record JWS signature is the sole anchor. Records that
+    did not verify are dropped regardless of ``require_signed`` — enabling
+    ``verify_signatures`` alone must never surface an unverified off-domain
+    record. On-domain / DNSSEC / pure-DNS records (``catalog_trust`` in
+    {``tls_domain``, ``dnssec``, ``None``}) are unaffected.
+    """
+    kept = [
+        a for a in agents if not (a.catalog_trust == "jws" and a.signature_verified is not True)
+    ]
+    dropped = len(agents) - len(kept)
+    if dropped:
+        logger.info("sdk.dropped_unverified_off_domain", domain=domain, dropped=dropped)
+    return kept
+
+
 async def discover(
     domain: str,
     protocol: str | Protocol | None = None,
@@ -152,6 +181,7 @@ async def discover(
     use_http_index: bool = False,
     enrich_endpoints: bool = True,
     verify_signatures: bool = False,
+    trust_dnssec_pointers: bool = False,
     *,
     # Path A in-memory filter kwargs (FR-002, FR-021..FR-023). All optional; default
     # behavior is unchanged when none are passed.
@@ -187,7 +217,18 @@ async def discover(
         enrich_endpoints: If True (default), fetch ``.well-known/agent-card.json``
             from each discovered agent's host to resolve protocol-specific endpoint paths.
         verify_signatures: If True, verify JWS signatures. Implicit when ``require_signed``
-            is set so the trust filter has data to act on.
+            is set so the trust filter has data to act on. This is also the default
+            trust anchor for an *off-domain* ARD catalog pointer: a pointer to a
+            different registrable domain is followed when its catalog's records
+            JWS-verify against the queried domain's JWKS (resolver-independent).
+        trust_dnssec_pointers: Opt-in (default False). When True, an off-domain ARD
+            catalog pointer (``_catalog._agents`` / ``_index._agents`` whose target
+            is a different registrable domain) is also followed when the pointer
+            record is DNSSEC-validated. Off by default because the AD flag is only
+            trustworthy with a validating resolver over a secure path (localhost /
+            DoT / DoH) and following it redirects discovery to a foreign host —
+            enable only when you run such a resolver. On-domain pointers and JWS do
+            not require this.
         capabilities: All-of capability match. Empty list explicitly matches no records.
         capabilities_any: Any-of capability match. Empty list explicitly matches no records.
         auth_type: Case-insensitive exact match against ``agent.auth_type``.
@@ -261,7 +302,14 @@ async def discover(
     )
 
     agents = await _execute_discovery(
-        domain, protocol, name, use_http_index, query, allow_legacy=allow_legacy
+        domain,
+        protocol,
+        name,
+        use_http_index,
+        query,
+        allow_legacy=allow_legacy,
+        verify_signatures=verify_signatures,
+        trust_dnssec_pointers=trust_dnssec_pointers,
     )
 
     # Path A name filter — applied here, *before* enrichment, so we don't fetch
@@ -280,6 +328,12 @@ async def discover(
     )
     # Per-agent `dnssec_validated` is set inside _apply_post_discovery
     # when require_dnssec=True; no need to re-stamp at this level.
+
+    # Off-domain catalogs (catalog_trust=="jws") have their JWS signature as the
+    # sole trust anchor — drop any that did not verify even when require_signed
+    # is off, so verify_signatures alone can't surface an unverified off-domain
+    # record.
+    agents = _drop_unverified_off_domain(agents, domain)
 
     # Apply Path A in-memory filters (FR-002, FR-021..FR-023). When no filter kwargs are
     # set, ``apply_filters`` short-circuits and returns the input list unchanged.
@@ -1069,7 +1123,9 @@ def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> N
     # Preserve ARD trust manifest on DNS-discovered agents too — the
     # catalog is enriching an authoritative DNS answer.
     if http_agent.trust_manifest is not None and agent.trust_manifest is None:
-        agent.trust_manifest = _validated_trust_manifest(http_agent, agent.domain)
+        agent.trust_manifest = _validated_trust_manifest(
+            http_agent, http_agent.served_host or agent.domain
+        )
 
     if http_agent.endpoint and not agent.endpoint_override:
         parsed = urlparse(http_agent.endpoint)
@@ -1275,48 +1331,128 @@ async def _process_ard_agent(
     return record
 
 
+async def _pointer_dnssec_validated(pointer: PointerResolution) -> bool:
+    """True when the catalog pointer record is DNSSEC-authenticated.
+
+    Validates the pointer's OWN DNS name (``_catalog._agents`` /
+    ``_index._agents``) with the library's canonical AD-flag check
+    (``validator._check_dnssec``) — the same mechanism the pure-DNS
+    ``require_dnssec`` path uses. Trust model + precondition are identical: the
+    AD flag is trustworthy only with a validating resolver over a secured path
+    (localhost / DoT / DoH); otherwise this returns False and the off-domain
+    pointer is not trusted via DNSSEC (it may still be followed via JWS).
+    """
+    from dns_aid.core.validator import _check_dnssec
+
+    return await _check_dnssec(pointer.pointer_fqdn)
+
+
 async def _discover_via_http_index(
     domain: str,
     protocol: Protocol | None = None,
     name: str | None = None,
+    verify_signatures: bool = False,
+    trust_dnssec_pointers: bool = False,
 ) -> list[AgentRecord]:
     """
-    Discover agents using HTTP index endpoint.
+    Discover agents via an ARD catalog / HTTP index endpoint.
 
-    Fetches agent list from HTTP and resolves each via DNS SVCB.
-    Protocol and agent name are extracted from the FQDN in the HTTP index,
-    not from separate fields — the FQDN is the single source of truth.
+    Resolves the catalog location, applies the pointer trust decision, fetches
+    the catalog, and processes each entry (legacy entries resolve via their
+    FQDN; ARD entries via their card).
 
-    Args:
-        domain: Domain to fetch HTTP index from
-        protocol: Filter by protocol (or None for all)
-        name: Filter by specific agent name (or None for all)
-
-    Returns:
-        List of AgentRecord objects
+    Trust: a ``_catalog._agents`` / ``_index._agents`` DNS pointer whose target
+    is the queried domain (or a subdomain) is followed — TLS binds it to the
+    domain. A pointer to a *different* domain is followed only when
+    (``verify_signatures``) the catalog's records JWS-verify against the queried
+    domain's JWKS (unverified records are then dropped), or (``trust_dnssec_pointers``,
+    opt-in) the pointer record is DNSSEC-validated; otherwise it is ignored and
+    discovery falls back to the queried domain's own well-known catalog. JWS is
+    the default off-domain anchor (resolver-independent); DNSSEC-pointer trust is
+    opt-in because the AD flag is only trustworthy with a validating resolver over
+    a secure path. DNSSEC is never required for on-domain hosting.
     """
-    # DNS pointer first: if the domain publishes a _catalog._agents /
-    # _index._agents SVCB pointer, it authoritatively declares where its
-    # catalog lives — resolve it and fetch there before the well-known paths.
-    catalog_url = await resolve_catalog_pointer(domain)
-    http_agents = await fetch_http_index_or_empty(domain, catalog_url=catalog_url)
+    # Resolve the pointer (location + trust signals), then decide whether the
+    # declared catalog location may be trusted.
+    pointer = await resolve_catalog_pointer_detail(domain)
+    catalog_url: str | None = None
+    off_domain_trust: str | None = None
+    if pointer is not None:
+        if is_on_domain(pointer.target_host, domain):
+            catalog_url = pointer.url  # on-domain: TLS binds it to the queried domain
+        elif trust_dnssec_pointers and await _pointer_dnssec_validated(pointer):
+            # Off-domain, the caller opted into DNSSEC-pointer trust, AND the
+            # pointer record is DNSSEC-validated (validator._check_dnssec on the
+            # pointer's own name). Opt-in (default off): the AD flag is only
+            # trustworthy with a validating resolver over a secure path, and this
+            # follows an attacker-influenceable redirect to a foreign host.
+            catalog_url = pointer.url
+            off_domain_trust = "dnssec"
+            logger.info(
+                "catalog_pointer.off_domain_followed",
+                domain=domain,
+                target_host=pointer.target_host,
+                basis="dnssec",
+            )
+        elif verify_signatures:
+            # Off-domain: fetch it, but its records must JWS-verify against the
+            # queried domain's JWKS (checked in _apply_post_discovery); any that
+            # do not verify are dropped (_drop_unverified_off_domain).
+            catalog_url = pointer.url
+            off_domain_trust = "jws"
+            logger.info(
+                "catalog_pointer.off_domain_followed",
+                domain=domain,
+                target_host=pointer.target_host,
+                basis="jws",
+            )
+        else:
+            logger.info(
+                "catalog_pointer.off_domain_untrusted",
+                domain=domain,
+                target_host=pointer.target_host,
+                message=(
+                    "off-domain catalog pointer is not JWS-authenticated (and "
+                    "DNSSEC-pointer trust is not enabled); ignoring it and falling "
+                    "back to the on-domain well-known catalog"
+                ),
+            )
+
+    result = await fetch_http_index_result_or_empty(domain, catalog_url=catalog_url)
+    http_agents = result.agents
+    served_host = result.served_host or domain
+
+    # Trust basis. An off-domain follow (dnssec/jws) holds only if a genuine
+    # off-domain host actually served. If the fetch fell through to the
+    # on-domain well-known path (served host is the domain or a subdomain), the
+    # served catalog is TLS-bound to the queried domain. An unknown/empty served
+    # host under an off-domain follow is treated as off-domain — fail closed, so
+    # an unverified off-domain record can never surface as tls_domain.
+    sh = result.served_host
+    if off_domain_trust and (not sh or not is_on_domain(sh, domain)):
+        catalog_trust = off_domain_trust
+    else:
+        catalog_trust = "tls_domain"
 
     if not http_agents:
         logger.debug("No agents found in HTTP index", domain=domain)
         return []
 
+    # Anchor the foreign-publisher trust check on the host that actually served
+    # the catalog over TLS (not the query domain) by stamping it on each entry.
+    for ha in http_agents:
+        ha.served_host = served_host
+
     logger.debug(
         "HTTP index fetched",
         domain=domain,
         agent_count=len(http_agents),
+        served_host=served_host,
+        catalog_trust=catalog_trust,
     )
 
     # Mirror the DNS-index path's concurrency pattern: cap fan-out with a
-    # Semaphore and dispatch via asyncio.gather. Per-agent processing is
-    # independent (each call does its own SVCB+cap+TXT chain), so the
-    # sequential for-loop here was a real performance asymmetry vs
-    # _discover_agents_in_zone — for N agents on cold DNS/HTTPS caches it
-    # multiplied latency by ~N. Same Semaphore(20) cap as the DNS path.
+    # Semaphore and dispatch via asyncio.gather.
     sem = asyncio.Semaphore(20)
 
     async def _process_with_sem(ha: HttpIndexAgent) -> AgentRecord | None:
@@ -1325,7 +1461,11 @@ async def _discover_via_http_index(
 
     tasks = [_process_with_sem(ha) for ha in http_agents]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    return _collect_agent_results(results)
+    records = _collect_agent_results(results)
+    # Surface the trust basis by which the catalog was served (FR-009).
+    for rec in records:
+        rec.catalog_trust = catalog_trust
+    return records
 
 
 def _http_agent_to_record(
@@ -1396,7 +1536,12 @@ def _http_agent_to_record(
         use_cases=list(http_agent.use_cases),
         endpoint_override=http_agent.endpoint,
         endpoint_source="http_index_fallback",
-        trust_manifest=_validated_trust_manifest(http_agent, domain) if is_ard else None,
+        sig=http_agent.sig,
+        trust_manifest=(
+            _validated_trust_manifest(http_agent, http_agent.served_host or domain)
+            if is_ard
+            else None
+        ),
     )
 
 

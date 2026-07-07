@@ -13,9 +13,11 @@ from dns_aid.core.http_index import (
     Capability,
     HttpIndexAgent,
     HttpIndexError,
+    HttpIndexResult,
     ModelCard,
     fetch_http_index,
     fetch_http_index_or_empty,
+    fetch_http_index_result,
     parse_http_index,
 )
 
@@ -327,6 +329,33 @@ class TestFetchHttpIndex:
         with patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=mock_client):
             with pytest.raises(HttpIndexError):
                 await fetch_http_index("example.com")
+
+
+class TestFetchIndexResultCascade:
+    """spec 008 (①) — the fallback cascade must not stop on a valid-but-empty source."""
+
+    @pytest.mark.asyncio
+    async def test_empty_source_does_not_shadow_later_nonempty(self):
+        # First source returns HTTP 200 with zero agents; a later source has one.
+        # Under the old `[] is not None` logic the empty source shadowed the rest.
+        mock_client = _streaming_client(
+            _stream_response({}),  # 200, parses to zero agents
+            _stream_response({"booking": {"location": {"fqdn": "booking.example.com"}}}),
+        )
+        with patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=mock_client):
+            result = await fetch_http_index_result("example.com")
+        assert [a.name for a in result.agents] == ["booking"]
+        assert mock_client.stream.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_all_sources_empty_returns_empty_result(self):
+        # Every source responds but is empty → an empty result, not a hard error
+        # (and not a shadowed non-existent catalog).
+        mock_client = _streaming_client(*[_stream_response({}) for _ in range(5)])
+        with patch("dns_aid.core.http_index.httpx.AsyncClient", return_value=mock_client):
+            result = await fetch_http_index_result("example.com")
+        assert result.agents == []
+        assert result.served_host is not None
 
 
 class TestFetchHttpIndexOrEmpty:
@@ -969,9 +998,13 @@ class TestArdFetchEndToEnd:
         )
         http_agents = parse_http_index(_ard_catalog([entry]))
         with (
-            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(
+                disc,
+                "fetch_http_index_result_or_empty",
+                AsyncMock(return_value=HttpIndexResult(agents=http_agents, served_host=None)),
+            ),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
-            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer_detail", AsyncMock(return_value=None)),
             patch.object(
                 disc, "fetch_cap_document", AsyncMock(return_value=None)
             ),  # card unfetchable
@@ -1010,8 +1043,12 @@ class TestArdFetchEndToEnd:
             raw_data={"endpoint": "https://weather.acme.com/mcp", "tools": [{"name": "forecast"}]}
         )
         with (
-            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
-            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(
+                disc,
+                "fetch_http_index_result_or_empty",
+                AsyncMock(return_value=HttpIndexResult(agents=http_agents, served_host=None)),
+            ),
+            patch.object(disc, "resolve_catalog_pointer_detail", AsyncMock(return_value=None)),
             patch.object(disc, "fetch_cap_document", AsyncMock(return_value=card_doc)),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=dns_record)) as qsa,
         ):
@@ -1030,9 +1067,13 @@ class TestArdFetchEndToEnd:
 
         http_agents = parse_http_index(_ard_catalog([_ard_agent_entry()]))  # mcp agent
         with (
-            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(
+                disc,
+                "fetch_http_index_result_or_empty",
+                AsyncMock(return_value=HttpIndexResult(agents=http_agents, served_host=None)),
+            ),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
-            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer_detail", AsyncMock(return_value=None)),
         ):
             records = await disc._discover_via_http_index("acme.com", protocol=Protocol.A2A)
         assert records == []
@@ -1062,9 +1103,13 @@ class TestArdCardDereference:
             }
         )
         with (
-            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(
+                disc,
+                "fetch_http_index_result_or_empty",
+                AsyncMock(return_value=HttpIndexResult(agents=http_agents, served_host=None)),
+            ),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
-            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer_detail", AsyncMock(return_value=None)),
             patch.object(disc, "fetch_cap_document", AsyncMock(return_value=card_doc)) as fc,
         ):
             records = await disc._discover_via_http_index("acme.com")
@@ -1099,9 +1144,13 @@ class TestArdCardDereference:
             }
         )
         with (
-            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(
+                disc,
+                "fetch_http_index_result_or_empty",
+                AsyncMock(return_value=HttpIndexResult(agents=http_agents, served_host=None)),
+            ),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
-            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer_detail", AsyncMock(return_value=None)),
             patch.object(disc, "fetch_cap_document", AsyncMock(return_value=card_doc)),
         ):
             records = await disc._discover_via_http_index("acme.com")
@@ -1117,9 +1166,13 @@ class TestArdCardDereference:
         entry = _ard_agent_entry(capabilities=["invoicing"])
         http_agents = parse_http_index(_ard_catalog([entry]))
         with (
-            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(
+                disc,
+                "fetch_http_index_result_or_empty",
+                AsyncMock(return_value=HttpIndexResult(agents=http_agents, served_host=None)),
+            ),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
-            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer_detail", AsyncMock(return_value=None)),
             patch.object(disc, "fetch_cap_document", AsyncMock(return_value=None)),  # fetch fails
         ):
             records = await disc._discover_via_http_index("acme.com")
@@ -1150,9 +1203,13 @@ class TestArdCardDereference:
         }
         http_agents = parse_http_index(_ard_catalog([entry]))
         with (
-            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
+            patch.object(
+                disc,
+                "fetch_http_index_result_or_empty",
+                AsyncMock(return_value=HttpIndexResult(agents=http_agents, served_host=None)),
+            ),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=None)),
-            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(disc, "resolve_catalog_pointer_detail", AsyncMock(return_value=None)),
             patch.object(disc, "fetch_cap_document", AsyncMock()) as fc,
         ):
             records = await disc._discover_via_http_index("acme.com")
@@ -1184,8 +1241,12 @@ class TestArdCardDereference:
         )
         decoy = object()  # what a DNS lookup would return — must never be used
         with (
-            patch.object(disc, "fetch_http_index_or_empty", AsyncMock(return_value=http_agents)),
-            patch.object(disc, "resolve_catalog_pointer", AsyncMock(return_value=None)),
+            patch.object(
+                disc,
+                "fetch_http_index_result_or_empty",
+                AsyncMock(return_value=HttpIndexResult(agents=http_agents, served_host=None)),
+            ),
+            patch.object(disc, "resolve_catalog_pointer_detail", AsyncMock(return_value=None)),
             patch.object(disc, "fetch_cap_document", AsyncMock(return_value=card_doc)),
             patch.object(disc, "_query_single_agent", AsyncMock(return_value=decoy)) as qsa,
         ):

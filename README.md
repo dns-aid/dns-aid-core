@@ -87,6 +87,11 @@ for agent in agents:
 # Discover via HTTP index (ANS-compatible, richer metadata) — also auto-detects
 # and dereferences ARD ai-catalogs (see docs/ard-catalog.md)
 agents = await dns_aid.discover("example.com", use_http_index=True)
+# (0.26.3+) A catalog on your own domain needs nothing. An off-domain catalog
+# pointer is trusted only via per-record JWS (verify_signatures=True) or, opt-in,
+# a DNSSEC-validated pointer (trust_dnssec_pointers=True) — otherwise it is ignored
+# and discovery falls back to the on-domain catalog. The trust basis is surfaced as
+# AgentRecord.catalog_trust (tls_domain | dnssec | jws). See docs/ard-catalog.md.
 
 # Filtered discovery — pure-Python predicates over the in-memory result (v0.19.0+)
 result = await dns_aid.discover(

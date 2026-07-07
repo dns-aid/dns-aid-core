@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+from dataclasses import dataclass
 
 import dns.asyncresolver
 import dns.resolver
@@ -73,6 +74,29 @@ _MAX_POINTER_RECORDS = 4
 # getaddrinfo with no timeout of its own; bound it so a slow/blackholed
 # authoritative server for the target host can't stall discovery.
 _VALIDATE_TIMEOUT = 3.0
+
+
+@dataclass(frozen=True)
+class PointerResolution:
+    """Resolved catalog pointer: catalog URL, SVCB target host, pointer FQDN.
+
+    ``url`` is the catalog URL to fetch; ``target_host`` is the SVCB target
+    (the host that will serve the catalog), compared against the queried domain
+    to decide on-domain vs off-domain; ``pointer_fqdn`` is the DNS name that
+    carried the pointer (``_catalog._agents.{domain}`` or
+    ``_index._agents.{domain}``), which the caller DNSSEC-validates (via the
+    library's canonical ``validator._check_dnssec``) before trusting an
+    off-domain redirection.
+
+    DNSSEC authentication of the pointer inherits the library-wide model: the AD
+    flag is trustworthy only with a validating resolver over a secured path
+    (localhost / DoT / DoH). This resolution step performs NO trust decision — it
+    only reports the location; the caller decides.
+    """
+
+    url: str
+    target_host: str
+    pointer_fqdn: str
 
 
 async def _resolve_svcb(
@@ -117,18 +141,19 @@ def _read_wellknown_filename(rdata: object) -> str | None:
         return None
 
 
-async def resolve_catalog_pointer(
+async def resolve_catalog_pointer_detail(
     domain: str, *, timeout: float = DEFAULT_RESOLVE_TIMEOUT
-) -> str | None:
-    """Resolve a domain's ARD catalog URL from its DNS pointer records.
+) -> PointerResolution | None:
+    """Resolve a domain's ARD catalog pointer to a URL + SVCB target host.
 
     Tries ``_catalog._agents.{domain}`` then ``_index._agents.{domain}``
-    SVCB and, on the first ServiceMode answer with a usable target, returns
-    ``https://{target}/.well-known/{filename}``. Returns ``None`` when no
-    pointer is published (the caller then falls back to well-known probing).
+    SVCB and, on the first ServiceMode answer with a usable target, returns a
+    :class:`PointerResolution` (catalog URL + target host). Returns ``None`` when
+    no pointer is published (the caller then falls back to well-known probing).
 
-    Location discovery only — the returned URL is fetched and format-detected
-    by the caller; nothing about the catalog's contents is trusted here.
+    Location discovery only — nothing about the catalog's *contents* or its DNS
+    authentication is trusted here (a bare stub-resolver AD flag is forgeable);
+    trusted off-domain hosting is gated on per-record JWS by the caller.
     """
     domain = domain.lower().rstrip(".")
     resolver = dns.asyncresolver.Resolver()
@@ -195,9 +220,28 @@ async def resolve_catalog_pointer(
                     error=str(e),
                 )
                 continue
-            logger.info("catalog_pointer.resolved", domain=domain, label=label, url=url)
-            return url
+            logger.info(
+                "catalog_pointer.resolved",
+                domain=domain,
+                label=label,
+                url=url,
+            )
+            return PointerResolution(url=url, target_host=target, pointer_fqdn=fqdn)
     return None
+
+
+async def resolve_catalog_pointer(
+    domain: str, *, timeout: float = DEFAULT_RESOLVE_TIMEOUT
+) -> str | None:
+    """Resolve a domain's ARD catalog URL from its DNS pointer records.
+
+    Back-compatible location-only wrapper over
+    :func:`resolve_catalog_pointer_detail`: returns just the catalog URL (or
+    ``None``). Callers that need the trust signals (target host, DNSSEC AD)
+    should use the detail form.
+    """
+    detail = await resolve_catalog_pointer_detail(domain, timeout=timeout)
+    return detail.url if detail else None
 
 
 async def _existing_svcb_target(backend: DNSBackend, zone: str, name: str) -> str | None:
