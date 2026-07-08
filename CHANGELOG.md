@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.7] - 2026-07-08
+
+### Fixed
+
+- **Concurrent SSRF validations to the same host could be spuriously blocked under
+  load** — a regression surfaced by the 0.26.6 concurrency fix. `validate_fetch_url_async`
+  offloaded the blocking `getaddrinfo` via `asyncio.to_thread`, which shares the event
+  loop's default thread pool (`min(32, cpu+4)` workers) with all other offloaded work.
+  On a low-core host a wide discovery fan-out (e.g. 8 ARD capability-document fetches)
+  queued the excess validations, and the queue wait counted against the 3s timeout —
+  so the last-queued URLs timed out and surfaced as `UnsafeURLError` ("blocked by SSRF
+  protection"), even though they resolve to the same public host as their siblings.
+  Failed safe (the affected agents fell back to catalog-level data), but noisy and
+  wrong. SSRF resolution now runs on a **dedicated, generously-sized thread pool**
+  (32 workers, override with `DNS_AID_SSRF_RESOLVER_THREADS`) so concurrent validations
+  don't queue behind each other, and the per-call timeout is raised to 5s for headroom
+  against a slow-but-legitimate resolver (e.g. an AF_UNSPEC A+AAAA lookup with a slow
+  IPv6 leg). SSRF policy is unchanged.
+
 ## [0.26.6] - 2026-07-08
 
 ### Fixed

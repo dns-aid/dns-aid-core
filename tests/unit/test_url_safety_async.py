@@ -61,3 +61,28 @@ async def test_concurrency_not_serialized(monkeypatch: pytest.MonkeyPatch) -> No
     await asyncio.gather(*[validate_fetch_url_async(f"https://example.com/{i}") for i in range(6)])
     elapsed = time.perf_counter() - start
     assert elapsed < 1.0, f"fan-out serialized ({elapsed:.2f}s); expected concurrent (<1s)"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_host_all_consistent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: under the previous wrapper, concurrent validations shared the event
+    # loop's default thread pool (min(32, cpu+4)); a wide fan-out on a slow resolver
+    # queued the excess, and the queue wait counted against the per-call timeout — so
+    # the last-queued URLs for the SAME host spuriously "timed out" (surfacing as an
+    # SSRF block) while their siblings passed. The dedicated resolver pool must run
+    # them independently: fire more validations than a low-core default pool would
+    # admit at once and assert every one resolves identically — none blocked purely
+    # for losing a thread-pool slot.
+    def slow(*a: object, **k: object) -> list:
+        time.sleep(0.3)
+        return _PUBLIC
+
+    monkeypatch.setattr(url_safety.socket, "getaddrinfo", slow)
+    n = 24
+    urls = [f"https://same-host.example.com/{i}" for i in range(n)]
+    results = await asyncio.gather(
+        *(validate_fetch_url_async(u) for u in urls), return_exceptions=True
+    )
+    blocked = [r for r in results if isinstance(r, BaseException)]
+    assert not blocked, f"{len(blocked)}/{n} spuriously blocked under concurrency: {blocked[:2]}"
+    assert results == urls
