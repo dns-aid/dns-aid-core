@@ -80,7 +80,7 @@ class TestFetch:
 
         evaluator = PolicyEvaluator(cache_ttl=300)
         with patch(
-            "dns_aid.sdk.policy.evaluator.validate_fetch_url",
+            "dns_aid.utils.url_safety.validate_fetch_url",
             return_value="https://example.com/policy.json",
         ):
             with patch("dns_aid.sdk.policy.evaluator.httpx.AsyncClient") as mock_client_cls:
@@ -102,7 +102,7 @@ class TestFetch:
     async def test_fetch_ssrf_blocked(self) -> None:
         evaluator = PolicyEvaluator()
         with patch(
-            "dns_aid.sdk.policy.evaluator.validate_fetch_url",
+            "dns_aid.utils.url_safety.validate_fetch_url",
             side_effect=ValueError("SSRF blocked"),
         ):
             with pytest.raises(ValueError, match="SSRF blocked"):
@@ -114,7 +114,7 @@ class TestFetch:
 
         evaluator = PolicyEvaluator()
         with patch(
-            "dns_aid.sdk.policy.evaluator.validate_fetch_url",
+            "dns_aid.utils.url_safety.validate_fetch_url",
             return_value="https://example.com/policy.json",
         ):
             with patch("dns_aid.sdk.policy.evaluator.httpx.AsyncClient") as mock_client_cls:
@@ -135,7 +135,7 @@ class TestFetch:
     async def test_fetch_wrong_content_type(self) -> None:
         evaluator = PolicyEvaluator()
         with patch(
-            "dns_aid.sdk.policy.evaluator.validate_fetch_url",
+            "dns_aid.utils.url_safety.validate_fetch_url",
             return_value="https://example.com/policy.json",
         ):
             with patch("dns_aid.sdk.policy.evaluator.httpx.AsyncClient") as mock_client_cls:
@@ -173,7 +173,7 @@ class TestFetch:
         body = new_doc.model_dump_json()
 
         with patch(
-            "dns_aid.sdk.policy.evaluator.validate_fetch_url",
+            "dns_aid.utils.url_safety.validate_fetch_url",
             return_value="https://example.com/p.json",
         ):
             with patch("dns_aid.sdk.policy.evaluator.httpx.AsyncClient") as mock_client_cls:
@@ -211,7 +211,7 @@ class TestFetch:
 
         evaluator = PolicyEvaluator(cache_ttl=300)
         with patch(
-            "dns_aid.sdk.policy.evaluator.validate_fetch_url",
+            "dns_aid.utils.url_safety.validate_fetch_url",
             return_value="https://example.com/p.json",
         ):
             with patch("dns_aid.sdk.policy.evaluator.httpx.AsyncClient") as mock_client_cls:

@@ -1771,9 +1771,9 @@ async def _fetch_agent_json_auth(host: str, timeout: float = 5.0) -> dict | None
     url = f"https://{host}/.well-known/agent.json"
 
     try:
-        from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url
+        from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
 
-        validate_fetch_url(url)
+        await validate_fetch_url_async(url)
     except UnsafeURLError:
         return None
 

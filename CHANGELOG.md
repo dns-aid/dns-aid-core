@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.6] - 2026-07-08
+
+### Fixed
+
+- **A blocking `socket.getaddrinfo` in `validate_fetch_url` froze the event loop,
+  silently serializing concurrent SSRF-validated fetches.** The SSRF IP check is a
+  synchronous, un-timed `getaddrinfo`; called directly from the async fetch paths it
+  stalled the single-threaded event loop for each resolution, turning `asyncio.gather`
+  fan-outs (ARD capability-document dereference, agent-card / JWKS / policy-document /
+  OAuth-discovery fetches) into an accidental serial queue — e.g. an 8-agent ARD
+  catalog spent ~16s resolving one host after another that a real concurrent fan-out
+  finishes in ~3s. The seven direct async callers now offload validation through a new
+  `validate_fetch_url_async` (worker thread + bounded timeout); `catalog_pointer` —
+  which already offloaded inline — is refactored onto the same helper. SSRF policy is
+  unchanged (public passes; private / loopback / link-local / reserved / timeout fail
+  closed). The synchronous `validate_fetch_url` is retained unchanged for sync callers.
+
 ## [0.26.5] - 2026-07-08
 
 ### Added

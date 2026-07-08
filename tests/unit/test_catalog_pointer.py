@@ -55,7 +55,7 @@ class TestResolveCatalogPointer:
     def _bypass_ssrf(self):
         # These tests exercise resolution logic with unresolvable mock hosts;
         # bypass the SSRF/DNS guard here (its own behavior is tested below).
-        with patch("dns_aid.core.catalog_pointer.validate_fetch_url", side_effect=lambda u: u):
+        with patch("dns_aid.utils.url_safety.validate_fetch_url", side_effect=lambda u: u):
             yield
 
     @pytest.mark.asyncio
@@ -157,7 +157,7 @@ class TestResolveSsrf:
                 return_value=_resolver_returning(mapping),
             ),
             patch(
-                "dns_aid.core.catalog_pointer.validate_fetch_url",
+                "dns_aid.utils.url_safety.validate_fetch_url",
                 side_effect=UnsafeURLError("resolves to non-public IP 169.254.169.254"),
             ),
         ):
@@ -184,7 +184,7 @@ class TestResolveSsrf:
                 "dns_aid.core.catalog_pointer.dns.asyncresolver.Resolver",
                 return_value=_resolver_returning(mapping),
             ),
-            patch("dns_aid.core.catalog_pointer.validate_fetch_url", side_effect=_count),
+            patch("dns_aid.utils.url_safety.validate_fetch_url", side_effect=_count),
         ):
             assert await resolve_catalog_pointer("evil.com") is None
         assert calls["n"] <= _MAX_POINTER_RECORDS
@@ -208,7 +208,7 @@ class TestResolveSsrf:
                 "dns_aid.core.catalog_pointer.dns.asyncresolver.Resolver",
                 return_value=_resolver_returning(mapping),
             ),
-            patch("dns_aid.core.catalog_pointer.validate_fetch_url", side_effect=_guard),
+            patch("dns_aid.utils.url_safety.validate_fetch_url", side_effect=_guard),
         ):
             url = await resolve_catalog_pointer("acme.com")
         assert url == "https://idx.acme.com/.well-known/ai-catalog.json"

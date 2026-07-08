@@ -10,6 +10,7 @@ requests to private/loopback/link-local IP addresses.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 import socket
@@ -109,6 +110,32 @@ def validate_fetch_url(url: str) -> str:
             )
 
     return url
+
+
+# Per-URL SSRF-validation time budget for the async wrapper. ``validate_fetch_url``
+# does a blocking ``socket.getaddrinfo`` with no timeout of its own; bound it so a
+# slow/blackholed authoritative server for the target host can't stall a caller.
+_DEFAULT_VALIDATE_TIMEOUT = 3.0
+
+
+async def validate_fetch_url_async(url: str, *, timeout: float = _DEFAULT_VALIDATE_TIMEOUT) -> str:
+    """Async, non-loop-blocking wrapper around :func:`validate_fetch_url`.
+
+    ``validate_fetch_url`` performs a blocking ``socket.getaddrinfo`` (the SSRF IP
+    check) with no timeout of its own. Called directly from a coroutine it freezes
+    the whole event loop for the resolution's duration, serializing any concurrent
+    ``asyncio.gather`` fan-out. This offloads the full validation to a worker thread
+    under a bounded timeout so concurrent fetches stay concurrent.
+
+    Raises:
+        UnsafeURLError: the URL failed SSRF validation, or resolution exceeded
+            ``timeout`` (fail-closed — a slow/blackholed host is treated as unsafe
+            rather than fetched).
+    """
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(validate_fetch_url, url), timeout)
+    except TimeoutError as exc:
+        raise UnsafeURLError(f"SSRF validation timed out after {timeout}s: {url}") from exc
 
 
 class ResponseTooLargeError(ValueError):

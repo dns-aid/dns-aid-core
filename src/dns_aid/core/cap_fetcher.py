@@ -165,9 +165,9 @@ async def fetch_cap_document(
 
     # SSRF protection: validate URL before fetching
     try:
-        from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url
+        from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
 
-        validate_fetch_url(cap_uri)
+        await validate_fetch_url_async(cap_uri)
     except UnsafeURLError as e:
         logger.warning("Cap URI blocked by SSRF protection", cap_uri=cap_uri, error=str(e))
         return None

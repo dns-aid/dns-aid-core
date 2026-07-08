@@ -365,11 +365,11 @@ async def fetch_jwks(domain: str) -> dict[str, Any] | None:
         ResponseTooLargeError,
         UnsafeURLError,
         safe_fetch_bytes,
-        validate_fetch_url,
+        validate_fetch_url_async,
     )
 
     try:
-        validate_fetch_url(url)
+        await validate_fetch_url_async(url)
     except UnsafeURLError as e:
         logger.warning("JWKS URL blocked by SSRF protection", domain=domain, error=str(e))
         return None

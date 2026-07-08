@@ -32,7 +32,6 @@ auto-detects the ARD format). No catalog content is trusted here.
 
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 from dataclasses import dataclass
 
@@ -43,7 +42,7 @@ import structlog
 from dns_aid.backends.base import DNSBackend
 from dns_aid.core.models import SVCB_SERVICE_MODE
 from dns_aid.core.publisher import get_default_backend
-from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url
+from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
 from dns_aid.utils.validation import (
     validate_no_underscore_in_target,
     validate_svcparam_value,
@@ -199,9 +198,7 @@ async def resolve_catalog_pointer_detail(
             # time — a limitation shared with all validate_fetch_url callers, to
             # be closed globally by a pinned-IP transport.
             try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(validate_fetch_url, url), timeout=_VALIDATE_TIMEOUT
-                )
+                await validate_fetch_url_async(url, timeout=_VALIDATE_TIMEOUT)
             except UnsafeURLError as e:
                 logger.warning(
                     "catalog_pointer.unsafe_target",

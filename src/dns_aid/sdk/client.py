@@ -43,7 +43,7 @@ from dns_aid.sdk.protocols.mcp import MCPProtocolHandler
 from dns_aid.sdk.search import SearchResponse
 from dns_aid.sdk.signals.collector import SignalCollector
 from dns_aid.sdk.telemetry.otel import TelemetryManager
-from dns_aid.utils.url_safety import UnsafeURLError, redact_url_for_log, validate_fetch_url
+from dns_aid.utils.url_safety import UnsafeURLError, redact_url_for_log, validate_fetch_url_async
 
 
 class _OTELInvocationContext:
@@ -891,7 +891,7 @@ class AgentClient:
             )
 
         try:
-            validated_base = validate_fetch_url(directory_base)
+            validated_base = await validate_fetch_url_async(directory_base)
         except UnsafeURLError as exc:
             # The URL failed validation — it might be ``https://user:pass@host``,
             # malformed scheme, or pointing at a private IP. Whatever the reason,

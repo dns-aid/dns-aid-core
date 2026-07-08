@@ -258,9 +258,9 @@ async def fetch_agent_card(
 
     # SSRF protection: validate URL before fetching
     try:
-        from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url
+        from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
 
-        validate_fetch_url(card_url)
+        await validate_fetch_url_async(card_url)
     except UnsafeURLError as e:
         logger.warning("Agent Card URL blocked by SSRF protection", url=card_url, error=str(e))
         return None

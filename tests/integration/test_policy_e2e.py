@@ -60,7 +60,7 @@ def _allow_localhost_http():
         return original(url) if original else url
 
     with (
-        patch("dns_aid.sdk.policy.evaluator.validate_fetch_url", side_effect=_test_validate),
+        patch("dns_aid.utils.url_safety.validate_fetch_url", side_effect=_test_validate),
         patch("dns_aid.utils.url_safety.validate_fetch_url", side_effect=_test_validate),
     ):
         yield
