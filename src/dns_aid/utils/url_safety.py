@@ -11,6 +11,7 @@ requests to private/loopback/link-local IP addresses.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import ipaddress
 import os
 import socket
@@ -115,7 +116,31 @@ def validate_fetch_url(url: str) -> str:
 # Per-URL SSRF-validation time budget for the async wrapper. ``validate_fetch_url``
 # does a blocking ``socket.getaddrinfo`` with no timeout of its own; bound it so a
 # slow/blackholed authoritative server for the target host can't stall a caller.
-_DEFAULT_VALIDATE_TIMEOUT = 3.0
+# Sized with headroom for a resolver that is slow-but-legitimate under concurrent
+# load (e.g. an AF_UNSPEC A+AAAA lookup with a slow IPv6 leg).
+_DEFAULT_VALIDATE_TIMEOUT = 5.0
+
+# Dedicated thread pool for the (blocking) SSRF DNS resolution. ``asyncio.to_thread``
+# shares the event loop's default executor (``min(32, cpu+4)`` workers) with every
+# other offloaded call; on a low-core host a wide discovery fan-out queues
+# validations behind each other, and that queue wait counts against the timeout
+# above — so the last-queued URLs spuriously time out (surfacing as an SSRF block)
+# even though they resolve to the same public host as their siblings. A dedicated,
+# generously-sized pool removes that cross-call queueing, so the timeout bounds only
+# the actual resolution. getaddrinfo is I/O-bound (the thread just waits), so a wide
+# pool is cheap. Override the width with ``DNS_AID_SSRF_RESOLVER_THREADS``.
+_SSRF_RESOLVER_THREADS = max(1, int(os.environ.get("DNS_AID_SSRF_RESOLVER_THREADS", "32")))
+_resolver_pool: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_resolver_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """Lazily create the process-wide SSRF-resolution thread pool."""
+    global _resolver_pool
+    if _resolver_pool is None:
+        _resolver_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_SSRF_RESOLVER_THREADS, thread_name_prefix="dns-aid-ssrf"
+        )
+    return _resolver_pool
 
 
 async def validate_fetch_url_async(url: str, *, timeout: float = _DEFAULT_VALIDATE_TIMEOUT) -> str:
@@ -124,16 +149,22 @@ async def validate_fetch_url_async(url: str, *, timeout: float = _DEFAULT_VALIDA
     ``validate_fetch_url`` performs a blocking ``socket.getaddrinfo`` (the SSRF IP
     check) with no timeout of its own. Called directly from a coroutine it freezes
     the whole event loop for the resolution's duration, serializing any concurrent
-    ``asyncio.gather`` fan-out. This offloads the full validation to a worker thread
-    under a bounded timeout so concurrent fetches stay concurrent.
+    ``asyncio.gather`` fan-out. This offloads the validation to a **dedicated** thread
+    pool (not the shared default executor, which would re-serialize a wide fan-out on
+    a low-core host) under a bounded timeout, so concurrent validations — to the same
+    or different hosts — stay independent and none is spuriously blocked for losing a
+    thread-pool slot.
 
     Raises:
         UnsafeURLError: the URL failed SSRF validation, or resolution exceeded
             ``timeout`` (fail-closed — a slow/blackholed host is treated as unsafe
             rather than fetched).
     """
+    loop = asyncio.get_running_loop()
     try:
-        return await asyncio.wait_for(asyncio.to_thread(validate_fetch_url, url), timeout)
+        return await asyncio.wait_for(
+            loop.run_in_executor(_get_resolver_pool(), validate_fetch_url, url), timeout
+        )
     except TimeoutError as exc:
         raise UnsafeURLError(f"SSRF validation timed out after {timeout}s: {url}") from exc
 
