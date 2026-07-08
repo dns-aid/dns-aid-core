@@ -340,6 +340,15 @@ def discover(
             help="Verify JWS signatures on agents (alternative to DNSSEC)",
         ),
     ] = False,
+    trust_dnssec_pointers: Annotated[
+        bool,
+        typer.Option(
+            "--trust-dnssec-pointers",
+            help="Also follow an off-domain ARD catalog pointer when its pointer record is "
+            "DNSSEC-validated (AD flag). Off by default — enable only with a validating "
+            "resolver over a secure path (localhost / DoT / DoH).",
+        ),
+    ] = False,
     capabilities: Annotated[
         list[str] | None,
         typer.Option(
@@ -448,6 +457,7 @@ def discover(
                 name=name,
                 use_http_index=use_http_index,
                 verify_signatures=verify_signatures,
+                trust_dnssec_pointers=trust_dnssec_pointers,
                 capabilities=capabilities,
                 capabilities_any=capabilities_any,
                 auth_type=auth_type,

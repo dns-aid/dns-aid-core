@@ -98,6 +98,8 @@ agents = await dns_aid.discover("example.com", use_http_index=True)
 # DNS-plane agents (ARD / HTTP-catalog agents are exempt — they carry no DNS SVCB
 # record). verify_dane binds each agent endpoint's TLS cert to its DANE/TLSA record
 # (defense-in-depth, meaningful only under DNSSEC) → AgentRecord.dane_verified.
+# (0.26.5+) trust_dnssec_pointers (above) is exposed the same way — CLI
+# --trust-dnssec-pointers / MCP — so all four opt-in trust controls have SDK/CLI/MCP parity.
 
 # Filtered discovery — pure-Python predicates over the in-memory result (v0.19.0+)
 result = await dns_aid.discover(

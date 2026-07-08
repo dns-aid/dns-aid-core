@@ -666,6 +666,62 @@ class TestRequireDnssecInterfaceParity:
 
 
 # --------------------------------------------------------------------------- #
+# Interface parity: trust_dnssec_pointers on CLI (--trust-dnssec-pointers) + MCP
+# --------------------------------------------------------------------------- #
+class TestTrustDnssecPointersInterfaceParity:
+    """trust_dnssec_pointers (opt-in off-domain DNSSEC pointer trust) must be
+    reachable from all three interfaces, not just the SDK."""
+
+    def test_cli_trust_dnssec_pointers_flag_reaches_discover(self) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_discover(*_a: Any, **kw: Any) -> DiscoveryResult:
+            captured.update(kw)
+            return _result([])
+
+        with patch("dns_aid.core.discoverer.discover", new=fake_discover):
+            result = runner.invoke(
+                app, ["discover", "example.com", "--trust-dnssec-pointers", "--json"]
+            )
+        assert result.exit_code == 0, result.output
+        assert captured["trust_dnssec_pointers"] is True
+
+    def test_cli_default_trust_dnssec_pointers_is_false(self) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_discover(*_a: Any, **kw: Any) -> DiscoveryResult:
+            captured.update(kw)
+            return _result([])
+
+        with patch("dns_aid.core.discoverer.discover", new=fake_discover):
+            result = runner.invoke(app, ["discover", "example.com", "--json"])
+        assert result.exit_code == 0, result.output
+        assert captured["trust_dnssec_pointers"] is False
+
+    def test_mcp_trust_dnssec_pointers_propagates(self) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_discover(*_a: Any, **kw: Any) -> DiscoveryResult:
+            captured.update(kw)
+            return _result([])
+
+        with patch("dns_aid.core.discoverer.discover", new=fake_discover):
+            discover_agents_via_dns(domain="example.com", trust_dnssec_pointers=True)
+        assert captured["trust_dnssec_pointers"] is True
+
+    def test_mcp_default_trust_dnssec_pointers_false(self) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_discover(*_a: Any, **kw: Any) -> DiscoveryResult:
+            captured.update(kw)
+            return _result([])
+
+        with patch("dns_aid.core.discoverer.discover", new=fake_discover):
+            discover_agents_via_dns(domain="example.com")
+        assert captured["trust_dnssec_pointers"] is False
+
+
+# --------------------------------------------------------------------------- #
 # Interface: verify surfaces dnssec_note / dnssec_detail / dane_note
 # --------------------------------------------------------------------------- #
 def _verify_result() -> VerifyResult:

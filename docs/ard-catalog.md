@@ -157,9 +157,9 @@ flowchart TD
   subdomain) — via the well-known path or an on-domain `_catalog._agents` /
   `_index._agents` pointer target — is bound to the domain by TLS.
   → `catalog_trust: "tls_domain"`.
-- **DNSSEC (opt-in via `trust_dnssec_pointers=True`).** An off-domain pointer is
-  followed when its pointer record is DNSSEC-validated. Off by default — the AD
-  flag is only trustworthy with a validating resolver over a secure path
+- **DNSSEC (opt-in via `trust_dnssec_pointers=True`; CLI `--trust-dnssec-pointers`, MCP `trust_dnssec_pointers`).**
+  An off-domain pointer is followed when its pointer record is DNSSEC-validated. Off
+  by default — the AD flag is only trustworthy with a validating resolver over a secure path
   (localhost / DoT / DoH), so enable it only when you run one. →
   `catalog_trust: "dnssec"`.
 - **JWS (optional).** With `verify_signatures=True`, an off-domain catalog whose

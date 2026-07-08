@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.5] - 2026-07-08
+
+### Added
+
+- **`trust_dnssec_pointers` is now exposed on the CLI (`--trust-dnssec-pointers`) and
+  the MCP `discover_agents_via_dns` tool**, closing a parity gap where the opt-in to
+  follow a DNSSEC-validated off-domain ARD catalog pointer was reachable only from the
+  SDK. All discovery trust controls — `require_dnssec`, `min_dnssec`, `verify_dane`,
+  and `trust_dnssec_pointers` — now have full SDK / CLI / MCP parity. (Off by default;
+  the pointer AD flag is only trustworthy with a validating resolver over a secure
+  path, and following it redirects discovery to a foreign host.)
+
 ## [0.26.4] - 2026-07-07
 
 ### Security

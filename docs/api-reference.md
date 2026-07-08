@@ -217,7 +217,7 @@ async def discover(
 | `use_http_index` | `bool` | No | `False` | Use HTTP index endpoint instead of DNS-only discovery |
 | `enrich_endpoints` | `bool` | No | `True` | Fetch cap docs / agent cards to enrich AgentRecords |
 | `verify_signatures` | `bool` | No | `False` | Fetch JWKS and verify per-agent JWS signatures |
-| `trust_dnssec_pointers` | `bool` | No | `False` | Opt-in. Also follow an off-domain ARD catalog pointer when its pointer record is DNSSEC-validated (AD flag). Off by default — the AD flag is only trustworthy with a validating resolver over a secure path. |
+| `trust_dnssec_pointers` | `bool` | No | `False` | Opt-in. Also follow an off-domain ARD catalog pointer when its pointer record is DNSSEC-validated (AD flag). Off by default — the AD flag is only trustworthy with a validating resolver over a secure path. Exposed on SDK, CLI (`--trust-dnssec-pointers`), and MCP. |
 | `verify_dane` | `bool` | No | `False` | Opt-in. Check each resolved agent endpoint's TLS certificate against its DANE/TLSA record — defense-in-depth on the endpoint that does **not** change the catalog/pointer trust decision. Demoted to `None` unless the agent's DNS response is DNSSEC-validated (DANE without DNSSEC carries no integrity guarantee, RFC 6698 §10.1). Surfaced on `AgentRecord.dane_verified`. SDK / CLI (`--verify-dane`) / MCP. |
 
 **Filter kwargs (v0.19.0+, all keyword-only, all default no-op):**
