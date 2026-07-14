@@ -265,8 +265,10 @@ txt-value      = 1*255(VCHAR / SP)
 ; ==================================================================
 
 ; Optional TXT-encoded agent record for DNS deployments that don't
-; expose SVCB. Published at the same FQDN as the SVCB ServiceMode
-; record would otherwise be: _{name}._{protocol}._agents.{domain}.
+; expose SVCB. Published at the same owner name the SVCB ServiceMode
+; record would otherwise use: the draft-02 flat FQDN {name}.{domain}
+; (consumers reached via the opt-in legacy fallback also accept it at
+; the legacy -01 shape _{name}._{protocol}._agents.{domain}).
 ;
 ; The leading "v=1" discriminator distinguishes this endpoint TXT
 ; from the capabilities/metadata TXT defined above; both may
@@ -299,13 +301,30 @@ ipv4hint-kv      = "ipv4hint=" IPv4-address
 ipv6hint-kv      = "ipv6hint=" IPv6-address
 cap-kv           = "cap=" URI
 cap-sha256-kv    = "cap-sha256=" base64url
-bap-kv           = "bap=" bap-list
+bap-kv           = "bap=" protocol
+                 ; draft-02 §5.1 scalar form (``mcp`` / ``mcp=1.0``) — one
+                 ; identifier per record, mirroring the SVCB bap SvcParam.
+                 ; Consumers MUST accept a legacy comma-separated list by
+                 ; collapsing it to the first token (with a warning).
 policy-kv        = "policy=" URI
-realm-kv         = "realm=" 1*64(ALPHA / DIGIT / "-" / "_" / SP)
+realm-kv         = "realm=" quotable-value
 sig-kv           = "sig=" jws-compact
 connect-class-kv = "connect-class=" 1*32(ALPHA / DIGIT / "-")
-connect-meta-kv  = "connect-meta=" 1*255(VCHAR)
+connect-meta-kv  = "connect-meta=" quotable-value
 enroll-uri-kv    = "enroll-uri=" URI
+
+quotable-value   = 1*255(vchar-no-sp)
+                 / DQUOTE 1*255(%x20-21 / %x23-5B / %x5D-7E / escaped) DQUOTE
+vchar-no-sp      = %x21-7E              ; VCHAR, no space — bare form
+escaped          = "\" (DQUOTE / "\")   ; inside quotes: \" and \\ only
+
+; ; Tokenization rule: the joined body is split on unquoted spaces.
+; ; A value containing SP MUST be double-quoted; inside quotes the
+; ; only escapes are \" and \\. This matches the POSIX-shell-style
+; ; tokenizer (shlex) used by the reference parser; publishers SHOULD
+; ; emit bare (unquoted) values whenever the value contains no SP,
+; ; and MUST NOT rely on single-quote or other shell-ism forms even
+; ; where the reference parser tolerates them.
 
 ; ; Concatenation rule (RFC 1035 character-string): when a TXT RR
 ; ; carries multiple <character-string>s, the parser joins them with

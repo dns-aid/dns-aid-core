@@ -120,7 +120,9 @@ async def test_fallback_path_when_both_preconditions_set(
     # The single TXT RR should carry: (1) the v=1 endpoint body, AND
     # (2) the companion metadata values (capabilities=, version=, etc.)
     zone = backend.records["example.com"]
-    txt_rrs = zone["_chat._mcp._agents"]["TXT"]
+    # draft-02 flat owner name — publish_agent writes at {name}, not the
+    # legacy _{name}._{protocol}._agents shape.
+    txt_rrs = zone["chat"]["TXT"]
     assert len(txt_rrs) >= 1
     first = txt_rrs[0]
     values = first["values"] if isinstance(first, dict) else first.values  # type: ignore[attr-defined]

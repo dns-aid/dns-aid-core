@@ -975,22 +975,29 @@ async def _try_txt_fallback(
         )
     fallback = matches[0]
 
-    # Cross-validate the parsed ``alpn=`` against the protocol the caller
-    # derived from the FQDN. They should match — the publisher wrote the
-    # record at ``_{name}._{protocol}._agents.{domain}`` AND emitted
-    # ``alpn={protocol}`` in the TXT body. A mismatch indicates a publisher
-    # error (record published at the wrong FQDN, or hand-edited alpn that
-    # diverged). The FQDN-derived protocol is authoritative — the record
-    # location is what the SDK dispatched on — but the discrepancy is
-    # worth surfacing so the deployment can fix it.
+    # Cross-validate the parsed ``alpn=`` against the protocol probe the
+    # caller queried with. Under draft-02 the flat owner name carries no
+    # protocol, so the probe is only a placeholder — but a disagreement is
+    # still worth surfacing (hand-edited alpn, or a record reached via the
+    # legacy -01 shape whose ``_{protocol}`` label diverged from the body).
     if fallback.alpn is not None and fallback.alpn != protocol.value:
         logger.warning(
             "txt_fallback.alpn_mismatch",
             fqdn=fqdn,
-            fqdn_protocol=protocol.value,
+            probe_protocol=protocol.value,
             txt_alpn=fallback.alpn,
-            note="using FQDN protocol; publisher should align alpn= with the record's _{protocol} label",
+            note="record signal wins after reconciliation (draft-02: protocol lives in the record)",
         )
+
+    # Mirror the SVCB path exactly: normalize the raw bap value (scalar
+    # draft-02 form; legacy comma lists collapse with a warning) and stamp
+    # the record's true protocol (bap, then alpn) over the query probe so
+    # TXT-sourced records label identically to SVCB-sourced ones and the
+    # JWS binding check (payload.alpn == agent.protocol.value) holds.
+    from dns_aid.core.bap import normalize_bap
+
+    bap = normalize_bap(fallback.bap)
+    protocol = _reconcile_protocol(protocol, bap, fallback.alpn)
 
     # Tier 1: cap URI (mirrors the SVCB-success path's tier 1)
     capabilities: list[str] = []
@@ -1025,29 +1032,48 @@ async def _try_txt_fallback(
         port=fallback.port,
     )
 
-    return AgentRecord(
-        name=name,
-        domain=domain,
-        protocol=protocol,
-        target_host=fallback.target,
-        port=fallback.port,
-        ipv4_hint=fallback.ipv4hint,
-        ipv6_hint=fallback.ipv6hint,
-        capabilities=capabilities,
-        legacy_resolved=legacy_resolved,
-        cap_uri=fallback.cap,
-        cap_sha256=fallback.cap_sha256,
-        bap=fallback.bap,
-        policy_uri=fallback.policy,
-        realm=fallback.realm,
-        sig=fallback.sig,
-        connect_class=fallback.connect_class,
-        connect_meta=fallback.connect_meta,
-        enroll_uri=fallback.enroll_uri,
-        capability_source=capability_source,
-        endpoint_source="dns_txt_fallback",
-        agent_card=agent_card,
-    )
+    # TXT bodies are attacker-shapable free text: a record can pass the
+    # wire-format parser yet still trip an AgentRecord field validator
+    # (underscore target, oversized connect-meta, ...). Catch that case
+    # HERE with a specific event so operators can tell "TXT present but
+    # model-invalid" apart from a plain DNS miss — the outer
+    # _query_single_agent handler would otherwise swallow it at debug as
+    # a generic query failure.
+    from pydantic import ValidationError as PydanticValidationError
+
+    try:
+        return AgentRecord(
+            name=name,
+            domain=domain,
+            protocol=protocol,
+            target_host=fallback.target,
+            port=fallback.port,
+            ipv4_hint=fallback.ipv4hint,
+            ipv6_hint=fallback.ipv6hint,
+            capabilities=capabilities,
+            legacy_resolved=legacy_resolved,
+            cap_uri=fallback.cap,
+            cap_sha256=fallback.cap_sha256,
+            bap=bap,
+            policy_uri=fallback.policy,
+            realm=fallback.realm,
+            sig=fallback.sig,
+            connect_class=fallback.connect_class,
+            connect_meta=fallback.connect_meta,
+            enroll_uri=fallback.enroll_uri,
+            capability_source=capability_source,
+            endpoint_source="dns_txt_fallback",
+            agent_card=agent_card,
+        )
+    except PydanticValidationError as exc:
+        logger.warning(
+            "txt_fallback.model_rejected",
+            fqdn=fqdn,
+            target=fallback.target,
+            error=str(exc),
+            note="TXT v=1 record parsed but failed AgentRecord validation; skipping",
+        )
+        return None
 
 
 async def _query_capabilities(fqdn: str) -> list[str]:

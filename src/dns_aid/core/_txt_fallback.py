@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
@@ -76,9 +76,15 @@ KEY_ENROLL_URI = "enroll-uri"
 class TxtFallbackRecord:
     """Parsed agent record from a TXT-fallback wire format.
 
-    All optional fields are ``None`` (or empty list for ``bap``) when the
-    publisher omitted them. The discoverer maps a populated record onto an
-    ``AgentRecord`` using the same field correspondences SVCB uses.
+    All optional fields are ``None`` when the publisher omitted them. The
+    discoverer maps a populated record onto an ``AgentRecord`` using the
+    same field correspondences SVCB uses.
+
+    ``bap`` is kept as the raw wire value (draft-02 §5.1 scalar form,
+    ``mcp`` / ``mcp=1.0``) exactly like the SVCB path's
+    ``custom_params.get("bap")`` — the consumer boundary normalizes it via
+    :func:`dns_aid.core.bap.normalize_bap`, which also collapses legacy
+    comma-separated lists with a warning.
     """
 
     target: str
@@ -88,7 +94,7 @@ class TxtFallbackRecord:
     ipv6hint: str | None = None
     cap: str | None = None
     cap_sha256: str | None = None
-    bap: list[str] = field(default_factory=list)
+    bap: str | None = None
     policy: str | None = None
     realm: str | None = None
     sig: str | None = None
@@ -163,8 +169,10 @@ def parse_txt_fallback(strings: Iterable[bytes]) -> TxtFallbackRecord | None:
             logger.debug("txt_fallback.invalid_port", value=port_raw)
             # Continue with default; malformed port is recoverable.
 
-    bap_raw = kv.get(KEY_BAP, "")
-    bap = [b.strip() for b in bap_raw.split(",") if b.strip()] if bap_raw else []
+    # Raw pass-through, like the SVCB path's ``custom_params.get("bap")``.
+    # The consumer boundary runs ``normalize_bap`` (scalar draft-02 form;
+    # legacy comma lists collapse there with a warning).
+    bap = kv.get(KEY_BAP) or None
 
     return TxtFallbackRecord(
         target=target,
@@ -217,7 +225,9 @@ def build_txt_fallback(agent: AgentRecord) -> str:
     if agent.cap_sha256:
         parts.append(f"{KEY_CAP_SHA256}={agent.cap_sha256}")
     if agent.bap:
-        parts.append(f"{KEY_BAP}={','.join(agent.bap)}")
+        # draft-02 scalar form (``mcp`` / ``mcp=1.0``) — AgentRecord.bap is
+        # a single identifier, not a list.
+        parts.append(f"{KEY_BAP}={agent.bap}")
     if agent.policy_uri:
         parts.append(f"{KEY_POLICY}={agent.policy_uri}")
     if agent.realm:

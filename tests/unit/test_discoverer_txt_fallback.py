@@ -224,17 +224,17 @@ async def test_txt_fallback_with_metadata_alongside() -> None:
 
 
 @pytest.mark.asyncio
-async def test_txt_fallback_alpn_mismatch_warns_and_proceeds() -> None:
-    """Parsed alpn= disagrees with the FQDN-derived protocol → warn but proceed.
+async def test_txt_fallback_alpn_mismatch_warns_and_reconciles() -> None:
+    """Parsed alpn= disagrees with the query probe → warn AND reconcile.
 
-    Closes the alpn round-trip asymmetry: the parser captures alpn and the
-    discoverer now uses it to cross-validate against the protocol the caller
-    derived from the FQDN. FQDN remains authoritative; mismatch is a
-    publisher-side bug worth surfacing.
+    draft-02: the flat owner name carries no protocol, so the probe is only
+    a placeholder — the record's own signal (bap, then alpn) is stamped onto
+    the result via _reconcile_protocol, exactly like the SVCB path. The
+    disagreement is still surfaced as a warning for observability.
     """
     txt = _make_txt_answer(
         [
-            [b"v=1 target=mcp.example.com alpn=a2a"],  # alpn says a2a, FQDN says mcp
+            [b"v=1 target=mcp.example.com alpn=a2a"],  # alpn says a2a, probe says mcp
         ]
     )
     resolver = _dispatching_resolver(txt=txt)
@@ -247,7 +247,9 @@ async def test_txt_fallback_alpn_mismatch_warns_and_proceeds() -> None:
 
     assert result is not None
     assert result.target_host == "mcp.example.com"
-    assert result.protocol == Protocol.MCP  # FQDN protocol wins
+    # Record signal wins (mirrors the SVCB path's _reconcile_protocol so the
+    # JWS binding check payload.alpn == agent.protocol.value holds).
+    assert result.protocol == Protocol.A2A
     # Warning fired with the mismatch event
     warning_events = [c.args[0] for c in mock_logger.warning.call_args_list if c.args]
     assert "txt_fallback.alpn_mismatch" in warning_events
@@ -282,3 +284,91 @@ async def test_txt_fallback_nxdomain_returns_none() -> None:
     with patch("dns_aid.core.discoverer.dns.asyncresolver.Resolver", return_value=resolver):
         result = await _query_single_agent("example.com", "chat", Protocol.MCP)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_txt_fallback_at_legacy_fqdn_sets_legacy_resolved() -> None:
+    """Flat ladder dry, legacy ladder reaches TXT → legacy_resolved=True.
+
+    The full SVCB → HTTPS → TXT ladder runs at the flat owner name first;
+    only when it comes up completely dry AND legacy fallback is active does
+    the same ladder run at the legacy -01 shape. A TXT hit there must stamp
+    ``legacy_resolved=True`` exactly like a legacy SVCB hit would.
+    """
+    legacy_fqdn = "_chat._mcp._agents.example.com"
+    txt = _make_txt_answer([[b"v=1 target=mcp.example.com port=8443 alpn=mcp"]])
+
+    async def fake_resolve(qname: str, rdtype: str) -> MagicMock:
+        # TXT only exists at the legacy owner name; everything else is dry.
+        if rdtype == "TXT" and str(qname).rstrip(".") == legacy_fqdn:
+            return txt
+        raise dns.resolver.NoAnswer()
+
+    resolver = MagicMock()
+    resolver.resolve = AsyncMock(side_effect=fake_resolve)
+
+    with patch("dns_aid.core.discoverer.dns.asyncresolver.Resolver", return_value=resolver):
+        result = await _query_single_agent("example.com", "chat", Protocol.MCP, allow_legacy=True)
+
+    assert result is not None
+    assert result.target_host == "mcp.example.com"
+    assert result.port == 8443
+    assert result.legacy_resolved is True
+    assert result.endpoint_source == "dns_txt_fallback"
+
+
+@pytest.mark.asyncio
+async def test_txt_fallback_flat_txt_beats_legacy_svcb() -> None:
+    """A flat TXT v=1 record wins over a leftover legacy SVCB record.
+
+    The flat owner name is draft-02's canonical location: a publisher who
+    deliberately placed a flat TXT record has migrated, and a stale legacy
+    SVCB record must not shadow it.
+    """
+    flat_fqdn = "chat.example.com"
+    legacy_fqdn = "_chat._mcp._agents.example.com"
+    txt = _make_txt_answer([[b"v=1 target=new.example.com alpn=mcp"]])
+    legacy_svcb = _make_svcb_answer(target="stale.example.com")
+
+    async def fake_resolve(qname: str, rdtype: str) -> MagicMock:
+        q = str(qname).rstrip(".")
+        if q == flat_fqdn and rdtype == "TXT":
+            return txt
+        if q == legacy_fqdn and rdtype == "SVCB":
+            return legacy_svcb
+        raise dns.resolver.NoAnswer()
+
+    resolver = MagicMock()
+    resolver.resolve = AsyncMock(side_effect=fake_resolve)
+
+    with patch("dns_aid.core.discoverer.dns.asyncresolver.Resolver", return_value=resolver):
+        result = await _query_single_agent("example.com", "chat", Protocol.MCP, allow_legacy=True)
+
+    assert result is not None
+    assert result.target_host == "new.example.com"
+    assert result.endpoint_source == "dns_txt_fallback"
+    assert result.legacy_resolved is False
+
+
+@pytest.mark.asyncio
+async def test_txt_fallback_model_invalid_logs_and_returns_none() -> None:
+    """Wire-valid but model-invalid TXT → specific warning, graceful None.
+
+    TXT bodies are attacker-shapable: a record can pass the wire-format
+    parser yet trip an AgentRecord field validator (here: underscored
+    target_host). That boundary must not crash discovery, and must emit
+    ``txt_fallback.model_rejected`` so operators can tell it apart from a
+    plain DNS miss.
+    """
+    txt = _make_txt_answer([[b"v=1 target=_evil.example.com alpn=mcp"]])
+    resolver = _dispatching_resolver(txt=txt)
+
+    with (
+        patch("dns_aid.core.discoverer.dns.asyncresolver.Resolver", return_value=resolver),
+        patch("dns_aid.core.discoverer.logger") as mock_logger,
+    ):
+        result = await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+    assert result is None
+    warning_events = [c.args[0] for c in mock_logger.warning.call_args_list if c.args]
+    assert "txt_fallback.model_rejected" in warning_events

@@ -41,7 +41,7 @@ def test_parse_minimal_record() -> None:
     assert result.target == "mcp.example.com"
     assert result.port == 443  # default
     assert result.alpn is None
-    assert result.bap == []
+    assert result.bap is None
 
 
 def test_parse_full_record() -> None:
@@ -63,7 +63,9 @@ def test_parse_full_record() -> None:
     assert result.ipv6hint == "2001:db8::5"
     assert result.cap == "https://example.com/cap/chat-v1.json"
     assert result.cap_sha256 == "DEADBEEF"
-    assert result.bap == ["mcp/1", "a2a/1"]
+    # Raw pass-through — the consumer boundary (normalize_bap) collapses
+    # legacy comma lists; the parser itself does not interpret the value.
+    assert result.bap == "mcp/1,a2a/1"
     assert result.policy == "https://example.com/policy/strict"
     assert result.realm == "prod"
     assert result.sig == "eyJhbGc"
@@ -208,7 +210,7 @@ def test_build_includes_optional_fields() -> None:
         cap_sha256="DEADBEEF",
         policy_uri="https://example.com/policy/strict",
         realm="prod",
-        bap=["mcp/1", "a2a/1"],
+        bap="mcp=1.0",
         ipv4_hint="192.0.2.5",
         sig="eyJhbGc",
     )
@@ -217,7 +219,7 @@ def test_build_includes_optional_fields() -> None:
     assert "cap-sha256=DEADBEEF" in body
     assert "policy=https://example.com/policy/strict" in body
     assert "realm=prod" in body
-    assert "bap=mcp/1,a2a/1" in body
+    assert "bap=mcp=1.0" in body
     assert "ipv4hint=192.0.2.5" in body
     assert "sig=eyJhbGc" in body
 
@@ -244,7 +246,7 @@ def test_round_trip_full() -> None:
         cap_sha256="DEADBEEF",
         policy_uri="https://example.com/policy/strict",
         realm="prod",
-        bap=["mcp/1", "a2a/1"],
+        bap="mcp=1.0",
         ipv4_hint="192.0.2.5",
         ipv6_hint="2001:db8::5",
         sig="eyJhbGc",
