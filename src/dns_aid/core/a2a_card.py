@@ -220,7 +220,11 @@ class A2AAgentCard:
             "description": self.description,
             "ttl": ttl,
             "cap_uri": cap_uri,
-            "bap": ["a2a/1"],
+            # Bulk Agent Protocol — scalar versioned identifier per draft-02
+            # §FutureWork. A2A agent cards default to "a2a=1.0"; operators
+            # publishing a different version of A2A can override before passing
+            # to publish().
+            "bap": "a2a=1.0",
         }
 
 
@@ -254,9 +258,9 @@ async def fetch_agent_card(
 
     # SSRF protection: validate URL before fetching
     try:
-        from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url
+        from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
 
-        validate_fetch_url(card_url)
+        await validate_fetch_url_async(card_url)
     except UnsafeURLError as e:
         logger.warning("Agent Card URL blocked by SSRF protection", url=card_url, error=str(e))
         return None

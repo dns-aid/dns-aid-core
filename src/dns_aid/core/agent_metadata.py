@@ -62,7 +62,7 @@ class AgentIdentity(BaseModel):
     agent_id: str | None = Field(None, max_length=36, description="UUID identifier for the agent")
     name: str = Field(..., min_length=1, max_length=255, description="Human-readable agent name")
     fqdn: str | None = Field(
-        None, max_length=512, description="DNS-AID FQDN (e.g., _chat._mcp._agents.example.com)"
+        None, max_length=512, description="DNS-AID FQDN (e.g., chat.example.com)"
     )
     version: str | None = Field(None, max_length=20, description="Agent version string")
     deprecated: bool = Field(False, description="Whether this agent is deprecated")

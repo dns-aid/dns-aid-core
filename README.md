@@ -1,9 +1,11 @@
 # DNS-AID
 
-[![CI](https://github.com/infobloxopen/dns-aid-core/actions/workflows/ci.yml/badge.svg)](https://github.com/infobloxopen/dns-aid-core/actions/workflows/ci.yml)
-[![Security](https://github.com/infobloxopen/dns-aid-core/actions/workflows/security.yml/badge.svg)](https://github.com/infobloxopen/dns-aid-core/actions/workflows/security.yml)
-[![CodeQL](https://github.com/infobloxopen/dns-aid-core/actions/workflows/codeql.yml/badge.svg)](https://github.com/infobloxopen/dns-aid-core/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/infobloxopen/dns-aid-core/badge)](https://scorecard.dev/viewer/?uri=github.com/infobloxopen/dns-aid-core)
+<!-- mcp-name: io.github.dns-aid/dns-aid -->
+
+[![CI](https://github.com/dns-aid/dns-aid-core/actions/workflows/ci.yml/badge.svg)](https://github.com/dns-aid/dns-aid-core/actions/workflows/ci.yml)
+[![Security](https://github.com/dns-aid/dns-aid-core/actions/workflows/security.yml/badge.svg)](https://github.com/dns-aid/dns-aid-core/actions/workflows/security.yml)
+[![CodeQL](https://github.com/dns-aid/dns-aid-core/actions/workflows/codeql.yml/badge.svg)](https://github.com/dns-aid/dns-aid-core/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/dns-aid/dns-aid-core/badge)](https://scorecard.dev/viewer/?uri=github.com/dns-aid/dns-aid-core)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12651/badge)](https://www.bestpractices.dev/projects/12651)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
@@ -11,7 +13,7 @@
 
 **DNS-based Agent Identification and Discovery**
 
-Reference implementation of the DNS-AID specification, developed at the IETF: https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/.
+Reference implementation for [IETF draft-mozleywilliams-dnsop-dnsaid-02](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
 
 DNS-AID enables AI agents to discover each other via DNS, using the internet's existing naming infrastructure instead of centralized registries or hardcoded URLs.
 
@@ -35,6 +37,7 @@ Changes to protocol behavior should be discussed within the IETF.
 
 - [Getting Started Guide](docs/getting-started.md) — install, first agent publication, backend setup
 - [API Reference](docs/api-reference.md) — Python SDK, CLI, and MCP server tool reference
+- [ARD ai-catalog discovery](docs/ard-catalog.md) — interop with [Agentic Resource Discovery](https://agenticresourcediscovery.org/spec/): catalog discovery, the host-anywhere DNS pointer, and card dereferencing
 - [Architecture](docs/architecture.md) — protocol layers, metadata resolution, integration points
 - [Integrations](docs/integrations.md) — backend-specific setup notes
 - [Demo Guide](docs/demo-guide.md) — end-to-end walkthrough for talks and presentations
@@ -57,7 +60,7 @@ You are encouraged to run your own directory or telemetry backend — the indexe
 pip install "dns-aid[cli,mcp]"
 
 # Or install the latest unreleased main from GitHub
-pip install "dns-aid[cli,mcp] @ git+https://github.com/infobloxopen/dns-aid-core.git"
+pip install "dns-aid[cli,mcp] @ git+https://github.com/dns-aid/dns-aid-core.git"
 ```
 
 For backend-specific extras (`route53`, `cloudflare`, `ns1`, `cloud_dns`, `infoblox`, `ddns`), see the [Getting Started Guide](docs/getting-started.md#install).
@@ -81,8 +84,22 @@ agents = await dns_aid.discover("example.com")
 for agent in agents:
     print(f"{agent.name}: {agent.endpoint_url}")
 
-# Discover via HTTP index (ANS-compatible, richer metadata)
+# Discover via HTTP index (ANS-compatible, richer metadata) — also auto-detects
+# and dereferences ARD ai-catalogs (see docs/ard-catalog.md)
 agents = await dns_aid.discover("example.com", use_http_index=True)
+# (0.26.3+) A catalog on your own domain needs nothing. An off-domain catalog
+# pointer is trusted only via per-record JWS (verify_signatures=True) or, opt-in,
+# a DNSSEC-validated pointer (trust_dnssec_pointers=True) — otherwise it is ignored
+# and discovery falls back to the on-domain catalog. The trust basis is surfaced as
+# AgentRecord.catalog_trust (tls_domain | dnssec | jws). See docs/ard-catalog.md.
+
+# (0.26.4+) Opt-in DNSSEC/DANE hardening (SDK/CLI/MCP; all default off — DNSSEC is
+# never required). require_dnssec / min_dnssec enforce the resolver AD flag on
+# DNS-plane agents (ARD / HTTP-catalog agents are exempt — they carry no DNS SVCB
+# record). verify_dane binds each agent endpoint's TLS cert to its DANE/TLSA record
+# (defense-in-depth, meaningful only under DNSSEC) → AgentRecord.dane_verified.
+# (0.26.5+) trust_dnssec_pointers (above) is exposed the same way — CLI
+# --trust-dnssec-pointers / MCP — so all four opt-in trust controls have SDK/CLI/MCP parity.
 
 # Filtered discovery — pure-Python predicates over the in-memory result (v0.19.0+)
 result = await dns_aid.discover(
@@ -95,7 +112,7 @@ result = await dns_aid.discover(
 )
 
 # Verify an agent's DNS records
-result = await dns_aid.verify("_my-agent._mcp._agents.example.com")
+result = await dns_aid.verify("my-agent.example.com")
 print(f"Security Score: {result.security_score}/100")
 ```
 
@@ -276,7 +293,7 @@ dns-aid discover example.com --use-http-index
 dns-aid discover example.com --json
 
 # Verify DNS records
-dns-aid verify _my-agent._mcp._agents.example.com
+dns-aid verify my-agent.example.com
 
 # List DNS-AID records in a zone
 dns-aid list example.com
@@ -293,6 +310,10 @@ dns-aid index list example.com
 
 # Sync index with actual DNS records (useful for repair)
 dns-aid index sync example.com
+
+# Advertise an ARD ai-catalog via DNS pointer (host-anywhere; v0.26.0+)
+# Publishes _catalog._agents + _index._agents SVCB → the catalog host.
+dns-aid index publish-catalog example.com catalogue.example.com
 
 # Publish without updating the index (for internal agents)
 dns-aid publish --name internal-bot --domain example.com --protocol mcp --no-update-index
@@ -395,7 +416,7 @@ agents = await dns_aid.discover("example.com", use_http_index=True)
 | **DNS (default)** | Maximum decentralization, offline caching, minimal round trips |
 | **HTTP Index** | Rich metadata upfront, ANS compatibility, model cards, capabilities, direct endpoints |
 
-**FQDN as Source of Truth (v0.4.7):** The HTTP index only needs to provide each agent's FQDN (e.g., `_booking._mcp._agents.example.com`). Agent name and protocol are extracted from the FQDN — no separate `protocols` field needed. DNS SVCB lookup then resolves the authoritative endpoint.
+**FQDN as Source of Truth (v0.4.7):** The HTTP index only needs to provide each agent's FQDN (e.g., `booking.example.com`). Agent name and protocol are extracted from the FQDN — no separate `protocols` field needed. DNS SVCB lookup then resolves the authoritative endpoint.
 
 **Discovery Transparency (v0.4.6+):** Each discovered agent includes source fields showing how data was resolved:
 
@@ -489,14 +510,14 @@ Claude will:
 DNS-AID uses SVCB records (RFC 9460) to advertise AI agents:
 
 ```
-_chat._a2a._agents.example.com. 3600 IN SVCB 1 chat.example.com. alpn="a2a" port=443 mandatory="alpn,port"
-_chat._a2a._agents.example.com. 3600 IN TXT "capabilities=chat,assistant" "version=1.0.0"
+chat.example.com. 3600 IN SVCB 1 chat.example.com. alpn="a2a" port=443 mandatory="alpn,port"
+chat.example.com. 3600 IN TXT "capabilities=chat,assistant" "version=1.0.0"
 ```
 
 **DNS-AID Custom SVCB Parameters (v0.4.8+):** Per the IETF draft, SVCB records can carry additional custom parameters for richer agent metadata:
 
 ```
-_booking._mcp._agents.example.com. SVCB 1 mcp.example.com. alpn="mcp" port=443 \
+booking.example.com. SVCB 1 mcp.example.com. alpn="mcp" port=443 \
     cap="https://mcp.example.com/.well-known/agent-cap.json" \
     cap-sha256="dGVzdGhhc2g" bap="mcp/1,a2a/1" \
     policy="https://example.com/agent-policy" realm="production"
@@ -524,7 +545,7 @@ This allows any DNS client to discover agents without proprietary protocols or c
   │  Step 1: Fetch HTTP Index (primary)                             │
   │  ──────────────────────────────────                             │
   │  GET https://index.aiagents.salesforce.com/index-wellknown      │
-  │  Response: [{"fqdn":"_chat._a2a._agents.salesforce.com",...}]   │
+  │  Response: [{"fqdn":"chat.salesforce.com",...}]   │
   │                                                                 │
   │  Fallback: Query TXT Index via DNS                              │
   │  Query: _index._agents.salesforce.com TXT                       │
@@ -534,7 +555,7 @@ This allows any DNS client to discover agents without proprietary protocols or c
   ┌──┴──────────────────────────────────────────────────────────────┐
   │  Step 2: Query SVCB per agent                                   │
   │  ────────────────────────────                                   │
-  │  Query: _chat._a2a._agents.salesforce.com SVCB                  │
+  │  Query: chat.salesforce.com SVCB                  │
   │  Response: SVCB 1 chat.salesforce.com. alpn="a2a" port=443      │
   │            cap="https://chat.salesforce.com/.well-known/cap.json"│
   │  (DNSSEC validated)                                             │
@@ -551,7 +572,7 @@ This allows any DNS client to discover agents without proprietary protocols or c
   ┌──┴──────────────────────────────────────────────────────────────┐
   │  Step 3: TXT Capabilities (fallback if no cap document)         │
   │  ──────────────────────────────────────────────────             │
-  │  Query: _chat._a2a._agents.salesforce.com TXT                   │
+  │  Query: chat.salesforce.com TXT                   │
   │  Response: "capabilities=chat,support" "version=1.0.0"          │
   └──┬──────────────────────────────────────────────────────────────┘
      │                            │                               │
@@ -857,26 +878,22 @@ Infoblox UDDI (Universal DDI) is Infoblox's cloud-native DDI platform. DNS-AID s
    )
    ```
 
-#### Infoblox UDDI Limitations & DNS-AID Compliance
+#### Infoblox UDDI SVCB Support
 
-> **⚠️ Important**: Infoblox UDDI SVCB records only support "alias mode" (priority 0) and do not
-> support SVC parameters (`alpn`, `port`, `mandatory`). This means **Infoblox UDDI is not fully
-> compliant with the [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/)**.
->
-> The draft requires ServiceMode SVCB records (priority > 0) with mandatory `alpn` and `port`
-> parameters. Infoblox UDDI's limitation is a platform constraint, not a DNS-AID limitation.
+Infoblox UDDI supports **full ServiceMode SVCB** (RFC 9460): `priority > 0` with `svc_params`,
+including the standard keys (`alpn`, `port`, `mandatory`, `ipv4hint`, `ipv6hint`, ...) and the
+private-use range `key65280`–`key65534`. DNS-AID's custom parameters (`cap`, `cap-sha256`,
+`bap`, `policy`, `realm`, `sig`, `connect-class`, `connect-meta`, `enroll-uri` — encoded as
+`key65400`–`key65405`) are written **natively on the SVCB record**, not demoted to a TXT
+companion.
 
 | DNS-AID Requirement | Route 53 | Infoblox UDDI |
 |---------------------|----------|---------------|
-| ServiceMode (priority > 0) | ✅ | ❌ |
-| `alpn` parameter | ✅ | ❌ |
-| `port` parameter | ✅ | ❌ |
-| `mandatory` key | ✅ | ❌ |
+| ServiceMode (priority > 0) | ✅ | ✅ |
+| `alpn` / `port` / `mandatory` | ✅ | ✅ |
+| Private-use keys (cap/bap/policy/realm/sig/...) | ✅ | ✅ |
 
-**For full DNS-AID compliance, use Route 53 or another RFC 9460-compliant DNS provider.**
-
-DNS-AID stores `alpn` and `port` in TXT records as a fallback for Infoblox UDDI, but this is
-a workaround and not standard-compliant for agent discovery.
+Infoblox UDDI is a **fully DNS-AID-compliant** ServiceMode SVCB backend.
 
 #### Verify Records via API
 
@@ -1023,6 +1040,82 @@ Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to it
 - **Simple API**: Well-documented REST API v4
 - **Full DNS-AID compliance**: Supports ServiceMode SVCB with all parameters
 
+## Why DNS-AID?
+
+### vs Competing Proposals
+
+| Approach | Problem | DNS-AID Advantage |
+|----------|---------|-------------------|
+| **ANS (GoDaddy)** | Centralized registry, KYC required, single gatekeeper | Federated — you control your domain, publish instantly |
+| **Google (A2A + UCP)** | Discovery via Gemini/Search, payments via UCP | Neutral discovery — no platform lock-in or transaction fees |
+| **.agent gTLD** | Requires ICANN approval, ongoing domain fees | Works NOW with domains you already own |
+| **AgentDNS (China Telecom)** | Requires 6G infrastructure, carrier control | Works NOW on existing DNS infrastructure |
+| **NANDA (MIT)** | New P2P overlay network, new ops paradigm | Uses infrastructure your DNS team already operates |
+| **Web3 (ERC-8004)** | Gas fees, crypto wallets, enterprise-hostile | Free DNS queries, no blockchain complexity |
+| **ai.txt / llms.txt** | No integrity verification, free-form JSON | DNSSEC cryptographic verification, structured SVCB |
+
+### Feature Comparison
+
+| Feature | DNS-AID | Central Registry | ai.txt |
+|---------|---------|------------------|--------|
+| **Decentralized** | ✅ | ❌ | ✅ |
+| **Secure (DNSSEC)** | ✅ | Varies | ❌ |
+| **Sovereign** | ✅ | ❌ | ✅ |
+| **Standards-based** | ✅ (IETF) | ❌ | ❌ |
+| **Works with existing infra** | ✅ | ❌ | ✅ |
+
+### The Sovereignty Question
+
+> **Who controls agent discovery?**
+> - ANS: GoDaddy (US company as gatekeeper)
+> - AgentDNS: China Telecom (state-owned carrier)
+> - Web3: Ethereum Foundation
+> - **DNS-AID: You control your own domain**
+>
+> DNS-AID preserves sovereignty. Organizations and nations maintain control over their own agent namespaces with no central authority that can block, censor, or surveil agent discovery.
+
+### Google's Agent Ecosystem
+
+Google is building a full-stack agent platform: **A2A** (communication), **UCP** (payments), and **Gemini/Search** (discovery). While A2A is an open protocol, discovery through Google surfaces means:
+- Google controls visibility (pay-to-rank)
+- Transaction fees via [UCP](https://developers.google.com/merchant/ucp)
+- Platform dependency for reach
+
+**DNS-AID complements A2A** by providing neutral, decentralized discovery — find agents anywhere, not just through Google.
+
+### Understanding the .agent Domain Approach
+
+The [Agent Community](https://agentcommunity.org/) is pursuing a `.agent` top-level domain through ICANN's [new gTLD program](https://newgtlds.icann.org/). Here's how the two approaches compare:
+
+**How .agent Domains Would Work:**
+1. Apply to ICANN for `.agent` gTLD (~$185,000 application fee)
+2. Wait 9-20 months for ICANN approval process
+3. Build registry infrastructure (Open Agent Registry, Inc.)
+4. Sell `.agent` domains through accredited registrars
+5. Users pay annual registration fees (~$15-50/year per domain)
+
+**How DNS-AID Works:**
+1. Use your existing domain (you already own `yourcompany.com`)
+2. Add DNS-AID records to your zone (`myagent.yourcompany.com`)
+3. Start discovering and being discovered immediately
+
+| Factor | .agent gTLD | DNS-AID |
+|--------|-------------|---------|
+| **Cost to publish** | ~$15-50/year domain fee | Free (use existing domain) |
+| **Time to start** | Months (gTLD launch + registration) | Minutes |
+| **Who controls discovery** | Registry operator | You (your domain) |
+| **Works today** | ❌ Pending ICANN approval | ✅ Works now |
+| **Requires new infrastructure** | ✅ Registry, registrars | ❌ Uses existing DNS |
+| **Memorable names** | ✅ `myagent.agent` | `myagent.example.com` |
+
+**The Friendly Take:**
+
+Both approaches share the goal of making AI agents discoverable. The `.agent` gTLD creates a dedicated namespace that's easy to remember (`mycompany.agent`), while DNS-AID leverages existing infrastructure so you can start publishing agents today.
+
+DNS-AID doesn't require waiting for ICANN approval or paying for new domains—it works with the DNS infrastructure your organization already operates. If you own `example.com`, you can publish agents to `myagent.example.com` right now.
+
+*Fun fact: When `.agent` domains become available, DNS-AID records will work on them too! The approaches are complementary.*
+
 ## Background and Comparison
 
 For background on how DNS-AID compares to other agent-discovery approaches (ANS, Google A2A+UCP, `.agent` gTLD, AgentDNS, NANDA, Web3, `ai.txt`) and "The Sovereignty Question", see [docs/positioning.md](docs/positioning.md). That content is non-normative — protocol positioning is determined at the IETF.
@@ -1044,7 +1137,7 @@ python examples/demo_full.py
 
 ```bash
 # Clone the repo
-git clone https://github.com/infobloxopen/dns-aid-core.git
+git clone https://github.com/dns-aid/dns-aid-core.git
 cd DNS-AID
 
 # Install all workspace packages (requires uv)

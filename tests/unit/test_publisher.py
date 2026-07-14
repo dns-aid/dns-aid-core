@@ -8,6 +8,7 @@ import pytest
 from dns_aid.backends.mock import MockBackend
 from dns_aid.core.models import Protocol
 from dns_aid.core.publisher import publish, unpublish
+from dns_aid.utils.validation import ValidationError
 
 
 class TestPublish:
@@ -26,8 +27,10 @@ class TestPublish:
 
         assert result.success is True
         assert result.agent.name == "chat"
-        assert result.agent.fqdn == "_chat._a2a._agents.example.com"
-        assert len(result.records_created) == 2  # SVCB + TXT
+        assert result.agent.fqdn == "chat.example.com"
+        # SVCB primary + TXT companion. Walkable AliasMode is opt-in
+        # (default off under -02 to avoid an enumeration handle).
+        assert len(result.records_created) == 2
 
     @pytest.mark.asyncio
     async def test_publish_with_capabilities(self, mock_backend: MockBackend):
@@ -45,7 +48,7 @@ class TestPublish:
         assert result.agent.capabilities == ["ipam", "dns", "vpn"]
 
         # Check TXT record was created with capabilities
-        txt_values = mock_backend.get_txt_record("example.com", "_network._mcp._agents")
+        txt_values = mock_backend.get_txt_record("example.com", "network")
         assert txt_values is not None
         assert "capabilities=ipam,dns,vpn" in txt_values
 
@@ -61,7 +64,7 @@ class TestPublish:
             backend=mock_backend,
         )
 
-        svcb = mock_backend.get_svcb_record("example.com", "_chat._a2a._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "chat")
 
         assert svcb is not None
         assert svcb["target"] == "chat.example.com."
@@ -114,7 +117,7 @@ class TestPublish:
         assert result.success is True
         assert result.agent.ttl == 300
 
-        svcb = mock_backend.get_svcb_record("example.com", "_chat._a2a._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "chat")
         assert svcb["ttl"] == 300
 
     @pytest.mark.asyncio
@@ -128,7 +131,7 @@ class TestPublish:
             capabilities=["travel", "booking"],
             cap_uri="https://mcp.example.com/.well-known/agent-cap.json",
             cap_sha256="dGVzdGhhc2g",
-            bap=["mcp/1", "a2a/1"],
+            bap="mcp=2.1",
             policy_uri="https://example.com/agent-policy",
             realm="production",
             backend=mock_backend,
@@ -137,17 +140,17 @@ class TestPublish:
         assert result.success is True
         assert result.agent.cap_uri == "https://mcp.example.com/.well-known/agent-cap.json"
         assert result.agent.cap_sha256 == "dGVzdGhhc2g"
-        assert result.agent.bap == ["mcp/1", "a2a/1"]
+        assert result.agent.bap == "mcp=2.1"
         assert result.agent.policy_uri == "https://example.com/agent-policy"
         assert result.agent.realm == "production"
 
         # SVCB params should include custom DNS-AID params
-        svcb = mock_backend.get_svcb_record("example.com", "_booking._mcp._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "booking")
         assert svcb is not None
         # keyNNNNN format by default (RFC 9460 compliant)
         assert svcb["params"]["key65400"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert svcb["params"]["key65401"] == "dGVzdGhhc2g"
-        assert svcb["params"]["key65402"] == "mcp/1,a2a/1"
+        assert svcb["params"]["key65402"] == "mcp=2.1"
         assert svcb["params"]["key65403"] == "https://example.com/agent-policy"
         assert svcb["params"]["key65404"] == "production"
 
@@ -165,11 +168,11 @@ class TestPublish:
         assert result.success is True
         assert result.agent.cap_uri is None
         assert result.agent.cap_sha256 is None
-        assert result.agent.bap == []
+        assert result.agent.bap is None
         assert result.agent.policy_uri is None
         assert result.agent.realm is None
 
-        svcb = mock_backend.get_svcb_record("example.com", "_chat._a2a._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "chat")
         assert svcb is not None
         assert "cap" not in svcb["params"]
         assert "cap-sha256" not in svcb["params"]
@@ -191,7 +194,7 @@ class TestPublish:
         )
 
         assert result.success is True
-        svcb = mock_backend.get_svcb_record("example.com", "_booking._mcp._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "booking")
         assert svcb is not None
         assert svcb["params"]["key65400"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert svcb["params"]["key65404"] == "demo"
@@ -220,7 +223,7 @@ class TestPublish:
         )
         assert result.agent.enroll_uri == "https://overlay.example.com/.well-known/agent-connect"
 
-        svcb = mock_backend.get_svcb_record("example.com", "_overlay._mcp._agents")
+        svcb = mock_backend.get_svcb_record("example.com", "overlay")
         assert svcb is not None
         assert svcb["params"]["key65406"] == "lattice"
         assert (
@@ -228,6 +231,169 @@ class TestPublish:
             == "arn:aws:vpc-lattice:us-east-1:123456789012:service/svc-123"
         )
         assert svcb["params"]["key65408"] == "https://overlay.example.com/.well-known/agent-connect"
+
+
+class TestPublishWellKnown:
+    """Tests for the draft-02 `well-known` SvcParamKey on the publish path."""
+
+    @pytest.mark.asyncio
+    async def test_publish_with_well_known_path(self, mock_backend: MockBackend):
+        """Setting well_known_path emits key65409 on the SVCB record."""
+        result = await publish(
+            name="booking",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="booking.example.com",
+            well_known_path="agent-card.json",
+            backend=mock_backend,
+        )
+        assert result.success is True
+        assert result.agent.well_known_path == "agent-card.json"
+
+        svcb = mock_backend.get_svcb_record("example.com", "booking")
+        assert svcb is not None
+        assert svcb["params"]["key65409"] == "agent-card.json"
+
+    @pytest.mark.asyncio
+    async def test_publish_cap_and_well_known_coexist(self, mock_backend: MockBackend):
+        """`cap` and `well-known` are independent — both may be set on one record."""
+        result = await publish(
+            name="booking",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="booking.example.com",
+            cap_uri="urn:example:agent-cap:abc",
+            cap_sha256="dGVzdGhhc2g",
+            well_known_path="agent-card.json",
+            backend=mock_backend,
+        )
+        assert result.success is True
+        assert result.agent.cap_uri == "urn:example:agent-cap:abc"
+        assert result.agent.well_known_path == "agent-card.json"
+
+        svcb = mock_backend.get_svcb_record("example.com", "booking")
+        assert svcb is not None
+        assert svcb["params"]["key65400"] == "urn:example:agent-cap:abc"
+        assert svcb["params"]["key65401"] == "dGVzdGhhc2g"
+        assert svcb["params"]["key65409"] == "agent-card.json"
+
+
+class TestPublishTargetUnderscoreValidation:
+    """Tests for the draft-02 §Known-Organization no-underscore-in-target rule."""
+
+    @pytest.mark.asyncio
+    async def test_underscored_endpoint_rejected_by_default(self, mock_backend: MockBackend):
+        """Underscored TargetName fails publish unless explicitly allowed."""
+        with pytest.raises(ValidationError) as exc:
+            await publish(
+                name="chat",
+                domain="example.com",
+                protocol="a2a",
+                endpoint="_chat.example.com",
+                backend=mock_backend,
+            )
+        assert exc.value.field == "target"
+
+    @pytest.mark.asyncio
+    async def test_underscored_endpoint_allowed_with_flag_and_env(
+        self, mock_backend: MockBackend, monkeypatch
+    ):
+        """allow_underscore_target=True now requires the operator to
+        ALSO opt in via the env var. Both together let the publish
+        proceed with a structured WARN; one without the other raises."""
+        from unittest.mock import patch
+
+        from dns_aid.utils import validation as validation_module
+
+        monkeypatch.setenv("DNS_AID_ALLOW_UNDERSCORE_TARGET", "1")
+        with patch.object(validation_module, "logger") as mock_logger:
+            result = await publish(
+                name="chat",
+                domain="example.com",
+                protocol="a2a",
+                endpoint="_chat.internal.example",
+                backend=mock_backend,
+                allow_underscore_target=True,
+            )
+        assert result.success is True
+        # The warn fires from each enforcement site (publisher entrypoint
+        # + AgentRecord field_validator + SvcbRecord field_validator) —
+        # all carrying the same warning_class, all keyed on the same
+        # target. That's noisy but coherent: every gate sees the bypass.
+        warn_calls = mock_logger.warning.call_args_list
+        assert len(warn_calls) >= 1
+        assert all(c.kwargs.get("warning_class") == "dns_aid.underscore_bypass" for c in warn_calls)
+        assert all("_chat" in c.kwargs.get("target", "") for c in warn_calls)
+        # PR #154 v2 review (Igor): the bypass must also surface on
+        # PublishResult.warnings as a stable warning_class identifier
+        # — log lines alone aren't a usable signal for log aggregators
+        # or downstream observability.
+        assert "dns_aid.underscore_bypass" in result.warnings
+
+    @pytest.mark.asyncio
+    async def test_underscored_endpoint_strict_default_is_bc_break(
+        self, mock_backend: MockBackend, monkeypatch
+    ):
+        """BC-pin — PR #154 strict-by-default tightening.
+
+        Even without explicitly passing ``allow_underscore_target``, a
+        plain `publish()` with an underscored endpoint MUST raise. This
+        is the BREAKING behaviour called out in CHANGELOG [Unreleased]
+        — a deliberate, versioned change per draft-02 §3.2. If a future
+        commit accidentally relaxes the default, this test holds the
+        line.
+        """
+        monkeypatch.delenv("DNS_AID_ALLOW_UNDERSCORE_TARGET", raising=False)
+        with pytest.raises(ValidationError):
+            await publish(
+                name="chat",
+                domain="example.com",
+                protocol="a2a",
+                endpoint="my_service.internal.example",
+                backend=mock_backend,
+            )
+
+    @pytest.mark.asyncio
+    async def test_clean_endpoint_no_warnings_emitted(self, mock_backend: MockBackend):
+        """A normal endpoint must not populate warnings — the field is
+        for advisories, not always-on noise."""
+        result = await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+        )
+        assert result.success is True
+        assert result.warnings == []
+
+    @pytest.mark.asyncio
+    async def test_underscored_endpoint_flag_without_env_raises(
+        self, mock_backend: MockBackend, monkeypatch
+    ):
+        """Without the env gate, the per-call flag alone is insufficient."""
+        monkeypatch.delenv("DNS_AID_ALLOW_UNDERSCORE_TARGET", raising=False)
+        with pytest.raises(ValidationError):
+            await publish(
+                name="chat",
+                domain="example.com",
+                protocol="a2a",
+                endpoint="_chat.internal.example",
+                backend=mock_backend,
+                allow_underscore_target=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_clean_endpoint_passes(self, mock_backend: MockBackend):
+        """A normal hostname publishes without warnings or errors."""
+        result = await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+        )
+        assert result.success is True
 
 
 class TestUnpublish:
@@ -246,7 +412,7 @@ class TestUnpublish:
         )
 
         # Verify records exist
-        assert mock_backend.get_svcb_record("example.com", "_chat._a2a._agents") is not None
+        assert mock_backend.get_svcb_record("example.com", "chat") is not None
 
         # Unpublish
         result = await unpublish(
@@ -257,7 +423,7 @@ class TestUnpublish:
         )
 
         assert result is True
-        assert mock_backend.get_svcb_record("example.com", "_chat._a2a._agents") is None
+        assert mock_backend.get_svcb_record("example.com", "chat") is None
 
     @pytest.mark.asyncio
     async def test_unpublish_nonexistent(self, mock_backend: MockBackend):
@@ -426,3 +592,121 @@ class TestPublishEdgeCases:
             )
             assert result.success is False
             assert "boom" in result.message
+
+
+class TestPublishWalkableAlias:
+    """Tests for the draft-02 walkable AliasMode write."""
+
+    @pytest.mark.asyncio
+    async def test_walkable_alias_off_by_default(self, mock_backend: MockBackend):
+        """The walkable record is opt-in under -02 to avoid an
+        enumeration handle (crawlers walking _agents.<zone>).
+        Operators who want DNS-SD-style enumeration explicitly enable it."""
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+        )
+
+        walkable = mock_backend.get_svcb_record("example.com", "chat._agents")
+        assert walkable is None, "default must be off to avoid enumeration handle"
+
+    @pytest.mark.asyncio
+    async def test_walkable_alias_written_when_opted_in(self, mock_backend: MockBackend):
+        """publish_walkable_alias=True emits the walkable record."""
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+            publish_walkable_alias=True,
+        )
+
+        walkable = mock_backend.get_svcb_record("example.com", "chat._agents")
+        assert walkable is not None
+        assert walkable["priority"] == 0  # AliasMode
+        assert walkable["target"] == "chat.example.com."
+
+    @pytest.mark.asyncio
+    async def test_walkable_alias_can_be_suppressed(self, mock_backend: MockBackend):
+        """Setting publish_walkable_alias=False on the AgentRecord skips the walkable write."""
+        from dns_aid.core.models import AgentRecord
+
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.A2A,
+            target_host="chat.example.com",
+            publish_walkable_alias=False,
+        )
+        records = await mock_backend.publish_agent(agent)
+
+        # Only SVCB primary + TXT (no walkable).
+        assert len(records) == 2
+        assert mock_backend.get_svcb_record("example.com", "chat._agents") is None
+        assert mock_backend.get_svcb_record("example.com", "chat") is not None
+
+    @pytest.mark.asyncio
+    async def test_unpublish_removes_walkable(self, mock_backend: MockBackend):
+        """unpublish() removes both the flat owner and the walkable alias."""
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+            publish_walkable_alias=True,
+        )
+        assert mock_backend.get_svcb_record("example.com", "chat") is not None
+        assert mock_backend.get_svcb_record("example.com", "chat._agents") is not None
+
+        result = await unpublish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            backend=mock_backend,
+        )
+        assert result is True
+        assert mock_backend.get_svcb_record("example.com", "chat") is None
+        assert mock_backend.get_svcb_record("example.com", "chat._agents") is None
+
+    @pytest.mark.asyncio
+    async def test_unpublish_also_clears_legacy_01_shape(self, mock_backend: MockBackend):
+        """Migration path: unpublish() cleans up draft-01 records too.
+
+        Operators who published under -01 and then upgraded to a -02
+        dns-aid-core should be able to call unpublish() once and have
+        the SVCB + TXT records at `_{name}._{protocol}._agents.{domain}`
+        deleted alongside the new flat / walkable forms.
+        """
+        # Simulate a pre-existing draft-01 publication by writing records
+        # directly at the legacy name.
+        await mock_backend.create_svcb_record(
+            zone="example.com",
+            name="_legacy._mcp._agents",
+            priority=1,
+            target="legacy.example.com.",
+            params={"alpn": "mcp", "port": "443"},
+            ttl=3600,
+        )
+        await mock_backend.create_txt_record(
+            zone="example.com",
+            name="_legacy._mcp._agents",
+            values=["capabilities=test"],
+            ttl=3600,
+        )
+        assert mock_backend.get_svcb_record("example.com", "_legacy._mcp._agents") is not None
+
+        # unpublish() finds and deletes the legacy records even though
+        # nothing was published at the flat/walkable names.
+        result = await unpublish(
+            name="legacy",
+            domain="example.com",
+            protocol="mcp",
+            backend=mock_backend,
+        )
+        assert result is True
+        assert mock_backend.get_svcb_record("example.com", "_legacy._mcp._agents") is None

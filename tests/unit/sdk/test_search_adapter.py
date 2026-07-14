@@ -5,7 +5,8 @@
 Tests for ``_adapt_search_payload`` — the wire-shape adapter that bridges the
 directory's flat ``AgentResponse`` to the SDK's typed ``SearchResult.trust`` /
 ``SearchResult.provenance`` nested objects, plus the small AgentRecord shape
-quirks (``target_host`` from ``endpoint_url``, ``bap`` string→list).
+quirks (``target_host`` from ``endpoint_url``, legacy comma-separated or
+list-shaped ``bap`` values collapsed to the draft-02 scalar form).
 
 The adapter is the *only* place in the SDK that knows about the directory's
 wire shape. If the directory schema drifts, every other piece of SDK code
@@ -193,16 +194,25 @@ class TestAgentShapeQuirks:
         assert event["domain"] == "example.com"
         assert event["reason"] == "no_derivable_target_host"
 
-    def test_bap_string_split_into_list(self) -> None:
-        agent = _directory_agent(bap="mcp/1, a2a/1 ,https/1")
+    def test_bap_comma_separated_collapsed_to_first(self) -> None:
+        """Pre-draft-02 directory rows may serialize bap as a comma-separated
+        string. The adapter collapses to the first (versioned) protocol per
+        draft-02 §FutureWork (Bulk Agent Protocol) — bap is scalar."""
+        agent = _directory_agent(bap="mcp=1.0, a2a=1.1 ,https=1.0")
         payload = _adapt_search_payload(_directory_response(agent))
-        # Trim whitespace, drop empty entries.
-        assert payload["results"][0]["agent"]["bap"] == ["mcp/1", "a2a/1", "https/1"]
+        assert payload["results"][0]["agent"]["bap"] == "mcp=1.0"
 
-    def test_bap_list_passes_through_unchanged(self) -> None:
-        agent = _directory_agent(bap=["mcp/1", "a2a/1"])
+    def test_bap_scalar_passes_through_unchanged(self) -> None:
+        """A scalar bap string (the draft-02 shape) passes through unchanged."""
+        agent = _directory_agent(bap="mcp=2.1")
         payload = _adapt_search_payload(_directory_response(agent))
-        assert payload["results"][0]["agent"]["bap"] == ["mcp/1", "a2a/1"]
+        assert payload["results"][0]["agent"]["bap"] == "mcp=2.1"
+
+    def test_bap_legacy_list_collapsed_to_first(self) -> None:
+        """A legacy directory row that serializes bap as a list also collapses."""
+        agent = _directory_agent(bap="mcp=1.0")
+        payload = _adapt_search_payload(_directory_response(agent))
+        assert payload["results"][0]["agent"]["bap"] == "mcp=1.0"
 
 
 class TestExplicitNullStripping:
@@ -238,14 +248,16 @@ class TestExplicitNullStripping:
         agent = _directory_agent(
             capabilities=["a", "b"],
             version="2.0",
-            bap="mcp/1",
+            bap="mcp=1.0",
             use_cases=["x"],
         )
         payload = _adapt_search_payload(_directory_response(agent))
         result_agent = payload["results"][0]["agent"]
         assert result_agent["capabilities"] == ["a", "b"]
         assert result_agent["version"] == "2.0"
-        assert result_agent["bap"] == ["mcp/1"]
+        # bap is scalar under draft-02 §FutureWork; the adapter passes a
+        # bare string through unchanged.
+        assert result_agent["bap"] == "mcp=1.0"
         assert result_agent["use_cases"] == ["x"]
 
 
@@ -258,7 +270,7 @@ class TestEndToEndValidation:
             trust_score=75,
             popularity_score=99,
             trust_tier=2,
-            bap="mcp/1,a2a/1",
+            bap="mcp=1.0",
             trust_badges=["Verified"],
             discovery_level=2,
         )
@@ -270,7 +282,9 @@ class TestEndToEndValidation:
         assert len(response.results) == 1
         result = response.results[0]
         assert result.agent.target_host == "payments.example.com"
-        assert result.agent.bap == ["mcp/1", "a2a/1"]
+        # bap=`mcp=1.0` is the legacy directory shape; the adapter
+        # collapses to the first value under draft-02 §FutureWork.
+        assert result.agent.bap == "mcp=1.0"
         assert result.score == 39.2
         assert result.trust.security_score == 97
         assert result.trust.popularity_score == 99
@@ -332,7 +346,7 @@ class TestSearchResilience:
         assert result.agent.target_host == "minimal.example.com"
         # Everything else fell back to defaults — no crash.
         assert result.agent.capabilities == []
-        assert result.agent.bap == []
+        assert result.agent.bap is None
         assert result.agent.description is None
         # Trust attestation built from defaults.
         assert result.trust.security_score == 0

@@ -10,6 +10,7 @@ requiring real Infoblox credentials.
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from dns_aid.backends.infoblox.bloxone import InfobloxBloxOneBackend
@@ -49,18 +50,50 @@ class TestInfobloxBloxOneBackend:
         backend = InfobloxBloxOneBackend(api_key="test-key")
         assert backend.name == "bloxone"
 
-    def test_format_svcb_rdata(self):
-        """Test SVCB rdata formatting."""
+    def test_format_svcb_rdata_service_mode(self):
+        """ServiceMode SVCB rdata carries priority + svc_params as {key,value} objects."""
         backend = InfobloxBloxOneBackend(api_key="test-key")
 
         rdata = backend._format_svcb_rdata(
-            priority=1, target="target.example.com", params={"alpn": "mcp", "port": "443"}
+            priority=1,
+            target="target.example.com",
+            params={"alpn": "mcp", "port": "443", "key65400": "https://x/cap.json"},
         )
 
-        # BloxOne only supports target_name in SVCB rdata
         assert rdata["target_name"] == "target.example.com."
-        assert "priority" not in rdata  # Not supported by BloxOne API
-        assert "svc_params" not in rdata  # Not supported by BloxOne API
+        assert rdata["priority"] == 1
+        # svc_params is a list of {"key","value"} (UDDI DNS Data schema), and
+        # DNS-AID private-use keys (key65400-key65405) are carried natively.
+        assert {"key": "alpn", "value": "mcp"} in rdata["svc_params"]
+        assert {"key": "port", "value": "443"} in rdata["svc_params"]
+        assert {"key": "key65400", "value": "https://x/cap.json"} in rdata["svc_params"]
+
+    def test_format_svcb_rdata_alias_mode(self):
+        """AliasMode (priority 0) carries no svc_params (used for walkable aliases)."""
+        backend = InfobloxBloxOneBackend(api_key="test-key")
+
+        rdata = backend._format_svcb_rdata(priority=0, target="flat.example.com.", params={})
+
+        assert rdata == {"priority": 0, "target_name": "flat.example.com."}
+
+    def test_supports_private_svcb_keys(self):
+        """UDDI declares private-key support, so customs are not demoted to TXT."""
+        backend = InfobloxBloxOneBackend(api_key="test-key")
+        assert backend.supports_private_svcb_keys is True
+
+    def test_svcb_presentation_service_mode(self):
+        """SVCB readback renders real priority + params (not a hardcoded 0)."""
+        value = InfobloxBloxOneBackend._svcb_presentation(
+            {
+                "priority": 1,
+                "target_name": "mcp.example.com.",
+                "svc_params": [
+                    {"key": "alpn", "value": "mcp"},
+                    {"key": "no-default-alpn", "value": ""},
+                ],
+            }
+        )
+        assert value == "1 mcp.example.com. alpn=mcp no-default-alpn"
 
     def test_format_svcb_rdata_with_trailing_dot(self):
         """Test SVCB rdata doesn't double trailing dot."""
@@ -146,8 +179,14 @@ class TestInfobloxBloxOneBackendAsync:
     ):
         """Test SVCB record creation."""
         with patch.object(backend, "_request", new_callable=AsyncMock) as mock_req:
-            # Calls: view lookup, zone lookup, record creation
-            mock_req.side_effect = [mock_view_response, mock_zone_response, mock_record_response]
+            # Calls: view lookup, zone lookup, upsert-existing lookup (none
+            # present), record creation.
+            mock_req.side_effect = [
+                mock_view_response,
+                mock_zone_response,
+                {"results": []},  # no existing SVCB at this name
+                mock_record_response,
+            ]
 
             result = await backend.create_svcb_record(
                 zone="example.com",
@@ -159,10 +198,10 @@ class TestInfobloxBloxOneBackendAsync:
             )
 
             assert result == "_test._mcp._agents.example.com"
-            assert mock_req.call_count == 3
+            assert mock_req.call_count == 4
 
             # Verify the POST call payload
-            post_call = mock_req.call_args_list[2]
+            post_call = mock_req.call_args_list[3]
             assert post_call[0][0] == "POST"
             assert post_call[0][1] == "/dns/record"
             payload = post_call[1]["json"]
@@ -181,8 +220,14 @@ class TestInfobloxBloxOneBackendAsync:
         }
 
         with patch.object(backend, "_request", new_callable=AsyncMock) as mock_req:
-            # Calls: view lookup, zone lookup, record creation
-            mock_req.side_effect = [mock_view_response, mock_zone_response, mock_txt_response]
+            # Calls: view lookup, zone lookup, upsert-existing lookup (none
+            # present), record creation.
+            mock_req.side_effect = [
+                mock_view_response,
+                mock_zone_response,
+                {"results": []},  # no existing TXT at this name
+                mock_txt_response,
+            ]
 
             result = await backend.create_txt_record(
                 zone="example.com",
@@ -194,10 +239,110 @@ class TestInfobloxBloxOneBackendAsync:
             assert result == "_test._mcp._agents.example.com"
 
             # Verify payload
-            post_call = mock_req.call_args_list[2]
+            post_call = mock_req.call_args_list[3]
             payload = post_call[1]["json"]
             assert payload["type"] == "TXT"
             assert "capabilities" in payload["rdata"]["text"]
+
+    async def test_create_is_idempotent_patches_existing_in_place(
+        self, backend, mock_view_response, mock_zone_response
+    ):
+        """A create with an existing record at the same (name, type) updates it
+        in place with PATCH — an upsert that never deletes the live record
+        before the replacement is committed, so a failed write can't drop it
+        (regression for the BloxOne _index._agents duplication bug, hardened so
+        a rejected re-publish keeps the previous record)."""
+        existing = {"results": [{"id": "dns/record/old-index-1"}]}
+        patch_resp = {"result": {"id": "dns/record/old-index-1", "type": "TXT"}}
+
+        with patch.object(backend, "_request", new_callable=AsyncMock) as mock_req:
+            # view, zone, upsert-existing lookup (one present), PATCH
+            mock_req.side_effect = [
+                mock_view_response,
+                mock_zone_response,
+                existing,
+                patch_resp,
+            ]
+
+            await backend.create_txt_record(
+                zone="example.com",
+                name="_index._agents",
+                values=["agents=chat:mcp"],
+                ttl=3600,
+            )
+
+            methods_paths = [(c[0][0], c[0][1]) for c in mock_req.call_args_list]
+            # The live record is updated in place — no delete, no create.
+            assert ("PATCH", "/dns/record/old-index-1") in methods_paths
+            assert not any(m == "DELETE" for m, _ in methods_paths), (
+                "in-place upsert must not delete the live record"
+            )
+            assert not any(m == "POST" and p == "/dns/record" for m, p in methods_paths), (
+                "an existing record is patched, not re-created"
+            )
+            # PATCH carries the new rdata.
+            patch_call = next(c for c in mock_req.call_args_list if c[0][0] == "PATCH")
+            assert "agents=chat:mcp" in patch_call[1]["json"]["rdata"]["text"]
+
+    async def test_upsert_heals_duplicates(self, backend, mock_view_response, mock_zone_response):
+        """When earlier non-idempotent writes left duplicates, the upsert patches
+        the first and removes the extras so the name converges on one record."""
+        existing = {"results": [{"id": "dns/record/dup-1"}, {"id": "dns/record/dup-2"}]}
+        patch_resp = {"result": {"id": "dns/record/dup-1", "type": "TXT"}}
+
+        with patch.object(backend, "_request", new_callable=AsyncMock) as mock_req:
+            # view, zone, existing lookup (two present), PATCH first, DELETE extra
+            mock_req.side_effect = [
+                mock_view_response,
+                mock_zone_response,
+                existing,
+                patch_resp,
+                {},  # DELETE of the duplicate
+            ]
+
+            await backend.create_txt_record(
+                zone="example.com",
+                name="_index._agents",
+                values=["agents=chat:mcp"],
+                ttl=3600,
+            )
+
+            methods_paths = [(c[0][0], c[0][1]) for c in mock_req.call_args_list]
+            assert ("PATCH", "/dns/record/dup-1") in methods_paths
+            assert ("DELETE", "/dns/record/dup-2") in methods_paths
+            patch_idx = methods_paths.index(("PATCH", "/dns/record/dup-1"))
+            delete_idx = methods_paths.index(("DELETE", "/dns/record/dup-2"))
+            assert patch_idx < delete_idx, "patch the survivor before pruning duplicates"
+
+    async def test_upsert_failed_patch_preserves_record(
+        self, backend, mock_view_response, mock_zone_response
+    ):
+        """A failed in-place update must not have deleted the live record first —
+        the previous record keeps serving (no silent agent disappearance)."""
+        existing = {"results": [{"id": "dns/record/live-1"}]}
+
+        with patch.object(backend, "_request", new_callable=AsyncMock) as mock_req:
+            mock_req.side_effect = [
+                mock_view_response,
+                mock_zone_response,
+                existing,
+                httpx.HTTPStatusError(
+                    "boom", request=MagicMock(), response=MagicMock(status_code=400)
+                ),
+            ]
+
+            with pytest.raises(httpx.HTTPStatusError):
+                await backend.create_svcb_record(
+                    zone="example.com",
+                    name="_test._mcp._agents",
+                    priority=1,
+                    target="mcp.example.com",
+                    params={"alpn": "mcp", "port": "443"},
+                )
+
+            methods = [c[0][0] for c in mock_req.call_args_list]
+            # Critical: no DELETE was issued, so the existing record still exists.
+            assert "DELETE" not in methods, "a failed upsert must never delete the live record"
 
     async def test_delete_record_success(self, backend, mock_view_response, mock_zone_response):
         """Test successful record deletion."""

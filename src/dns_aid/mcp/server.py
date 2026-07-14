@@ -5,7 +5,7 @@
 DNS-AID MCP Server.
 
 Provides MCP tools for AI agents to publish and discover other agents via DNS.
-Uses the DNS-AID protocol (IETF draft-mozleywilliams-dnsop-dnsaid-01).
+Uses the DNS-AID protocol (IETF draft-mozleywilliams-dnsop-dnsaid-02).
 
 Usage:
     # Run with stdio transport (default for MCP)
@@ -113,10 +113,10 @@ Use these tools to:
 - Verify that an agent's DNS records are properly configured
 - List all agents published at a domain
 
-DNS-AID uses SVCB records (RFC 9460) with the naming convention:
-_{agent-name}._{protocol}._agents.{domain}
+DNS-AID uses SVCB records (RFC 9460). Under draft-02 an agent's primary
+record lives at the flat owner name {agent-name}.{domain}.
 
-Example: _chat._mcp._agents.example.com""",
+Example: chat.example.com""",
 )
 
 
@@ -239,7 +239,8 @@ def publish_agent_to_dns(
     update_index: bool = True,
     cap_uri: str | None = None,
     cap_sha256: str | None = None,
-    bap: list[str] | None = None,
+    well_known_path: str | None = None,
+    bap: str | None = None,
     policy_uri: str | None = None,
     realm: str | None = None,
     connect_class: str | None = None,
@@ -247,12 +248,15 @@ def publish_agent_to_dns(
     enroll_uri: str | None = None,
     ipv4_hint: list[str] | None = None,
     ipv6_hint: list[str] | None = None,
+    allow_underscore_target: bool = False,
+    publish_walkable_alias: bool = False,
 ) -> dict:
     """
     Publish an AI agent to DNS using DNS-AID protocol.
 
     Creates SVCB and TXT records that allow other agents to discover this agent.
-    The agent will be discoverable at: _{name}._{protocol}._agents.{domain}
+    The agent will be discoverable at the flat draft-02 FQDN ``{name}.{domain}``
+    (with an optional walkable AliasMode at ``{name}._agents.{domain}``).
 
     By default, also updates the domain's index record (_index._agents.{domain})
     to include this agent for efficient discovery.
@@ -279,8 +283,17 @@ def publish_agent_to_dns(
         cap_sha256: Base64url-encoded SHA-256 digest of the capability descriptor
             for integrity checks and cache revalidation. Included in the SVCB record
             as a `cap-sha256` parameter.
-        bap: Supported bulk agent protocols (e.g., ["mcp", "a2a"]). Included in
-            the SVCB record as a `bap` parameter.
+        well_known_path: RFC 8615 well-known path suffix (e.g., "agent-card.json")
+            for the DNS-AID draft-02 `well-known` SvcParamKey. Independent of
+            cap_uri; both may be set. Consumers prefer cap_uri when both are present
+            and fall back to reconstructing
+            https://<svcb-target>/.well-known/<well_known_path>.
+        bap: Optional single versioned agent-protocol identifier (e.g.,
+            "mcp=2.1", "a2a=1.0") for the Bulk Agent Protocol SvcParamKey.
+            Experimental per draft-02 §FutureWork; alpn remains the canonical
+            protocol carrier. Multi-protocol agents publish multiple records
+            at the same flat owner, each with its own alpn and (optionally)
+            bap — NOT as a list on one record.
         policy_uri: URI to agent policy document. Included in the SVCB record as
             a `policy` parameter.
         realm: Multi-tenant scope identifier (e.g., "production", "staging").
@@ -289,6 +302,22 @@ def publish_agent_to_dns(
             Eliminates extra A record lookup for the target hostname.
         ipv6_hint: IPv6 address hints for SVCB record (RFC 9460 key 6).
             Eliminates extra AAAA record lookup for the target hostname.
+        allow_underscore_target: When True, downgrade a "TargetName contains
+            underscored label" violation from an error to a warning. Per
+            draft-mozleywilliams-dnsop-dnsaid-02 §3.2 (Known Organization, Unknown Agent), SVCB
+            TargetNames reached over TLS with publicly-issued x.509 certs
+            MUST NOT contain underscores. Set this only when the target is
+            internal-only and will not be reached over public PKI.
+        publish_walkable_alias: When True, additionally write the
+            optional walkable AliasMode SVCB record at
+            ``{name}._agents.{domain}`` pointing at the flat primary
+            owner. Default False — the walkable record is an
+            enumeration handle (a crawler can walk ``_agents.<zone>``
+            and inventory every agent the operator publishes), which
+            is undesirable for most deployments. Enable when you
+            actively want the agent discoverable via enumeration:
+            internal directories, intentional public catalogs, or
+            DNS-SD-style consumers.
 
     Returns:
         dict with:
@@ -339,6 +368,7 @@ def publish_agent_to_dns(
             backend=dns_backend,
             cap_uri=cap_uri,
             cap_sha256=cap_sha256,
+            well_known_path=well_known_path,
             bap=bap,
             policy_uri=policy_uri,
             realm=realm,
@@ -347,6 +377,8 @@ def publish_agent_to_dns(
             enroll_uri=enroll_uri,
             ipv4_hint=ipv4_hint,
             ipv6_hint=ipv6_hint,
+            allow_underscore_target=allow_underscore_target,
+            publish_walkable_alias=publish_walkable_alias,
         )
 
     try:
@@ -397,6 +429,122 @@ def publish_agent_to_dns(
 
 
 @mcp.tool(
+    title="Publish ARD Catalog Pointer",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+def publish_catalog_pointer(
+    domain: str,
+    catalog_host: str,
+    filename: str = "ai-catalog.json",
+    catalog_only: bool = False,
+    force_index: bool = False,
+    port: int = 443,
+    ipv4_hint: str | None = None,
+    ipv6_hint: str | None = None,
+    ttl: int = 3600,
+    backend: Literal[
+        "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", "mock"
+    ] = "route53",
+) -> dict:
+    """Publish ARD catalog DNS pointer records for a domain.
+
+    Writes SVCB records under ``_catalog._agents.{domain}`` (ARD §6.1) and,
+    unless ``catalog_only`` is set, ``_index._agents.{domain}`` (DNS-AID
+    draft-02 §3.2), both pointing at ``catalog_host``. This lets DNS-AID
+    clients (which probe ``_index._agents``) and ARD-native clients (which
+    probe ``_catalog._agents``) discover the catalog from one DNS lookup.
+
+    Note: ``_index._agents`` is DNS-AID's generic org-index pointer — writing
+    it makes the ARD catalog serve as the domain's index and replaces any
+    existing ``_index._agents`` SVCB. Set ``catalog_only=True`` to publish
+    only the ARD-specific label. ``catalog_host`` must not contain underscored
+    labels (it carries a public x.509 certificate).
+    """
+    from dns_aid.core.catalog_pointer import CATALOG_POINTER_LABELS, publish_catalog_pointer
+
+    try:
+        dns_backend = _get_dns_backend(backend)
+        labels = ("_catalog._agents",) if catalog_only else CATALOG_POINTER_LABELS
+        written = _run_async(
+            publish_catalog_pointer(
+                domain,
+                catalog_host,
+                filename=filename,
+                labels=labels,
+                backend=dns_backend,
+                ttl=ttl,
+                port=port,
+                ipv4_hint=ipv4_hint,
+                ipv6_hint=ipv6_hint,
+                force_index=force_index,
+            )
+        )
+        return {
+            "success": True,
+            "domain": domain,
+            "catalog_host": catalog_host,
+            "catalog_url": f"https://{catalog_host}/.well-known/{filename}",
+            "records": written,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "publish_catalog_error",
+            "message": str(e),
+        }
+
+
+@mcp.tool(
+    title="Unpublish ARD Catalog Pointer",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+def unpublish_catalog_pointer(
+    domain: str,
+    catalog_only: bool = False,
+    backend: Literal[
+        "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", "mock"
+    ] = "route53",
+) -> dict:
+    """Remove ARD catalog DNS pointer records for a domain.
+
+    Deletes the SVCB records under ``_catalog._agents.{domain}`` and, unless
+    ``catalog_only`` is set, ``_index._agents.{domain}``. Any TXT at
+    ``_index._agents`` (org-index listing) is left intact. Idempotent —
+    missing records are a no-op.
+    """
+    from dns_aid.core.catalog_pointer import (
+        CATALOG_POINTER_LABELS,
+        unpublish_catalog_pointer,
+    )
+
+    try:
+        dns_backend = _get_dns_backend(backend)
+        labels = ("_catalog._agents",) if catalog_only else CATALOG_POINTER_LABELS
+        removed = _run_async(unpublish_catalog_pointer(domain, labels=labels, backend=dns_backend))
+        return {
+            "success": True,
+            "domain": domain,
+            "removed": removed,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "unpublish_catalog_error",
+            "message": str(e),
+        }
+
+
+@mcp.tool(
     title="Discover Agents via DNS",
     annotations=ToolAnnotations(
         readOnlyHint=True,
@@ -416,10 +564,13 @@ def discover_agents_via_dns(
     intent: Literal["query", "command", "transaction", "subscription"] | None = None,
     transport: str | None = None,
     realm: str | None = None,
+    require_dnssec: bool = False,
     min_dnssec: bool = False,
+    trust_dnssec_pointers: bool = False,
     text_match: str | None = None,
     require_signed: bool = False,
     require_signature_algorithm: list[str] | None = None,
+    verify_dane: bool = False,
 ) -> dict:
     """
     Discover AI agents at any public domain using the DNS-AID protocol (no credentials needed).
@@ -427,9 +578,9 @@ def discover_agents_via_dns(
     Discovery flow (DNS-only, default):
       1. Query the TXT index record at _index._agents.{domain} to get the list of
          published agent names and their protocols.
-      2. For each agent in the index, query the SVCB record at
-         _{name}._{protocol}._agents.{domain} to resolve the target host, port,
-         and ALPN protocol — plus DNS-AID custom params (cap, bap, policy, realm).
+      2. For each agent in the index, query the SVCB record at the flat owner
+         {name}.{domain} to resolve the target host, port, and ALPN protocol —
+         plus DNS-AID custom params (cap, bap, policy, realm).
       3. If the SVCB record contains a `cap` param (URI to capability document),
          fetch the capability document via HTTPS for rich capability metadata.
       4. If the cap URI is missing or the fetch fails, fall back to querying the
@@ -479,7 +630,7 @@ def discover_agents_via_dns(
             - realm: Multi-tenant scope identifier (if present in SVCB record)
             - description: Human-readable agent description (if available)
             - fqdn: Fully qualified DNS name for this agent
-              (e.g., "_booking._mcp._agents.example.com")
+              (e.g., "booking.example.com")
         - count: Number of agents found
         - query_time_ms: Total discovery latency in milliseconds
     """
@@ -507,10 +658,13 @@ def discover_agents_via_dns(
             intent=intent,
             transport=transport,
             realm=realm,
+            require_dnssec=require_dnssec,
             min_dnssec=min_dnssec,
+            trust_dnssec_pointers=trust_dnssec_pointers,
             text_match=text_match,
             require_signed=require_signed,
             require_signature_algorithm=require_signature_algorithm,
+            verify_dane=verify_dane,
         )
 
     try:
@@ -530,11 +684,29 @@ def discover_agents_via_dns(
                     "capability_source": agent.capability_source,
                     "cap_uri": agent.cap_uri,
                     "cap_sha256": agent.cap_sha256,
-                    "bap": agent.bap if agent.bap else None,
+                    "well_known_path": agent.well_known_path,
+                    "bap": agent.bap,
                     "policy_uri": agent.policy_uri,
                     "realm": agent.realm,
                     "description": agent.description,
                     "fqdn": agent.fqdn,
+                    # ARD-sourced / opt-in keys only — omitted otherwise so legacy
+                    # output stays byte-identical.
+                    **(
+                        {"catalog_trust": agent.catalog_trust}
+                        if agent.catalog_trust is not None
+                        else {}
+                    ),
+                    **(
+                        {"dane_verified": agent.dane_verified}
+                        if agent.dane_verified is not None
+                        else {}
+                    ),
+                    **(
+                        {"trust_manifest": agent.trust_manifest.model_dump()}
+                        if agent.trust_manifest is not None
+                        else {}
+                    ),
                 }
                 for agent in result.agents
             ],
@@ -878,8 +1050,8 @@ def verify_agent_dns(fqdn: str) -> dict:
 
     Args:
         fqdn: Fully qualified domain name of the agent record.
-              Format: _{agent-name}._{protocol}._agents.{domain}
-              Example: "_chat._mcp._agents.example.com"
+              Under draft-02 this is the flat owner {agent-name}.{domain}.
+              Example: "chat.example.com"
 
     Returns:
         dict with:
@@ -887,7 +1059,11 @@ def verify_agent_dns(fqdn: str) -> dict:
         - record_exists: Whether the DNS record exists
         - svcb_valid: Whether the SVCB record is properly formatted
         - dnssec_valid: Whether DNSSEC validation passed (None if not checked)
+        - dnssec_note: Honest caveat on the DNSSEC check (AD-flag based; no
+          independent DNSKEY->DS->RRSIG chain validation)
+        - dnssec_detail: Algorithm, chain depth, NSEC3, AD flag (None if not checked)
         - dane_valid: Whether DANE/TLSA is configured (None if not checked)
+        - dane_note: Explanation of the DANE result / demotion
         - endpoint_reachable: Whether the endpoint responds
         - endpoint_latency_ms: Response latency if reachable
         - security_score: Score from 0-100
@@ -912,7 +1088,12 @@ def verify_agent_dns(fqdn: str) -> dict:
             "record_exists": result.record_exists,
             "svcb_valid": result.svcb_valid,
             "dnssec_valid": result.dnssec_valid,
+            "dnssec_note": result.dnssec_note,
+            "dnssec_detail": (
+                result.dnssec_detail.model_dump() if result.dnssec_detail is not None else None
+            ),
             "dane_valid": result.dane_valid,
+            "dane_note": result.dane_note,
             "endpoint_reachable": result.endpoint_reachable,
             "endpoint_latency_ms": result.endpoint_latency_ms,
             "security_score": result.security_score,
@@ -976,12 +1157,11 @@ def list_published_agents(
     dns_backend = _get_dns_backend(backend)
 
     async def _list():
+        from dns_aid.core.lister import list_dns_aid_records
+
         if not await dns_backend.zone_exists(domain):
             return None  # sentinel: zone not found
-        records = []
-        async for record in dns_backend.list_records(domain, name_pattern="_agents"):
-            records.append(record)
-        return records
+        return await list_dns_aid_records(dns_backend, domain)
 
     try:
         records = _run_async(_list())
@@ -1082,7 +1262,7 @@ def delete_agent_from_dns(
 
     try:
         result = _run_async(_unpublish())
-        fqdn = f"_{name}._{protocol}._agents.{domain}"
+        fqdn = f"{name}.{domain}"
 
         index_updated = False
         index_message = None
@@ -1180,7 +1360,7 @@ def list_agent_index(
                 {
                     "name": entry.name,
                     "protocol": entry.protocol,
-                    "fqdn": f"_{entry.name}._{entry.protocol}._agents.{domain}",
+                    "fqdn": f"{entry.name}.{domain}",
                 }
                 for entry in entries
             ],
@@ -1929,8 +2109,8 @@ try:
                     "/health": "Health check (GET)",
                     "/ready": "Readiness check (GET)",
                 },
-                "documentation": "https://github.com/infobloxopen/dns-aid-core",
-                "specification": "IETF draft-mozleywilliams-dnsop-dnsaid-01",
+                "documentation": "https://github.com/dns-aid/dns-aid-core",
+                "specification": "IETF draft-mozleywilliams-dnsop-dnsaid-02",
             }
         )
 

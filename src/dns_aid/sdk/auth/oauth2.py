@@ -86,9 +86,9 @@ class OAuth2AuthHandler(AuthHandler):
             # SSRF protection: validate token URL before sending credentials.
             # token_url may come from untrusted agent metadata (oauth_discovery).
             try:
-                from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url
+                from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
 
-                validate_fetch_url(token_url)
+                await validate_fetch_url_async(token_url)
             except UnsafeURLError as e:
                 raise OAuth2TokenError(f"Token URL blocked by SSRF protection: {e}") from e
 
@@ -137,9 +137,9 @@ class OAuth2AuthHandler(AuthHandler):
 
         # SSRF protection: discovery_url may come from untrusted agent metadata.
         try:
-            from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url
+            from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
 
-            validate_fetch_url(self._discovery_url)
+            await validate_fetch_url_async(self._discovery_url)
         except UnsafeURLError as e:
             raise OAuth2TokenError(f"Discovery URL blocked by SSRF protection: {e}") from e
 
@@ -157,7 +157,7 @@ class OAuth2AuthHandler(AuthHandler):
         # response — a malicious discovery server could redirect credentials
         # to an internal host (e.g., cloud metadata at 169.254.169.254).
         try:
-            validate_fetch_url(token_endpoint)
+            await validate_fetch_url_async(token_endpoint)
         except UnsafeURLError as e:
             raise OAuth2TokenError(
                 f"Discovered token_endpoint blocked by SSRF protection: {e}"

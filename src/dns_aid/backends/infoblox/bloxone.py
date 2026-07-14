@@ -19,6 +19,7 @@ import httpx
 import structlog
 
 from dns_aid.backends.base import DNSBackend
+from dns_aid.core.models import SVCB_ALIAS_MODE
 
 logger = structlog.get_logger(__name__)
 
@@ -93,6 +94,18 @@ class InfobloxBloxOneBackend(DNSBackend):
     def dns_view(self) -> str:
         """Get the configured DNS view name."""
         return self._dns_view
+
+    @property
+    def supports_private_svcb_keys(self) -> bool:
+        """Infoblox UDDI accepts private-use SVCB keys (key65280-key65534).
+
+        UDDI's DNS Data API takes the DNS-AID custom SvcParams
+        (cap / cap-sha256 / bap / policy / realm / sig / connect-* / enroll-uri,
+        encoded as key65400-key65405) natively in ServiceMode ``svc_params``,
+        so they are written on the SVCB record itself rather than demoted to a
+        TXT companion. Confirmed against the live UDDI DNS Data API.
+        """
+        return True
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create async HTTP client.
@@ -272,24 +285,115 @@ class InfobloxBloxOneBackend(DNSBackend):
         target: str,
         params: dict[str, str],
     ) -> dict:
-        """
-        Format SVCB rdata for BloxOne API.
+        """Format SVCB rdata for the Infoblox UDDI DNS Data API.
 
-        BloxOne SVCB rdata format uses only target_name.
-        Priority defaults to 0 (alias mode) in BloxOne.
-
-        Note: BloxOne currently supports basic SVCB without SVC params.
-        For full SVCB with alpn/port params, use the TXT record for metadata.
+        UDDI accepts full ServiceMode SVCB. The rdata is an integer
+        ``priority`` (0 = AliasMode, >0 = ServiceMode), a ``target_name``, and,
+        in ServiceMode, ``svc_params`` as a list of ``{"key", "value"}``
+        objects. Standard keys (alpn, port, ipv4hint, ipv6hint, mandatory, ...)
+        and the DNS-AID private-use keys (key65400-key65405) are all accepted
+        natively, so params are written on the SVCB record rather than demoted
+        to a TXT companion.
         """
-        # Ensure target has trailing dot
         if not target.endswith("."):
             target = f"{target}."
 
-        # BloxOne only accepts target_name for SVCB
-        # Priority and svc_params are not supported in current API
-        return {
-            "target_name": target,
+        rdata: dict = {"priority": priority, "target_name": target}
+        # AliasMode (priority 0) carries no SvcParams; ServiceMode puts the
+        # SvcParams on the SVCB record itself.
+        if priority != SVCB_ALIAS_MODE and params:
+            rdata["svc_params"] = [{"key": k, "value": str(v)} for k, v in params.items()]
+        return rdata
+
+    @staticmethod
+    def _svcb_presentation(rdata: dict) -> str:
+        """Render UDDI SVCB rdata as an RFC 9460 presentation-format value.
+
+        Handles ServiceMode (``priority`` > 0 with a ``svc_params`` list) as
+        well as AliasMode (``priority`` 0). Tolerates an empty/absent
+        ``svc_params`` and value-less keys (e.g. ``no-default-alpn``).
+        """
+        priority = rdata.get("priority", 0)
+        target = rdata.get("target_name", "")
+        svc_params = rdata.get("svc_params") or []
+        if isinstance(svc_params, list):
+            rendered = " ".join(
+                f"{p['key']}={p['value']}" if p.get("value") else p.get("key", "")
+                for p in svc_params
+                if p.get("key")
+            )
+        else:
+            rendered = str(svc_params)
+        return f"{priority} {target} {rendered}".strip()
+
+    async def _upsert_record(
+        self,
+        zone_id: str,
+        name_in_zone: str,
+        record_type: str,
+        rdata: dict,
+        ttl: int,
+        comment: str,
+    ) -> str:
+        """Idempotently write exactly one record at ``(name_in_zone, type)``.
+
+        Read-modify-write upsert: when a record already exists it is updated in
+        place with ``PATCH``; otherwise a new record is created with ``POST``.
+
+        PATCH never removes the live record before the replacement is committed,
+        so a rejected or failed write leaves the previous record intact. The
+        earlier delete-then-create ordering could drop the record entirely if
+        the follow-up create was rejected (a transient API error, throttle, or
+        oversize payload during a re-publish), which for SVCB meant an agent
+        silently disappearing from DNS. PATCH closes that window: the worst case
+        is the record keeping its previous value.
+
+        DNS-AID owns the names it writes (agent owners and ``_index._agents``)
+        and keeps exactly one record per ``(name, type)``, so re-publishing and
+        repeated index updates converge on a single record without the BloxOne
+        ``409 Conflict`` that non-idempotent POST-only writes hit. Any duplicate
+        records left by an earlier non-idempotent write are healed best-effort:
+        the first is updated and the extras removed.
+
+        Returns the id of the surviving record.
+        """
+        import contextlib
+
+        response = await self._request(
+            "GET",
+            "/dns/record",
+            params={
+                "_filter": (
+                    f'zone=="{zone_id}" and name_in_zone=="{name_in_zone}" '
+                    f'and type=="{record_type}"'
+                ),
+                "_limit": "100",
+            },
+        )
+        existing = [r.get("id") for r in response.get("results", []) if r.get("id")]
+        body = {"rdata": rdata, "ttl": ttl, "comment": comment}
+
+        if existing:
+            primary = existing[0]
+            # Update the live record in place — its previous rdata survives a
+            # failed PATCH, so a write error never leaves the name empty.
+            patched = await self._request("PATCH", f"/{primary}", json=body)
+            # Heal duplicates from an earlier non-idempotent write. Best-effort:
+            # a leftover duplicate is reconciled on the next write rather than
+            # failing the upsert.
+            for dup in existing[1:]:
+                with contextlib.suppress(Exception):
+                    await self._request("DELETE", f"/{dup}")
+            return patched.get("result", {}).get("id", primary)
+
+        payload = {
+            "name_in_zone": name_in_zone,
+            "zone": zone_id,
+            "type": record_type,
+            **body,
         }
+        created = await self._request("POST", "/dns/record", json=payload)
+        return created.get("result", {}).get("id", "")
 
     async def create_svcb_record(
         self,
@@ -315,7 +419,7 @@ class InfobloxBloxOneBackend(DNSBackend):
         rdata = self._format_svcb_rdata(priority, target, params)
 
         logger.info(
-            "Creating SVCB record in BloxOne",
+            "Writing SVCB record in BloxOne",
             zone=zone,
             name=name_in_zone,
             fqdn=fqdn,
@@ -323,21 +427,18 @@ class InfobloxBloxOneBackend(DNSBackend):
             ttl=ttl,
         )
 
-        # Create record via API
-        payload = {
-            "name_in_zone": name_in_zone,
-            "zone": zone_id,
-            "type": "SVCB",
-            "rdata": rdata,
-            "ttl": ttl,
-            "comment": f"DNS-AID: SVCB record for {name}",
-        }
-
-        response = await self._request("POST", "/dns/record", json=payload)
-
-        record_id = response.get("result", {}).get("id")
+        # Idempotent in-place upsert (PATCH existing / POST new): re-publishing
+        # an agent updates the record without dropping it on a failed write.
+        record_id = await self._upsert_record(
+            zone_id,
+            name_in_zone,
+            "SVCB",
+            rdata,
+            ttl,
+            f"DNS-AID: SVCB record for {name}",
+        )
         logger.info(
-            "SVCB record created in BloxOne",
+            "SVCB record written in BloxOne",
             fqdn=fqdn,
             record_id=record_id,
         )
@@ -364,7 +465,7 @@ class InfobloxBloxOneBackend(DNSBackend):
         rdata = {"text": " ".join(f'"{v}"' for v in values)}
 
         logger.info(
-            "Creating TXT record in BloxOne",
+            "Writing TXT record in BloxOne",
             zone=zone,
             name=name,
             fqdn=fqdn,
@@ -372,20 +473,19 @@ class InfobloxBloxOneBackend(DNSBackend):
             ttl=ttl,
         )
 
-        payload = {
-            "name_in_zone": name,
-            "zone": zone_id,
-            "type": "TXT",
-            "rdata": rdata,
-            "ttl": ttl,
-            "comment": f"DNS-AID: TXT record for {name}",
-        }
-
-        response = await self._request("POST", "/dns/record", json=payload)
-
-        record_id = response.get("result", {}).get("id")
+        # Idempotent in-place upsert (PATCH existing / POST new): repeated index
+        # updates (_index._agents) and re-publishes converge on one record
+        # without duplicate accumulation or 409 conflicts.
+        record_id = await self._upsert_record(
+            zone_id,
+            name,
+            "TXT",
+            rdata,
+            ttl,
+            f"DNS-AID: TXT record for {name}",
+        )
         logger.info(
-            "TXT record created in BloxOne",
+            "TXT record written in BloxOne",
             fqdn=fqdn,
             record_id=record_id,
         )
@@ -509,11 +609,7 @@ class InfobloxBloxOneBackend(DNSBackend):
                 if rtype == "TXT":
                     values = [rdata.get("text", "")]
                 elif rtype == "SVCB":
-                    target = rdata.get("target_name", "")
-                    # BloxOne SVCB only supports alias mode (priority 0)
-                    # The API doesn't return priority in rdata, but always uses 0
-                    svc_params = rdata.get("svc_params", "")
-                    values = [f"0 {target} {svc_params}".strip()]
+                    values = [self._svcb_presentation(rdata)]
                 else:
                     # Generic handling
                     values = [str(rdata)]
@@ -587,9 +683,7 @@ class InfobloxBloxOneBackend(DNSBackend):
             if record_type == "TXT":
                 values = [rdata.get("text", "")]
             elif record_type == "SVCB":
-                target = rdata.get("target_name", "")
-                svc_params = rdata.get("svc_params", "")
-                values = [f"0 {target} {svc_params}".strip()]
+                values = [self._svcb_presentation(rdata)]
             else:
                 values = [str(rdata)]
 

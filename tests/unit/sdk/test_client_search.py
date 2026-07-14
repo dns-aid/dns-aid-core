@@ -52,7 +52,7 @@ def _agent_payload(name: str = "payments", domain: str = "example.com") -> dict[
         "endpoint_url": f"https://{name}.{domain}",
         "port": 443,
         "capabilities": ["payment-processing"],
-        "bap": "mcp/1,a2a/1",
+        "bap": "mcp=1.0",
         # Trust signals flat on the agent (directory contract).
         "security_score": 80,
         "trust_score": 75,

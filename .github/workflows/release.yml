@@ -19,12 +19,12 @@ jobs:
       id-token: write     # required for Sigstore keyless OIDC signing
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
         with:
           fetch-depth: 0  # Full history needed for git-cliff changelog
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
@@ -50,6 +50,13 @@ jobs:
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        with:
+          # Pin the cosign binary to the 2.x line. cosign 3.x changed
+          # `sign-blob` bundle handling ("create bundle file: open : no such
+          # file or directory") and broke the --output-signature /
+          # --output-certificate invocation below. v2.x matches the signing
+          # behavior the workflow was written for (and that shipped 0.23.0).
+          cosign-release: "v2.6.3"
 
       - name: Sign release artifacts
         run: |
@@ -100,3 +107,40 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
+
+  publish-to-mcp-registry:
+    name: Publish to MCP Registry
+    # Runs after PyPI so the just-published README (with the mcp-name tag) is
+    # live for the registry's PyPI-ownership validation.
+    needs: publish-to-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # OIDC for `mcp-publisher login github-oidc`
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+
+      - name: Install mcp-publisher (pinned + checksum-verified)
+        env:
+          MCP_PUBLISHER_VERSION: v1.7.9
+          MCP_PUBLISHER_SHA256: ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          sudo mv mcp-publisher /usr/local/bin/mcp-publisher
+
+      - name: Sync server.json version to the release tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.json.tmp
+          mv server.json.tmp server.json
+
+      - name: Authenticate via GitHub OIDC
+        run: mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: mcp-publisher publish

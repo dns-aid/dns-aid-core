@@ -94,7 +94,7 @@ DNS-AID does not select or default to any third-party service. You choose your D
 ## Open Source
 
 DNS-AID is open source under the Apache License 2.0. You can inspect all code at:
-https://github.com/infobloxopen/dns-aid-core
+https://github.com/dns-aid/dns-aid-core
 
 ## Changes to This Policy
 
@@ -102,6 +102,6 @@ Material changes to this policy will be documented in the project's release note
 
 ## Contact
 
-- **GitHub Issues:** https://github.com/infobloxopen/dns-aid-core/issues
+- **GitHub Issues:** https://github.com/dns-aid/dns-aid-core/issues
 - **Email:** iracic@infoblox.com
 - **IETF Draft:** draft-mozleywilliams-dnsop-dnsaid

@@ -30,7 +30,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 import structlog
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -48,6 +47,13 @@ JWKS_WELL_KNOWN_PATH = "/.well-known/dns-aid-jwks.json"
 # Cache for JWKS documents (domain -> (jwks, expiry))
 _jwks_cache: dict[str, tuple[dict[str, Any], float]] = {}
 JWKS_CACHE_TTL = 3600  # 1 hour
+
+# A JWKS with a handful of P-256 keys is well under 64 KB. Bound the fetched
+# document size so a hostile endpoint can't return an unbounded body, and
+# bound the per-process cache so bulk cross-domain discovery can't grow it
+# without limit.
+_MAX_JWKS_RESPONSE_BYTES = 64 * 1024
+_JWKS_CACHE_MAX = 512
 
 
 @dataclass
@@ -170,12 +176,31 @@ def import_public_key_from_jwk(jwk: dict[str, Any]) -> EllipticCurvePublicKey:
     """
     Import a public key from a JWK dict.
 
+    Hardened against algorithm/curve confusion: only an EC P-256 signing
+    key is accepted, and the x/y coordinates must be exactly 32 bytes.
+    ``public_key()`` additionally rejects a point that is not on the curve
+    (invalid-curve attack). The JWKS source is attacker-influenceable, so
+    these checks run before any key material is trusted.
+
     Args:
-        jwk: JWK dict with x, y coordinates
+        jwk: JWK dict with ``kty="EC"``, ``crv="P-256"``, and x/y coords.
 
     Returns:
-        EC public key
+        EC public key.
+
+    Raises:
+        ValueError: if the JWK is not a P-256 EC signing key, or the
+            coordinates are missing / malformed / wrong length.
     """
+    if not isinstance(jwk, dict):
+        raise ValueError("JWK must be a JSON object")
+    if jwk.get("kty") != "EC":
+        raise ValueError(f"unsupported JWK kty {jwk.get('kty')!r}; only 'EC' is supported")
+    if jwk.get("crv") != "P-256":
+        raise ValueError(f"unsupported JWK crv {jwk.get('crv')!r}; only 'P-256' is supported")
+    use = jwk.get("use")
+    if use is not None and use != "sig":
+        raise ValueError(f"JWK 'use' is {use!r}, not a signing key")
 
     # Decode base64url (add padding if needed)
     def b64url_decode(s: str) -> bytes:
@@ -184,12 +209,21 @@ def import_public_key_from_jwk(jwk: dict[str, Any]) -> EllipticCurvePublicKey:
             s += "=" * padding
         return base64.urlsafe_b64decode(s)
 
-    x_bytes = b64url_decode(jwk["x"])
-    y_bytes = b64url_decode(jwk["y"])
+    try:
+        x_bytes = b64url_decode(jwk["x"])
+        y_bytes = b64url_decode(jwk["y"])
+    except (KeyError, TypeError, ValueError) as e:
+        # binascii.Error (bad base64) is a ValueError subclass.
+        raise ValueError(f"invalid JWK coordinates: {e}") from e
+
+    # P-256 field elements are exactly 32 bytes.
+    if len(x_bytes) != 32 or len(y_bytes) != 32:
+        raise ValueError("JWK x/y coordinates must be 32 bytes for P-256")
 
     x = int.from_bytes(x_bytes, byteorder="big")
     y = int.from_bytes(y_bytes, byteorder="big")
 
+    # public_key() raises ValueError if (x, y) is not on the P-256 curve.
     public_numbers = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1())
     return public_numbers.public_key()
 
@@ -252,6 +286,17 @@ def verify_signature(
 
         header_b64, payload_b64, signature_b64 = parts
 
+        # Enforce the algorithm declared in the protected header. Only ES256
+        # is supported; reject "none", RSA, or any other alg to close
+        # algorithm-confusion attacks (the key source is attacker-influenced).
+        header = json.loads(_b64url_decode(header_b64))
+        if not isinstance(header, dict) or header.get("alg") != "ES256":
+            logger.debug(
+                "Unsupported or missing JWS alg",
+                alg=header.get("alg") if isinstance(header, dict) else None,
+            )
+            return False, None
+
         # Reconstruct signing input
         signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
 
@@ -301,28 +346,61 @@ async def fetch_jwks(domain: str) -> dict[str, Any] | None:
     """
     # Check cache
     now = time.time()
-    if domain in _jwks_cache:
-        jwks, expiry = _jwks_cache[domain]
+    cached = _jwks_cache.get(domain)
+    if cached is not None:
+        jwks, expiry = cached
         if now < expiry:
             return jwks
+        _jwks_cache.pop(domain, None)  # expired — drop it
 
-    # Fetch from well-known endpoint
+    # Fetch from well-known endpoint. This input stamps trust
+    # (signature_verified), so it goes through the same SSRF guard and
+    # streaming size cap as every other untrusted fetch — no raw httpx.get,
+    # no unbounded .json(), and no cross-host redirects.
     url = f"https://{domain}{JWKS_WELL_KNOWN_PATH}"
 
     logger.debug("Fetching JWKS", url=url)
 
+    from dns_aid.utils.url_safety import (
+        ResponseTooLargeError,
+        UnsafeURLError,
+        safe_fetch_bytes,
+        validate_fetch_url_async,
+    )
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            jwks = response.json()
+        await validate_fetch_url_async(url)
+    except UnsafeURLError as e:
+        logger.warning("JWKS URL blocked by SSRF protection", domain=domain, error=str(e))
+        return None
 
-            # Cache the result
-            _jwks_cache[domain] = (jwks, now + JWKS_CACHE_TTL)
+    try:
+        body = await safe_fetch_bytes(
+            url,
+            max_bytes=_MAX_JWKS_RESPONSE_BYTES,
+            timeout=10.0,
+            follow_redirects=False,
+        )
+        if body is None:
+            logger.warning("JWKS fetch failed (non-200)", domain=domain)
+            return None
 
-            logger.info("JWKS fetched successfully", domain=domain)
-            return jwks
+        jwks = json.loads(body)
+        if not isinstance(jwks, dict):
+            logger.warning("JWKS document is not a JSON object", domain=domain)
+            return None
 
+        # Bound cache growth: evict oldest entries (FIFO) before insert.
+        while len(_jwks_cache) >= _JWKS_CACHE_MAX:
+            _jwks_cache.pop(next(iter(_jwks_cache)), None)
+        _jwks_cache[domain] = (jwks, now + JWKS_CACHE_TTL)
+
+        logger.info("JWKS fetched successfully", domain=domain)
+        return jwks
+
+    except ResponseTooLargeError as e:
+        logger.warning("JWKS document too large", domain=domain, error=str(e))
+        return None
     except Exception as e:
         logger.warning("Failed to fetch JWKS", domain=domain, error=str(e))
         return None

@@ -227,13 +227,18 @@ def _sanitize_error_message(msg: str | None) -> str | None:
 
 
 def _parse_signal_fqdn(fqdn: str) -> tuple[str | None, str | None]:
-    """Parse ``agent_name`` and ``domain`` from ``_name._proto._agents.domain``."""
-    parts = fqdn.split("._agents.")
-    if len(parts) == 2:
-        name_parts = parts[0].lstrip("_").split("._")
-        agent_name = name_parts[0] if name_parts else None
-        return agent_name, parts[1]
-    return None, None
+    """Parse ``agent_name`` and ``domain`` from a DNS-AID FQDN.
+
+    Thin projection over :func:`dns_aid.core.fqdn.parse_dnsaid_fqdn`
+    that returns ``(name, domain)``; the SDK telemetry layer doesn't
+    care about the protocol carried in the FQDN.
+    """
+    from dns_aid.core.fqdn import parse_dnsaid_fqdn
+
+    parsed = parse_dnsaid_fqdn(fqdn)
+    if parsed is None:
+        return None, None
+    return parsed.name, parsed.domain
 
 
 def _resolve_sampler(config: SDKConfig) -> Sampler | None:

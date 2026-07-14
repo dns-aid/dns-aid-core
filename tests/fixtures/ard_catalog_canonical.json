@@ -1,0 +1,79 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Acme Enterprise AI",
+    "identifier": "did:web:acme.com"
+  },
+  "entries": [
+    {
+      "identifier": "urn:air:acme.com:agent:assistant",
+      "displayName": "Corporate Assistant (A2A)",
+      "type": "application/a2a-agent-card+json",
+      "url": "https://api.acme.com/agents/assistant.json",
+      "description": "General-purpose corporate A2A assistant.",
+      "representativeQueries": [
+        "help me draft an email to the security working group",
+        "summarize my unread messages from Todd"
+      ]
+    },
+    {
+      "identifier": "urn:air:acme.com:server:weather",
+      "displayName": "Weather Data Node",
+      "type": "application/mcp-server-card+json",
+      "url": "https://api.acme.com/mcp/weather.json",
+      "capabilities": ["WeatherTool", "ForecastTool"],
+      "description": "Enterprise weather MCP server for live telemetry.",
+      "representativeQueries": [
+        "what is the current wind speed in Chicago",
+        "get the 5-day forecast for Seattle"
+      ]
+    },
+    {
+      "identifier": "urn:air:acme.com:plugin:finance-suite",
+      "displayName": "Finance Tool Bundle",
+      "type": "application/ai-catalog+json",
+      "description": "A static nested bundle containing an A2A agent and its required market dataset.",
+      "tags": ["finance", "bundle"],
+      "data": {
+        "specVersion": "1.0",
+        "entries": [
+          {
+            "identifier": "urn:air:acme.com:finance:a2a",
+            "displayName": "Finance Trading Agent",
+            "type": "application/a2a-agent-card+json",
+            "url": "https://api.acme.com/agents/finance-trader.json"
+          },
+          {
+            "identifier": "urn:air:acme.com:market:2026",
+            "displayName": "Market Dataset 2026",
+            "type": "application/parquet",
+            "url": "https://data.acme.com/market-2026.parquet"
+          }
+        ]
+      }
+    },
+    {
+      "identifier": "urn:air:acme.com:registry:global",
+      "displayName": "Acme Global Agent Registry",
+      "type": "application/ai-registry+json",
+      "url": "https://registry.acme.com/api/v1/",
+      "description": "Dynamic REST API search interface to discover all approved enterprise agents.",
+      "tags": ["registry", "search", "dynamic"],
+      "trustManifest": {
+        "identity": "spiffe://acme.com/registry/global",
+        "identityType": "spiffe",
+        "attestations": [
+          { "type": "SPIFFE-X509", "uri": "https://acme.com/.well-known/spiffe/jwks" },
+          { "type": "SOC2-Type2", "uri": "https://trust.acme.com/reports/soc2.pdf" }
+        ]
+      }
+    },
+    {
+      "identifier": "urn:air:acme.com:catalog:engineering",
+      "displayName": "Engineering Department Catalogs",
+      "type": "application/ai-catalog+json",
+      "url": "https://acme.com/catalogs/engineering.json",
+      "description": "Sub-catalogs containing CI/CD and internal deployment agents."
+    }
+  ]
+}

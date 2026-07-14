@@ -59,7 +59,7 @@ class TestAgentRecord:
             assert agent.endpoint_source == source
 
     def test_fqdn_generation(self):
-        """Test FQDN is generated correctly per DNS-AID spec."""
+        """Test FQDN is generated as the flat draft-02 form."""
         agent = AgentRecord(
             name="network-specialist",
             domain="example.com",
@@ -67,8 +67,28 @@ class TestAgentRecord:
             target_host="mcp.example.com",
         )
 
-        # Format: _{name}._{protocol}._agents.{domain}
-        assert agent.fqdn == "_network-specialist._mcp._agents.example.com"
+        # Flat draft-02 form: {name}.{domain}
+        assert agent.fqdn == "network-specialist.example.com"
+
+    def test_walkable_fqdn_generation(self):
+        """The walkable AliasMode form uses the _agents leaf."""
+        agent = AgentRecord(
+            name="network-specialist",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+        )
+        assert agent.walkable_fqdn == "network-specialist._agents.example.com"
+
+    def test_legacy_fqdn_generation(self):
+        """The legacy -01 form is retained for the legacy-fallback discovery path."""
+        agent = AgentRecord(
+            name="network-specialist",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+        )
+        assert agent.legacy_fqdn == "_network-specialist._mcp._agents.example.com"
 
     def test_endpoint_url(self):
         """Test endpoint URL generation."""
@@ -121,7 +141,7 @@ class TestAgentRecord:
             target_host="mcp.example.com",
             cap_uri="https://mcp.example.com/.well-known/agent-cap.json",
             cap_sha256="abc123base64url",
-            bap=["mcp/1", "a2a/1"],
+            bap="mcp=2.1",
             policy_uri="https://example.com/agent-policy",
             realm="production",
         )
@@ -131,7 +151,7 @@ class TestAgentRecord:
         # Default: keyNNNNN format per RFC 9460
         assert params["key65400"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert params["key65401"] == "abc123base64url"
-        assert params["key65402"] == "mcp/1,a2a/1"
+        assert params["key65402"] == "mcp=2.1"  # scalar bap per draft-02 §FutureWork
         assert params["key65403"] == "https://example.com/agent-policy"
         assert params["key65404"] == "production"
         # Standard params still present
@@ -150,7 +170,7 @@ class TestAgentRecord:
             target_host="mcp.example.com",
             cap_uri="https://mcp.example.com/.well-known/agent-cap.json",
             cap_sha256="abc123base64url",
-            bap=["mcp/1", "a2a/1"],
+            bap="mcp=2.1",
             policy_uri="https://example.com/agent-policy",
             realm="production",
         )
@@ -160,7 +180,7 @@ class TestAgentRecord:
 
         assert params["cap"] == "https://mcp.example.com/.well-known/agent-cap.json"
         assert params["cap-sha256"] == "abc123base64url"
-        assert params["bap"] == "mcp/1,a2a/1"
+        assert params["bap"] == "mcp=2.1"
         assert params["policy"] == "https://example.com/agent-policy"
         assert params["realm"] == "production"
 
@@ -219,6 +239,70 @@ class TestAgentRecord:
 
         assert params["key65401"] == "dGVzdGhhc2g"
         assert "key65400" not in params
+
+    def test_svcb_params_bap_emits_as_scalar(self):
+        """draft-02 §FutureWork: bap is a single versioned protocol per record."""
+        agent = AgentRecord(
+            name="booking",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+            bap="mcp=2.1",
+        )
+        params = agent.to_svcb_params()
+        # No comma, no list — emitted exactly as the scalar string.
+        assert params["key65402"] == "mcp=2.1"
+        assert "," not in params["key65402"]
+
+    def test_svcb_params_bap_absent_when_none(self):
+        """When bap is unset (None) the key65402 param is not emitted."""
+        agent = AgentRecord(
+            name="booking",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+        )
+        params = agent.to_svcb_params()
+        assert "key65402" not in params
+        assert "bap" not in params
+
+    def test_svcb_params_with_well_known_path(self):
+        """Test draft-02 ``well-known`` SvcParamKey is emitted at the
+        project's interim private-use code point ``key65409``.
+
+        Per draft section 7.1 the actual SvcParamKey numbers are
+        deferred to IANA (Standards Action); 65409 is dns-aid-core's
+        private-use placeholder, not draft-assigned."""
+        agent = AgentRecord(
+            name="booking",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+            well_known_path="agent-card.json",
+        )
+
+        params = agent.to_svcb_params()
+
+        assert params["key65409"] == "agent-card.json"
+
+    def test_svcb_params_well_known_independent_of_cap(self):
+        """`well-known` and `cap` are independent keys; both may be present."""
+        agent = AgentRecord(
+            name="booking",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.example.com",
+            cap_uri="urn:example:agent-cap:abc",
+            cap_sha256="dGVzdGhhc2g",
+            well_known_path="agent-card.json",
+        )
+
+        params = agent.to_svcb_params()
+
+        # All three SvcParamKeys present, none collapsing into another.
+        assert params["key65400"] == "urn:example:agent-cap:abc"
+        assert params["key65401"] == "dGVzdGhhc2g"
+        assert params["key65409"] == "agent-card.json"
 
     def test_svcb_params_with_connect_fields(self):
         """Test provider-managed connection params are serialized as SVCB custom keys."""
@@ -446,3 +530,407 @@ class TestVerifyResult:
 
         assert result.security_score == 20
         assert result.security_rating == "Poor"
+
+    def test_dane_without_dnssec_does_not_score(self):
+        """DANE +15 must be gated on DNSSEC.
+
+        A spoofer with no DNSSEC chain can still serve a TLSA record;
+        TLSA without DNSSEC has no integrity guarantee (RFC 6698 §10.1).
+        If a hand-built VerifyResult carries dane_valid=True but
+        dnssec_valid=False, security_score MUST NOT credit the DANE
+        bonus — otherwise a non-DNSSEC spoofer can reach ``Good``.
+        """
+        result = VerifyResult(
+            fqdn="chat.example.com",
+            record_exists=True,
+            svcb_valid=True,
+            dnssec_valid=False,  # NOT validated
+            dane_valid=True,  # claims TLSA present
+            endpoint_reachable=True,
+        )
+
+        # 20 (record) + 20 (svcb) + 0 (dnssec) + 0 (dane gated) + 15 (endpoint)
+        assert result.security_score == 55
+        assert result.security_rating == "Fair"
+
+
+class TestBapValidator:
+    """Regression tests for the bap SvcParamKey field validator.
+
+    The ``bap`` SvcParamKey value goes straight onto the wire as
+    ``key65402="<value>"`` via the publisher and every backend formatter.
+    Without a field-validator a crafted value can inject sibling
+    SvcParamKeys (e.g. ``mcp" key65500="x``) — a multi-tenant publish
+    path turns into server-side param injection. The validator now
+    constrains bap to the canonical draft-02 form at the type boundary
+    so every construction path (direct, ``to_svcb_record()``, MCP,
+    CLI) inherits the rule.
+    """
+
+    def test_bare_protocol_accepted(self):
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+            bap="mcp",
+        )
+        assert agent.bap == "mcp"
+
+    def test_versioned_form_accepted(self):
+        for value in ("mcp=1.0", "a2a=1.1", "https=2"):
+            agent = AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap=value,
+            )
+            assert agent.bap == value
+
+    def test_svcparam_injection_rejected(self):
+        """The original vulnerability: a crafted value with a quote
+        escape can be parsed by dnspython as two SvcParamKeys, the
+        second one attacker-controlled."""
+        for evil in (
+            'mcp" key65500="x',
+            'mcp\\"',
+            'mcp" key65500="x',
+        ):
+            with pytest.raises(ValidationError):
+                AgentRecord(
+                    name="chat",
+                    domain="example.com",
+                    protocol=Protocol.MCP,
+                    target_host="chat.example.com",
+                    bap=evil,
+                )
+
+    def test_legacy_comma_list_rejected(self):
+        """Pre-draft-02 comma-list (``mcp,a2a``) is rejected at the
+        type — callers passing legacy input should run
+        ``normalize_bap`` first."""
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap="mcp,a2a",
+            )
+
+    def test_list_form_rejected_on_agent_record(self):
+        """Pin the breaking change direction: ``bap=["mcp"]`` raises."""
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap=["mcp"],  # type: ignore[arg-type]
+            )
+
+    def test_list_form_rejected_on_svcb_record(self):
+        from dns_aid.core.models import SvcbRecord
+
+        with pytest.raises(ValidationError):
+            SvcbRecord(
+                target="chat.example.com.",
+                alpn="mcp",
+                port=443,
+                bap=["mcp"],  # type: ignore[arg-type]
+            )
+
+    def test_uppercase_protocol_rejected(self):
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap="MCP",
+            )
+
+    def test_whitespace_in_value_rejected(self):
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap="mcp 1.0",
+            )
+
+    def test_empty_string_passed_as_bap_rejected(self):
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host="chat.example.com",
+                bap="",
+            )
+
+
+class TestSvcParamInjectionValidators:
+    """The free-form SvcParam string fields share bap's injection exposure.
+
+    cap / cap-sha256 / policy / realm / sig / connect-meta / enroll-uri are
+    emitted as ``key="<value>"`` by the presentation-format backends, so a
+    double quote, backslash, or control character could break out of the
+    quoting and inject a sibling SvcParamKey. The field validators reject
+    that class on both models, at every construction path.
+    """
+
+    _EVIL = '"  key65500="x'
+
+    def test_agent_record_rejects_injection_in_each_field(self):
+        from dns_aid.core.models import AgentRecord
+
+        base = {
+            "name": "chat",
+            "domain": "example.com",
+            "protocol": Protocol.MCP,
+            "target_host": "chat.example.com",
+        }
+        for field in (
+            "cap_uri",
+            "cap_sha256",
+            "policy_uri",
+            "realm",
+            "sig",
+            "connect_meta",
+            "enroll_uri",
+        ):
+            with pytest.raises(ValidationError):
+                AgentRecord(**base, **{field: f"value{self._EVIL}"})
+
+    def test_svcb_record_rejects_injection_in_each_field(self):
+        from dns_aid.core.models import SvcbRecord
+
+        for field in (
+            "uri",
+            "cap_sha256",
+            "policy_uri",
+            "realm",
+            "sig",
+            "connect_meta",
+            "enroll_uri",
+        ):
+            with pytest.raises(ValidationError):
+                SvcbRecord(target="svc.example.com.", alpn="mcp", **{field: f"value{self._EVIL}"})
+
+    def test_backslash_and_control_chars_rejected(self):
+        from dns_aid.core.models import SvcbRecord
+
+        for bad in ("https://x\\y", "https://x\ninjected", "abc\x00def"):
+            with pytest.raises(ValidationError):
+                SvcbRecord(target="svc.example.com.", alpn="mcp", policy_uri=bad)
+
+    def test_clean_values_accepted(self):
+        from dns_aid.core.models import SvcbRecord
+
+        record = SvcbRecord(
+            target="svc.example.com.",
+            alpn="mcp",
+            uri="https://example.com/.well-known/agent-card.json",
+            cap_sha256="abc123def456",
+            policy_uri="https://example.com/policy.json",
+            realm="my-company-realm",
+            enroll_uri="https://example.com/enroll",
+        )
+        assert record.uri.startswith("https://")
+        # Clean values serialize unchanged (cap → key65400 by default).
+        assert record.to_params()["key65400"] == record.uri
+
+
+class TestNormalizeBap:
+    """Tests for the shared ``normalize_bap`` collapse helper.
+
+    The discoverer, SDK adapter, and indexer all route through this
+    one function so they agree on edge inputs (empty string vs None
+    vs whitespace-only vs leading-comma legacy etc.).
+    """
+
+    def test_none_passthrough(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap(None) is None
+
+    def test_empty_string_to_none(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap("") is None
+        assert normalize_bap("   ") is None
+        assert normalize_bap("\t\n") is None
+
+    def test_scalar_passthrough(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap("mcp") == "mcp"
+        assert normalize_bap("mcp=1.0") == "mcp=1.0"
+        assert normalize_bap("  mcp=1.0  ") == "mcp=1.0"
+
+    def test_comma_list_collapsed_to_first_non_empty(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap("mcp,a2a") == "mcp"
+        assert normalize_bap("mcp=1.0,a2a=1.1") == "mcp=1.0"
+        # Leading comma — Igor's #158 item 5 regression.
+        assert normalize_bap(",mcp=1.0") == "mcp=1.0"
+        # Trailing comma.
+        assert normalize_bap("mcp=1.0,") == "mcp=1.0"
+        # Comma-only / all empties.
+        assert normalize_bap(",,,") is None
+        assert normalize_bap(", ,") is None
+
+    def test_list_form_collapsed_to_first(self):
+        from dns_aid.core.bap import normalize_bap
+
+        assert normalize_bap(["mcp"]) == "mcp"
+        assert normalize_bap(["mcp", "a2a"]) == "mcp"
+        # Empty list, list of empties.
+        assert normalize_bap([]) is None
+        assert normalize_bap(["", " ", None]) is None  # type: ignore[list-item]
+        # Defensive: non-string elements survive via str().
+        assert normalize_bap([" mcp "]) == "mcp"
+
+    def test_non_string_non_list_input(self):
+        from dns_aid.core.bap import normalize_bap
+
+        # Forgiving public API: anything not a str/list/None returns None.
+        assert normalize_bap(42) is None  # type: ignore[arg-type]
+        assert normalize_bap({"mcp": True}) is None  # type: ignore[arg-type]
+
+
+class TestSplitBapToken:
+    """Tests for protocol/version token extraction."""
+
+    def test_bare_form(self):
+        from dns_aid.core.bap import split_bap_token
+
+        assert split_bap_token("mcp") == ("mcp", None)
+        assert split_bap_token("a2a") == ("a2a", None)
+
+    def test_versioned_form(self):
+        from dns_aid.core.bap import split_bap_token
+
+        assert split_bap_token("mcp=1.0") == ("mcp", "1.0")
+        assert split_bap_token("a2a=1.1") == ("a2a", "1.1")
+
+    def test_none_and_empty(self):
+        from dns_aid.core.bap import split_bap_token
+
+        assert split_bap_token(None) == (None, None)
+        assert split_bap_token("") == (None, None)
+        assert split_bap_token("   ") == (None, None)
+
+    def test_dangling_equals_returns_only_proto(self):
+        from dns_aid.core.bap import split_bap_token
+
+        # ``mcp=`` is unusual but defensive — keep the proto, no version.
+        assert split_bap_token("mcp=") == ("mcp", None)
+
+
+class TestTrustManifest:
+    """ARD trustManifest models (spec 007 — pass-through trust claims)."""
+
+    WIRE = {
+        "identity": "spiffe://acme.com/registry/global",
+        "identityType": "spiffe",
+        "trustSchema": {
+            "identifier": "acme-trust-v1",
+            "version": "1.0",
+            "governanceUri": "https://acme.com/governance",
+            "verificationMethods": ["did", "x509", "dns-01"],
+        },
+        "attestations": [
+            {"type": "SPIFFE-X509", "uri": "https://acme.com/.well-known/spiffe/jwks"},
+            {
+                "type": "SOC2-Type2",
+                "uri": "https://trust.acme.com/reports/soc2.pdf",
+                "mediaType": "application/pdf",
+                "digest": "deadbeef",
+            },
+        ],
+        "provenance": [
+            {"relation": "derivedFrom", "sourceId": "urn:air:acme.com:src:x", "sourceDigest": "ab"}
+        ],
+        "signature": "eyJhbGciOiJFZERTQSJ9..sig",
+    }
+
+    def test_full_wire_round_trip(self):
+        from dns_aid.core.models import TrustManifest
+
+        tm = TrustManifest.from_wire(self.WIRE)
+        assert tm is not None
+        assert tm.identity == "spiffe://acme.com/registry/global"
+        assert tm.identity_type == "spiffe"
+        assert tm.trust_schema is not None
+        assert tm.trust_schema.governance_uri == "https://acme.com/governance"
+        assert tm.trust_schema.verification_methods == ["did", "x509", "dns-01"]
+        assert [a.type for a in tm.attestations] == ["SPIFFE-X509", "SOC2-Type2"]
+        assert tm.attestations[0].media_type is None  # optional on read
+        assert tm.attestations[1].digest == "deadbeef"
+        assert tm.provenance[0].relation == "derivedFrom"
+        assert tm.signature == "eyJhbGciOiJFZERTQSJ9..sig"
+
+    def test_snake_case_construction(self):
+        from dns_aid.core.models import TrustAttestation, TrustManifest
+
+        tm = TrustManifest(
+            identity="did:web:acme.com",
+            identity_type="did",
+            attestations=[TrustAttestation(type="GDPR", uri="https://x", media_type="text/html")],
+        )
+        assert tm.identity_type == "did"
+        assert tm.attestations[0].media_type == "text/html"
+
+    def test_unknown_fields_ignored(self):
+        from dns_aid.core.models import TrustManifest
+
+        tm = TrustManifest.from_wire({"identity": "https://acme.com", "futureField": 42})
+        assert tm is not None
+        assert not hasattr(tm, "futureField")
+
+    def test_missing_identity_returns_none(self):
+        from dns_aid.core.models import TrustManifest
+
+        assert TrustManifest.from_wire({"identityType": "spiffe"}) is None
+        assert TrustManifest.from_wire("not-a-dict") is None
+        assert TrustManifest.from_wire(None) is None
+
+    def test_malformed_items_dropped_not_fatal(self):
+        from dns_aid.core.models import TrustManifest
+
+        wire = {
+            "identity": "spiffe://acme.com/x",
+            "attestations": [
+                {"type": "SOC2-Type2", "uri": "https://ok"},
+                {"type": "broken-no-uri"},
+                "not-a-dict",
+            ],
+            "provenance": [{"relation": "copiedFrom"}],  # missing sourceId
+        }
+        tm = TrustManifest.from_wire(wire)
+        assert tm is not None
+        assert [a.type for a in tm.attestations] == ["SOC2-Type2"]
+        assert tm.provenance == []
+
+    def test_agent_record_serializes_trust_manifest(self):
+        from dns_aid.core.models import AgentRecord, Protocol, TrustManifest
+
+        record = AgentRecord(
+            name="weather",
+            domain="acme.com",
+            protocol=Protocol.MCP,
+            target_host="mcp.acme.com",
+            capability_source="ard_catalog",
+            trust_manifest=TrustManifest.from_wire(self.WIRE),
+        )
+        dumped = record.model_dump()
+        assert dumped["capability_source"] == "ard_catalog"
+        assert dumped["trust_manifest"]["identity"] == "spiffe://acme.com/registry/global"
+        # Default remains None → no serialization change for non-ARD records
+        plain = AgentRecord(name="a", domain="b.com", protocol=Protocol.MCP, target_host="c.b.com")
+        assert plain.model_dump()["trust_manifest"] is None

@@ -189,7 +189,7 @@ class TestDDNSBackend:
             resolver.nameservers = [DDNS_SERVER]
             resolver.port = DDNS_PORT
 
-            fqdn = f"_ddns-test-agent._mcp._agents.{DDNS_ZONE}"
+            fqdn = f"ddns-test-agent.{DDNS_ZONE}"
 
             # Check SVCB
             svcb_answers = resolver.resolve(fqdn, "SVCB")
@@ -200,8 +200,8 @@ class TestDDNSBackend:
             assert len(txt_answers) > 0
 
         finally:
-            # Cleanup
-            name = "_ddns-test-agent._mcp._agents"
+            # Cleanup — draft-02 flat owner name (matches what publish_agent wrote)
+            name = "ddns-test-agent"
             await ddns_backend.delete_record(DDNS_ZONE, name, "SVCB")
             await ddns_backend.delete_record(DDNS_ZONE, name, "TXT")
 

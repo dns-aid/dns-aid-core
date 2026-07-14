@@ -110,10 +110,21 @@ def publish(
             help="Base64url-encoded SHA-256 digest of the capability descriptor for integrity checks",
         ),
     ] = None,
+    well_known: Annotated[
+        str | None,
+        typer.Option(
+            "--well-known",
+            help="RFC 8615 well-known path suffix (e.g., 'agent-card.json'). Independent "
+            "of --cap-uri; both may be set. Consumers prefer --cap-uri when both are present.",
+        ),
+    ] = None,
     bap: Annotated[
         str | None,
         typer.Option(
-            "--bap", help="Supported bulk agent protocols (comma-separated, e.g., 'mcp,a2a')"
+            "--bap",
+            help="Bulk Agent Protocol identifier — single versioned protocol per "
+            "record (e.g., 'mcp=2.1', 'a2a=1.0'). Experimental per draft-02 §FutureWork; "
+            "alpn remains the canonical protocol carrier.",
         ),
     ] = None,
     policy_uri: Annotated[
@@ -163,6 +174,26 @@ def publish(
         str | None,
         typer.Option("--private-key", help="Path to EC P-256 private key PEM for signing"),
     ] = None,
+    allow_underscore_target: Annotated[
+        bool,
+        typer.Option(
+            "--allow-underscore-target",
+            help="Downgrade the TargetName-contains-underscore check from error to warning. "
+            "Use only when the target is internal-only and not reached over public PKI.",
+        ),
+    ] = False,
+    walkable: Annotated[
+        bool,
+        typer.Option(
+            "--walkable",
+            help="Publish the optional walkable AliasMode SVCB record at "
+            "{name}._agents.{domain}. Off by default — the walkable record is "
+            "an enumeration handle (DNS-SD-style consumers can walk _agents.<zone> "
+            "and inventory every agent). Enable only when you actively want the "
+            "agent discoverable through enumeration (internal indexes, intentional "
+            "public catalogs). See docs/privacy-considerations.md.",
+        ),
+    ] = False,
 ):
     """
     Publish an agent to DNS using DNS-AID protocol.
@@ -202,8 +233,9 @@ def publish(
 
     console.print("\n[bold]Publishing agent to DNS...[/bold]\n")
 
-    # Parse bap comma-separated string into list
-    bap_list = [b.strip() for b in bap.split(",") if b.strip()] if bap else None
+    # bap is a single versioned-protocol identifier per draft-02 §FutureWork
+    # (Bulk Agent Protocol). Pass through unchanged; whitespace-trimmed.
+    bap_value = bap.strip() if bap else None
 
     # Validate sign options
     if sign and not private_key:
@@ -226,7 +258,8 @@ def publish(
             backend=dns_backend,
             cap_uri=cap_uri,
             cap_sha256=cap_sha256,
-            bap=bap_list,
+            well_known_path=well_known,
+            bap=bap_value,
             policy_uri=policy_uri,
             realm=realm,
             connect_class=connect_class,
@@ -236,6 +269,8 @@ def publish(
             ipv6_hint=",".join(ipv6hint) if ipv6hint else None,
             sign=sign,
             private_key_path=private_key,
+            allow_underscore_target=allow_underscore_target,
+            publish_walkable_alias=walkable,
         )
     )
 
@@ -305,6 +340,15 @@ def discover(
             help="Verify JWS signatures on agents (alternative to DNSSEC)",
         ),
     ] = False,
+    trust_dnssec_pointers: Annotated[
+        bool,
+        typer.Option(
+            "--trust-dnssec-pointers",
+            help="Also follow an off-domain ARD catalog pointer when its pointer record is "
+            "DNSSEC-validated (AD flag). Off by default — enable only with a validating "
+            "resolver over a secure path (localhost / DoT / DoH).",
+        ),
+    ] = False,
     capabilities: Annotated[
         list[str] | None,
         typer.Option(
@@ -338,6 +382,14 @@ def discover(
         str | None,
         typer.Option("--realm", help="Filter by realm."),
     ] = None,
+    require_dnssec: Annotated[
+        bool,
+        typer.Option(
+            "--require-dnssec",
+            help="Require every DNS-plane agent's response to be DNSSEC-validated; error "
+            "if any is not. ARD / HTTP-index agents (no DNS SVCB record) are exempt.",
+        ),
+    ] = False,
     min_dnssec: Annotated[
         bool,
         typer.Option(
@@ -366,6 +418,14 @@ def discover(
             help="Restrict --require-signed matches to records whose verified algorithm is in this allow-list (repeatable).",
         ),
     ] = None,
+    verify_dane: Annotated[
+        bool,
+        typer.Option(
+            "--verify-dane",
+            help="Check each agent endpoint's TLS cert against its DANE/TLSA record "
+            "(defense-in-depth; requires DNSSEC to be meaningful — pair with --min-dnssec).",
+        ),
+    ] = False,
 ):
     """
     Discover agents at a domain using DNS-AID protocol.
@@ -383,8 +443,11 @@ def discover(
     """
     from dns_aid.core.discoverer import discover as do_discover
 
-    method = "HTTP index" if use_http_index else "DNS"
-    console.print(f"\n[bold]Discovering agents at {domain} via {method}...[/bold]\n")
+    # Human-readable status header — suppressed in --json mode so stdout stays
+    # a single machine-parseable JSON document.
+    if not json_output:
+        method = "HTTP index" if use_http_index else "DNS"
+        console.print(f"\n[bold]Discovering agents at {domain} via {method}...[/bold]\n")
 
     try:
         result = run_async(
@@ -394,16 +457,19 @@ def discover(
                 name=name,
                 use_http_index=use_http_index,
                 verify_signatures=verify_signatures,
+                trust_dnssec_pointers=trust_dnssec_pointers,
                 capabilities=capabilities,
                 capabilities_any=capabilities_any,
                 auth_type=auth_type,
                 intent=intent,
                 transport=transport,
                 realm=realm,
+                require_dnssec=require_dnssec,
                 min_dnssec=min_dnssec,
                 text_match=text_match,
                 require_signed=require_signed,
                 require_signature_algorithm=require_signature_algorithm,
+                verify_dane=verify_dane,
             )
         )
     except ValueError as exc:
@@ -422,14 +488,25 @@ def discover(
                     "name": a.name,
                     "protocol": a.protocol.value,
                     "endpoint": a.endpoint_url,
+                    "endpoint_source": a.endpoint_source,
                     "capabilities": a.capabilities,
                     "capability_source": a.capability_source,
                     "cap_uri": a.cap_uri,
                     "cap_sha256": a.cap_sha256,
-                    "bap": a.bap if a.bap else None,
+                    "well_known_path": a.well_known_path,
+                    "bap": a.bap,
                     "policy_uri": a.policy_uri,
                     "realm": a.realm,
                     "description": a.description,
+                    # ARD-sourced / opt-in keys only — omitted otherwise so legacy
+                    # output stays byte-identical.
+                    **({"catalog_trust": a.catalog_trust} if a.catalog_trust is not None else {}),
+                    **({"dane_verified": a.dane_verified} if a.dane_verified is not None else {}),
+                    **(
+                        {"trust_manifest": a.trust_manifest.model_dump()}
+                        if a.trust_manifest is not None
+                        else {}
+                    ),
                 }
                 for a in result.agents
             ],
@@ -668,7 +745,7 @@ def search(
 
     for result in response.results:
         agent = result.agent
-        fqdn = f"_{agent.name}._{agent.protocol.value}._agents.{agent.domain}"
+        fqdn = f"{agent.name}.{agent.domain}"
         table.add_row(
             f"{result.score:.2f}",
             fqdn,
@@ -694,9 +771,7 @@ def search(
 
 @app.command()
 def verify(
-    fqdn: Annotated[
-        str, typer.Argument(help="FQDN to verify (e.g., _chat._a2a._agents.example.com)")
-    ],
+    fqdn: Annotated[str, typer.Argument(help="FQDN to verify (e.g., chat.example.com)")],
 ):
     """
     Verify DNS-AID records for an agent.
@@ -704,7 +779,7 @@ def verify(
     Checks DNS record existence, DNSSEC validation, and endpoint health.
 
     Example:
-        dns-aid verify _chat._a2a._agents.example.com
+        dns-aid verify chat.example.com
     """
     from dns_aid.core.validator import verify as do_verify
 
@@ -721,7 +796,17 @@ def verify(
     console.print(f"  {status(result.record_exists)} DNS record exists")
     console.print(f"  {status(result.svcb_valid)} SVCB record valid")
     console.print(f"  {status(result.dnssec_valid)} DNSSEC validated")
+    if result.dnssec_note:
+        console.print(f"    [dim]{result.dnssec_note}[/dim]")
+    if result.dnssec_detail and result.dnssec_detail.algorithm:
+        _d = result.dnssec_detail
+        console.print(
+            f"    [dim]algorithm: {_d.algorithm} ({_d.algorithm_strength}), "
+            f"chain depth: {_d.chain_depth}[/dim]"
+        )
     console.print(f"  {status(result.dane_valid)} DANE/TLSA configured")
+    if result.dane_note:
+        console.print(f"    [dim]{result.dane_note}[/dim]")
     console.print(f"  {status(result.endpoint_reachable)} Endpoint reachable")
 
     if result.endpoint_latency_ms:
@@ -753,11 +838,14 @@ def list_records(
     """
     List DNS-AID records in a domain.
 
-    Shows all _agents.* records in the specified zone.
+    Shows the flat agent owners ({name}.{domain} SVCB + TXT), the organization
+    index (_index._agents), and any walkable aliases in the specified zone.
 
     Example:
         dns-aid list example.com
     """
+    from dns_aid.core.lister import list_dns_aid_records
+
     dns_backend = _get_backend(backend)
 
     console.print(f"\n[bold]DNS-AID records in {domain}:[/bold]\n")
@@ -765,10 +853,7 @@ def list_records(
     async def list_all():
         if not await dns_backend.zone_exists(domain):
             return None  # sentinel: zone not found
-        records = []
-        async for record in dns_backend.list_records(domain, name_pattern="_agents"):
-            records.append(record)
-        return records
+        return await list_dns_aid_records(dns_backend, domain)
 
     try:
         records = run_async(list_all())
@@ -898,7 +983,7 @@ def delete(
     """
     from dns_aid.core.publisher import unpublish
 
-    fqdn = f"_{name}._{protocol}._agents.{domain}"
+    fqdn = f"{name}.{domain}"
 
     if not force:
         confirm = typer.confirm(f"Delete {fqdn}?")
@@ -1202,7 +1287,7 @@ def index_list(
     table.add_column("FQDN")
 
     for entry in sorted(entries, key=lambda e: (e.name, e.protocol)):
-        fqdn = f"_{entry.name}._{entry.protocol}._agents.{domain}"
+        fqdn = f"{entry.name}.{domain}"
         table.add_row(entry.name, entry.protocol, fqdn)
 
     console.print(table)
@@ -1263,6 +1348,142 @@ def index_sync(
     else:
         error_console.print(f"[red]✗ Sync failed: {result.message}[/red]")
         raise typer.Exit(1)
+
+
+@index_app.command("publish-catalog")
+def index_publish_catalog(
+    domain: Annotated[str, typer.Argument(help="Domain to publish the catalog pointer under")],
+    catalog_host: Annotated[
+        str, typer.Argument(help="Host that serves the ARD catalog over HTTPS (no underscores)")
+    ],
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", "-b", help="DNS backend, or set DNS_AID_BACKEND env var"),
+    ] = None,
+    filename: Annotated[
+        str, typer.Option("--filename", help="Catalog filename under /.well-known/")
+    ] = "ai-catalog.json",
+    catalog_only: Annotated[
+        bool,
+        typer.Option(
+            "--catalog-only",
+            help="Publish only _catalog._agents (skip _index._agents, which is DNS-AID's "
+            "generic org-index pointer and would be replaced)",
+        ),
+    ] = False,
+    force_index: Annotated[
+        bool,
+        typer.Option(
+            "--force-index",
+            help="Replace an existing _index._agents pointer even if it targets a different "
+            "host (default: preserve it and warn)",
+        ),
+    ] = False,
+    port: Annotated[int, typer.Option("--port", help="Catalog host port")] = 443,
+    ipv4_hint: Annotated[
+        str | None,
+        typer.Option(
+            "--ipv4-hint",
+            help="RFC 9460 IPv4 address hint (fixed-IP origins only; omit for CDN-fronted hosts)",
+        ),
+    ] = None,
+    ipv6_hint: Annotated[
+        str | None, typer.Option("--ipv6-hint", help="RFC 9460 IPv6 address hint")
+    ] = None,
+    ttl: Annotated[int, typer.Option("--ttl", help="TTL for the pointer records")] = 3600,
+):
+    """
+    Publish ARD catalog DNS pointer records for a domain.
+
+    Writes SVCB records under _catalog._agents.{domain} (ARD §6.1) and
+    _index._agents.{domain} (DNS-AID draft-02 §3.2) pointing at the catalog
+    host, so DNS-AID and ARD clients both discover the catalog via DNS.
+
+    Example:
+        dns-aid index publish-catalog example.com ard.example.com
+    """
+    from dns_aid.core.catalog_pointer import (
+        CATALOG_POINTER_LABELS,
+        publish_catalog_pointer,
+    )
+
+    dns_backend = _get_backend(backend)
+    labels = ("_catalog._agents",) if catalog_only else CATALOG_POINTER_LABELS
+
+    console.print(f"\n[bold]Publishing ARD catalog pointer for {domain}...[/bold]\n")
+
+    try:
+        written = run_async(
+            publish_catalog_pointer(
+                domain,
+                catalog_host,
+                filename=filename,
+                labels=labels,
+                backend=dns_backend,
+                ttl=ttl,
+                port=port,
+                ipv4_hint=ipv4_hint,
+                ipv6_hint=ipv6_hint,
+                force_index=force_index,
+            )
+        )
+    except Exception as e:
+        error_console.print(f"[red]✗ Failed to publish catalog pointer: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    console.print("[green]✓ Catalog pointer published![/green]\n")
+    for fqdn in written:
+        console.print(f"  [dim]SVCB[/dim] {fqdn} → {catalog_host}")
+    console.print(f"\n[dim]Catalog: https://{catalog_host}/.well-known/{filename}[/dim]")
+
+
+@index_app.command("unpublish-catalog")
+def index_unpublish_catalog(
+    domain: Annotated[str, typer.Argument(help="Domain to remove the catalog pointer from")],
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", "-b", help="DNS backend, or set DNS_AID_BACKEND env var"),
+    ] = None,
+    catalog_only: Annotated[
+        bool,
+        typer.Option(
+            "--catalog-only",
+            help="Remove only _catalog._agents (leave _index._agents in place)",
+        ),
+    ] = False,
+):
+    """
+    Remove ARD catalog DNS pointer records for a domain.
+
+    Deletes the SVCB records under _catalog._agents.{domain} and
+    _index._agents.{domain}. Any TXT at _index._agents (org-index listing)
+    is left intact. Idempotent — missing records are a no-op.
+
+    Example:
+        dns-aid index unpublish-catalog example.com
+    """
+    from dns_aid.core.catalog_pointer import (
+        CATALOG_POINTER_LABELS,
+        unpublish_catalog_pointer,
+    )
+
+    dns_backend = _get_backend(backend)
+    labels = ("_catalog._agents",) if catalog_only else CATALOG_POINTER_LABELS
+
+    console.print(f"\n[bold]Removing ARD catalog pointer for {domain}...[/bold]\n")
+
+    try:
+        removed = run_async(unpublish_catalog_pointer(domain, labels=labels, backend=dns_backend))
+    except Exception as e:
+        error_console.print(f"[red]✗ Failed to remove catalog pointer: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    if removed:
+        console.print("[green]✓ Catalog pointer removed![/green]\n")
+        for fqdn in removed:
+            console.print(f"  [dim]deleted SVCB[/dim] {fqdn}")
+    else:
+        console.print("[yellow]No catalog pointer records found to remove.[/yellow]")
 
 
 # ============================================================================

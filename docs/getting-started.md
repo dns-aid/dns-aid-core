@@ -28,7 +28,7 @@ The DNS-AID specification is defined in the IETF draft: https://datatracker.ietf
 
 ```bash
 # Clone the repository
-git clone https://github.com/infobloxopen/dns-aid-core.git
+git clone https://github.com/dns-aid/dns-aid-core.git
 cd dns-aid-core
 
 # Create virtual environment
@@ -292,7 +292,7 @@ asyncio.run(verify_connection())
 ### Infoblox UDDI Limitations & DNS-AID Compliance
 
 > **⚠️ Important**: Infoblox UDDI is **not fully compliant** with the
-> [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/).
+> [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/).
 >
 > Infoblox UDDI SVCB only supports "alias mode" (priority 0) and lacks support for required
 > SVC parameters (`alpn`, `port`, `mandatory`). The DNS-AID draft requires ServiceMode
@@ -560,7 +560,7 @@ dns-aid publish \
     --backend cloudflare
 
 # Verify it was created
-dig _test-agent._mcp._agents.$DNS_AID_TEST_ZONE TXT +short
+dig test-agent.$DNS_AID_TEST_ZONE TXT +short
 
 # View the agent index
 dns-aid index list $DNS_AID_TEST_ZONE --backend cloudflare
@@ -683,27 +683,27 @@ Publishing agent to DNS...
 
 ✓ Agent published successfully!
 
-  FQDN: _test-agent._mcp._agents.yourdomain.com
+  FQDN: test-agent.yourdomain.com
   Endpoint: https://mcp.yourdomain.com:443
 
   Records created:
-    • SVCB _test-agent._mcp._agents.yourdomain.com
-    • TXT _test-agent._mcp._agents.yourdomain.com
+    • SVCB test-agent.yourdomain.com
+    • TXT test-agent.yourdomain.com
 
 Verify with:
-  dig _test-agent._mcp._agents.yourdomain.com SVCB
-  dig _test-agent._mcp._agents.yourdomain.com TXT
+  dig test-agent.yourdomain.com SVCB
+  dig test-agent.yourdomain.com TXT
 ```
 
 ### Step 2: Verify DNS Records
 
 ```bash
 # Using DNS-AID
-dns-aid verify _test-agent._mcp._agents.$DNS_AID_TEST_ZONE
+dns-aid verify test-agent.$DNS_AID_TEST_ZONE
 
 # Using dig (external verification)
-dig _test-agent._mcp._agents.$DNS_AID_TEST_ZONE SVCB +short
-dig _test-agent._mcp._agents.$DNS_AID_TEST_ZONE TXT +short
+dig test-agent.$DNS_AID_TEST_ZONE SVCB +short
+dig test-agent.$DNS_AID_TEST_ZONE TXT +short
 ```
 
 ### Step 3: Discover Agents
@@ -751,7 +751,7 @@ Agent index for yourdomain.com:
 ┌────────────┬──────────┬─────────────────────────────────────────────┐
 │ Name       │ Protocol │ FQDN                                        │
 ├────────────┼──────────┼─────────────────────────────────────────────┤
-│ test-agent │ mcp      │ _test-agent._mcp._agents.yourdomain.com     │
+│ test-agent │ mcp      │ test-agent.yourdomain.com     │
 └────────────┴──────────┴─────────────────────────────────────────────┘
 
 Total: 1 agent(s) in index
@@ -767,6 +767,15 @@ DNS-AID supports HTTP-based agent discovery for compatibility with ANS-style sys
 ### HTTP Index Endpoint
 
 The HTTP index is served at: `https://_index._aiagents.{domain}/index-wellknown`
+
+DNS-AID also auto-detects [ARD ai-catalog](https://agenticresourcediscovery.org/spec/) documents
+served at `https://{domain}/.well-known/ai-catalog.json` — no extra flags needed. Agents published
+in an ARD catalog appear in the same results, dereferenced to their real service endpoint
+(`endpoint_source: "ard_card"`) with skills/tools as capabilities, and — when the catalog provides
+one — a `trust_manifest` carrying the publisher's identity and compliance attestations (SOC 2,
+ISO 27001, GDPR, ...). A domain can host its catalog **anywhere** and advertise the location with a
+DNS pointer (`dns-aid index publish-catalog <domain> <catalog-host>`). See the
+[ARD ai-catalog guide](ard-catalog.md) for the full flow and diagram.
 
 ### Using HTTP Index Discovery
 
@@ -885,7 +894,7 @@ async def main():
         print(f"Found: {agent.name} at {agent.endpoint_url}")
 
     # Verify an agent
-    verification = await verify("_my-agent._mcp._agents.yourdomain.com")
+    verification = await verify("my-agent.yourdomain.com")
     print(f"Security Score: {verification.security_score}/100")
 
 asyncio.run(main())
@@ -902,7 +911,7 @@ enforcing agent access control at the DNS layer.
 ```json
 {
   "version": "1.0",
-  "agent": "_inventory._mcp._agents.example.com",
+  "agent": "inventory.example.com",
   "rules": {
     "allowed_caller_domains": ["ai-platform.example.com"],
     "blocked_caller_domains": ["*.sandbox.example.com"],
@@ -1000,7 +1009,7 @@ private_key, public_key = generate_keypair()
 # Sign a record
 signature = sign_record(
     private_key=private_key,
-    fqdn="_payment._mcp._agents.example.com",
+    fqdn="payment.example.com",
     target="mcp.example.com",
     port=443,
 )
@@ -1009,7 +1018,7 @@ signature = sign_record(
 is_valid = await verify_signature(
     domain="example.com",
     signature=signature,
-    fqdn="_payment._mcp._agents.example.com",
+    fqdn="payment.example.com",
     target="mcp.example.com",
     port=443,
 )
@@ -1040,7 +1049,7 @@ async def main():
     result = await send_a2a_message(
         domain="ai.infoblox.com",
         name="security-analyzer",
-        message="Analyze security of _marketing._a2a._agents.ai.infoblox.com",
+        message="Analyze security of marketing.ai.infoblox.com",
         timeout=60.0,
     )
     if result.success:
@@ -1053,7 +1062,7 @@ asyncio.run(main())
 ```
 
 The discover-first flow:
-1. Queries DNS for `_security-analyzer._a2a._agents.ai.infoblox.com` SVCB record
+1. Queries DNS for `security-analyzer.ai.infoblox.com` SVCB record
 2. Fetches `/.well-known/agent-card.json` for canonical URL and metadata
 3. Validates card URL hostname matches DNS endpoint (prevents internal URL leakage)
 4. Sends the A2A JSON-RPC 2.0 `message/send` request
@@ -1520,14 +1529,16 @@ Each discovered agent includes transparency fields showing how data was resolved
 |-------|-------|---------|
 | `endpoint_source` | `dns_svcb` | Endpoint resolved via DNS SVCB lookup (proper DNS-AID flow) |
 | | `http_index_fallback` | DNS lookup failed, using HTTP index data only |
+| | `ard_card` | Real endpoint dereferenced from a fetched ARD agent/server card |
 | | `direct` | Endpoint was explicitly provided |
 | `capability_source` | `cap_uri` | Capabilities fetched from SVCB `cap` URI document |
 | | `agent_card` | Capabilities from A2A Agent Card skills (`.well-known/agent-card.json`) |
 | | `http_index` | Capabilities from HTTP index response |
+| | `ard_catalog` | Capabilities from an ARD ai-catalog entry (`/.well-known/ai-catalog.json`) |
 | | `txt_fallback` | Capabilities from DNS TXT record |
 | | `none` | No capabilities found |
 
-Agent name and protocol are extracted from the FQDN in the HTTP index — no separate `protocols` field needed. The FQDN is the single source of truth.
+Agent name and protocol are extracted from the FQDN in the HTTP index — no separate `protocols` field needed. The FQDN is the single source of truth. (ARD catalog entries instead carry a `urn:air:` identifier and an artifact media type — the agent name comes from the URN's terminal segment and the protocol from the media type.)
 
 Capabilities are resolved with priority: SVCB `cap` URI → A2A Agent Card skills → HTTP Index → TXT record fallback. When the cap URI points to an A2A Agent Card, the document is parsed once and reused — no redundant HTTP fetch for `.well-known/agent-card.json`.
 
@@ -1680,4 +1691,4 @@ stable public API. They will be integrated in a future release once the
 
 - Read the [API Reference](api-reference.md)
 - Explore [examples/](../examples/)
-- Review the [IETF draft specification](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/)
+- Review the [IETF draft specification](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/)

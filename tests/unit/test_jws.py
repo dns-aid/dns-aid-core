@@ -76,6 +76,58 @@ class TestJWKSExport:
         assert orig_numbers.y == imported_numbers.y
 
 
+class TestJWKSHardening:
+    """Algorithm / curve confusion hardening on the attacker-influenced key path."""
+
+    def test_import_rejects_non_ec_kty(self):
+        with pytest.raises(ValueError, match="kty"):
+            import_public_key_from_jwk({"kty": "RSA", "crv": "P-256", "x": "AA", "y": "AA"})
+
+    def test_import_rejects_wrong_curve(self):
+        with pytest.raises(ValueError, match="crv"):
+            import_public_key_from_jwk({"kty": "EC", "crv": "P-384", "x": "AA", "y": "AA"})
+
+    def test_import_rejects_wrong_coordinate_length(self):
+        # 'AA' decodes to 1 byte, not the 32 required for P-256.
+        with pytest.raises(ValueError, match="32 bytes"):
+            import_public_key_from_jwk({"kty": "EC", "crv": "P-256", "x": "AA", "y": "AA"})
+
+    def test_import_rejects_non_signing_use(self):
+        _, public_key = generate_keypair()
+        jwk = export_jwks(public_key)["keys"][0]
+        jwk["use"] = "enc"
+        with pytest.raises(ValueError, match="signing"):
+            import_public_key_from_jwk(jwk)
+
+    def test_verify_rejects_non_es256_alg(self):
+        """A JWS whose header declares a non-ES256 alg must not verify."""
+        import base64
+
+        keypair = generate_keypair()
+        private_key, public_key = keypair
+        now = int(time.time())
+        payload = RecordPayload(
+            fqdn="chat.example.com",
+            target="chat.example.com",
+            port=443,
+            alpn="mcp",
+            iat=now,
+            exp=now + 3600,
+        )
+        valid_jws = sign_record(payload, private_key)
+        _, payload_b64, sig_b64 = valid_jws.split(".")
+
+        # Swap the header to declare alg="none" (alg-confusion attempt).
+        forged_header = (
+            base64.urlsafe_b64encode(b'{"alg":"none","typ":"JWT"}').rstrip(b"=").decode()
+        )
+        forged = f"{forged_header}.{payload_b64}.{sig_b64}"
+
+        is_valid, result = verify_signature(forged, public_key)
+        assert is_valid is False
+        assert result is None
+
+
 class TestRecordPayload:
     """Tests for RecordPayload."""
 
@@ -295,8 +347,8 @@ class TestFetchJWKS:
 
     @pytest.mark.asyncio
     async def test_fetch_jwks_success(self):
-        """Test successful JWKS fetch."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        """Test successful JWKS fetch through the SSRF-guarded size-capped path."""
+        from unittest.mock import AsyncMock, patch
 
         from dns_aid.core.jwks import _jwks_cache, fetch_jwks
 
@@ -315,18 +367,13 @@ class TestFetchJWKS:
             ]
         }
 
-        with patch("dns_aid.core.jwks.httpx.AsyncClient") as mock_client:
-            mock_response = MagicMock()
-            mock_response.json.return_value = mock_jwks
-            mock_response.raise_for_status.return_value = None
-
-            mock_instance = AsyncMock()
-            mock_instance.get.return_value = mock_response
-            mock_instance.__aenter__.return_value = mock_instance
-            mock_instance.__aexit__.return_value = None
-
-            mock_client.return_value = mock_instance
-
+        with (
+            patch("dns_aid.utils.url_safety.validate_fetch_url"),
+            patch(
+                "dns_aid.utils.url_safety.safe_fetch_bytes",
+                new=AsyncMock(return_value=json.dumps(mock_jwks).encode()),
+            ),
+        ):
             result = await fetch_jwks("example.com")
 
         assert result is not None
@@ -343,14 +390,13 @@ class TestFetchJWKS:
         # Clear cache
         _jwks_cache.clear()
 
-        with patch("dns_aid.core.jwks.httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get.side_effect = Exception("Network error")
-            mock_instance.__aenter__.return_value = mock_instance
-            mock_instance.__aexit__.return_value = None
-
-            mock_client.return_value = mock_instance
-
+        with (
+            patch("dns_aid.utils.url_safety.validate_fetch_url"),
+            patch(
+                "dns_aid.utils.url_safety.safe_fetch_bytes",
+                new=AsyncMock(side_effect=Exception("Network error")),
+            ),
+        ):
             result = await fetch_jwks("example.com")
 
         assert result is None
@@ -359,7 +405,7 @@ class TestFetchJWKS:
     async def test_fetch_jwks_uses_cache(self):
         """Test that JWKS fetch uses cache."""
         import time
-        from unittest.mock import patch
+        from unittest.mock import AsyncMock, patch
 
         from dns_aid.core.jwks import JWKS_CACHE_TTL, _jwks_cache, fetch_jwks
 
@@ -367,11 +413,11 @@ class TestFetchJWKS:
         cached_jwks = {"keys": [{"cached": True}]}
         _jwks_cache["cached-domain.com"] = (cached_jwks, time.time() + JWKS_CACHE_TTL)
 
-        with patch("dns_aid.core.jwks.httpx.AsyncClient") as mock_client:
+        with patch("dns_aid.utils.url_safety.safe_fetch_bytes", new=AsyncMock()) as mock_fetch:
             result = await fetch_jwks("cached-domain.com")
 
-            # Should not have made any HTTP calls
-            mock_client.assert_not_called()
+            # Cache hit — no network fetch.
+            mock_fetch.assert_not_called()
 
         assert result == cached_jwks
 
@@ -499,3 +545,185 @@ class TestModelIntegration:
 
         params = agent.to_svcb_params()
         assert "sig" not in params
+
+
+class TestSignatureBindsToRecord:
+    """Regression tests: a valid signature MUST bind to the record it travels with.
+
+    Before this binding was enforced, an attacker could lift a legitimately
+    signed `sig` value from one agent's SVCB record and paste it onto a
+    spoofed SVCB pointing at their own host. The signature would still
+    verify (it's cryptographically valid) and the discoverer would stamp
+    ``signature_verified=True`` — turning the JWS into a forgeable
+    rubber-stamp instead of a record-binding proof.
+
+    Publisher-side: ``core/publisher.py`` signs a ``RecordPayload`` whose
+    fields are ``(fqdn, target, port, alpn)``. Verifier-side: the
+    discoverer must re-derive the same tuple from the AgentRecord it's
+    about to trust and refuse if any field disagrees.
+    """
+
+    @pytest.mark.asyncio
+    async def test_valid_sig_with_mismatched_target_is_rejected(self):
+        """Sig is cryptographically valid but signed payload.target != agent.target_host."""
+        from unittest.mock import AsyncMock, patch
+
+        from dns_aid.core.discoverer import _verify_agent_signatures
+        from dns_aid.core.jwks import (
+            RecordPayload,
+            export_jwks,
+            generate_keypair,
+            sign_record,
+        )
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        private_key, public_key = generate_keypair()
+        jwks = export_jwks(public_key, kid="binding-test")
+
+        # Sign a payload that says target=legit.example.com.
+        payload = RecordPayload.from_agent_record(
+            fqdn="chat.example.com",
+            target="legit.example.com",
+            port=443,
+            protocol="mcp",
+        )
+        legit_sig = sign_record(payload, private_key)
+
+        # Attacker pastes the legit sig onto a spoofed record pointing
+        # at attacker.example.com.
+        spoofed = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="attacker.example.com",
+            port=443,
+            sig=legit_sig,
+        )
+
+        with patch("dns_aid.core.jwks.fetch_jwks", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = jwks
+            await _verify_agent_signatures([spoofed], "example.com", dnssec_validated=False)
+
+        assert spoofed.signature_verified is False
+        assert spoofed.signature_algorithm is None
+
+    @pytest.mark.asyncio
+    async def test_valid_sig_with_mismatched_port_is_rejected(self):
+        """Sig is valid; port disagrees; binding must reject."""
+        from unittest.mock import AsyncMock, patch
+
+        from dns_aid.core.discoverer import _verify_agent_signatures
+        from dns_aid.core.jwks import (
+            RecordPayload,
+            export_jwks,
+            generate_keypair,
+            sign_record,
+        )
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        private_key, public_key = generate_keypair()
+        jwks = export_jwks(public_key, kid="binding-test")
+
+        payload = RecordPayload.from_agent_record(
+            fqdn="chat.example.com",
+            target="chat.example.com",
+            port=443,
+            protocol="mcp",
+        )
+        sig = sign_record(payload, private_key)
+
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+            port=8443,  # disagrees with signed payload.port
+            sig=sig,
+        )
+
+        with patch("dns_aid.core.jwks.fetch_jwks", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = jwks
+            await _verify_agent_signatures([agent], "example.com", dnssec_validated=False)
+
+        assert agent.signature_verified is False
+
+    @pytest.mark.asyncio
+    async def test_valid_sig_with_mismatched_alpn_is_rejected(self):
+        """Sig is valid for protocol=mcp; record claims a2a; binding must reject."""
+        from unittest.mock import AsyncMock, patch
+
+        from dns_aid.core.discoverer import _verify_agent_signatures
+        from dns_aid.core.jwks import (
+            RecordPayload,
+            export_jwks,
+            generate_keypair,
+            sign_record,
+        )
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        private_key, public_key = generate_keypair()
+        jwks = export_jwks(public_key, kid="binding-test")
+
+        payload = RecordPayload.from_agent_record(
+            fqdn="chat.example.com",
+            target="chat.example.com",
+            port=443,
+            protocol="mcp",
+        )
+        sig = sign_record(payload, private_key)
+
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.A2A,  # disagrees with signed payload.alpn
+            target_host="chat.example.com",
+            port=443,
+            sig=sig,
+        )
+
+        with patch("dns_aid.core.jwks.fetch_jwks", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = jwks
+            await _verify_agent_signatures([agent], "example.com", dnssec_validated=False)
+
+        assert agent.signature_verified is False
+
+    @pytest.mark.asyncio
+    async def test_valid_sig_matching_record_is_accepted(self):
+        """Happy path: every field of the signed payload binds to the record."""
+        from unittest.mock import AsyncMock, patch
+
+        from dns_aid.core.discoverer import _verify_agent_signatures
+        from dns_aid.core.jwks import (
+            RecordPayload,
+            export_jwks,
+            generate_keypair,
+            sign_record,
+        )
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        private_key, public_key = generate_keypair()
+        jwks = export_jwks(public_key, kid="binding-test")
+
+        payload = RecordPayload.from_agent_record(
+            fqdn="chat.example.com",
+            target="chat.example.com",
+            port=443,
+            protocol="mcp",
+        )
+        sig = sign_record(payload, private_key)
+
+        agent = AgentRecord(
+            name="chat",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="chat.example.com",
+            port=443,
+            sig=sig,
+        )
+
+        with patch("dns_aid.core.jwks.fetch_jwks", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = jwks
+            await _verify_agent_signatures([agent], "example.com", dnssec_validated=False)
+
+        assert agent.signature_verified is True
+        assert agent.signature_algorithm is not None

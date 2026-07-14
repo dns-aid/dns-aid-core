@@ -84,7 +84,7 @@ async def main():
     discovery = await discover("example.com", protocol=Protocol.MCP)
 
     # Verify an agent's DNS records
-    verification = await verify("_my-agent._mcp._agents.example.com")
+    verification = await verify("my-agent.example.com")
 
 asyncio.run(main())
 ```
@@ -168,8 +168,9 @@ else:
 
 #### DNS Records Created
 
-- **SVCB**: `_{name}._{protocol}._agents.{domain}` → Service binding record
-- **TXT**: `_{name}._{protocol}._agents.{domain}` → Capabilities and metadata
+- **SVCB**: `{name}.{domain}` (draft-02 flat primary owner) → Service binding record
+- **SVCB (AliasMode, optional)**: `{name}._agents.{domain}` → walkable AliasMode pointer at the flat primary owner (suppressible via `publish_walkable_alias=False`)
+- **TXT**: `{name}.{domain}` → Capabilities and metadata (alongside the primary SVCB)
 
 ---
 
@@ -186,6 +187,8 @@ async def discover(
     use_http_index: bool = False,
     enrich_endpoints: bool = True,
     verify_signatures: bool = False,
+    trust_dnssec_pointers: bool = False,
+    verify_dane: bool = False,
     *,
     # Path A in-memory filter kwargs (v0.19.0+)
     capabilities: list[str] | None = None,
@@ -210,10 +213,12 @@ async def discover(
 | `domain` | `str` | Yes | - | Domain to search for agents |
 | `protocol` | `str \| Protocol` | No | `None` | Filter by protocol (None for all) |
 | `name` | `str` | No | `None` | Filter by specific agent name (case-insensitive per RFC 1035) |
-| `require_dnssec` | `bool` | No | `False` | Require DNSSEC validation |
+| `require_dnssec` | `bool` | No | `False` | Require every **DNS-plane** agent's DNS response to carry the resolver AD flag; raises `DNSSECError` if any does not. ARD / HTTP-catalog agents are exempt (no DNS SVCB record — their trust is `catalog_trust`). Exposed on SDK, CLI (`--require-dnssec`), and MCP. |
 | `use_http_index` | `bool` | No | `False` | Use HTTP index endpoint instead of DNS-only discovery |
 | `enrich_endpoints` | `bool` | No | `True` | Fetch cap docs / agent cards to enrich AgentRecords |
 | `verify_signatures` | `bool` | No | `False` | Fetch JWKS and verify per-agent JWS signatures |
+| `trust_dnssec_pointers` | `bool` | No | `False` | Opt-in. Also follow an off-domain ARD catalog pointer when its pointer record is DNSSEC-validated (AD flag). Off by default — the AD flag is only trustworthy with a validating resolver over a secure path. Exposed on SDK, CLI (`--trust-dnssec-pointers`), and MCP. |
+| `verify_dane` | `bool` | No | `False` | Opt-in. Check each resolved agent endpoint's TLS certificate against its DANE/TLSA record — defense-in-depth on the endpoint that does **not** change the catalog/pointer trust decision. Demoted to `None` unless the agent's DNS response is DNSSEC-validated (DANE without DNSSEC carries no integrity guarantee, RFC 6698 §10.1). Surfaced on `AgentRecord.dane_verified`. SDK / CLI (`--verify-dane`) / MCP. |
 
 **Filter kwargs (v0.19.0+, all keyword-only, all default no-op):**
 
@@ -225,7 +230,7 @@ async def discover(
 | `intent` | `str \| None` | Match against `agent.category`; falls back to substring match across capabilities. |
 | `transport` | `str \| None` | Match against the agent's protocol identifier (Path A surfaces protocol, not wire transport). |
 | `realm` | `str \| None` | Exact match against `agent.realm`. |
-| `min_dnssec` | `bool` | When `True`, only records whose DNS response was DNSSEC-validated pass. |
+| `min_dnssec` | `bool` | When `True`, only records whose DNS response was DNSSEC-validated (AD flag) pass. ARD / HTTP-catalog agents are exempt (no DNS SVCB record — their trust is `catalog_trust`) and pass through rather than being dropped. |
 | `text_match` | `str \| None` | Case-insensitive substring match across `description`, `use_cases`, and `capabilities`. Empty string raises `ValueError`. |
 | `require_signed` | `bool` | When `True`, only records whose JWS signature verified pass. Auto-enables `verify_signatures=True`. |
 | `require_signature_algorithm` | `list[str] \| None` | Restrict `require_signed` matches to records whose verified algorithm is in this allow-list. Requires `require_signed=True`. |
@@ -240,6 +245,15 @@ When every filter is unset, the input list is returned unchanged with no allocat
 |--------|----------|----------|
 | **DNS (default)** | `_index._agents.{domain}` TXT record | Decentralized, cached, minimal round trips |
 | **HTTP Index** | `https://_index._aiagents.{domain}/index-wellknown` | ANS-compatible, rich metadata (descriptions, model cards) |
+| **ARD ai-catalog** | `https://{domain}/.well-known/ai-catalog.json` | [ARD](https://agenticresourcediscovery.org/spec/) catalogs, auto-detected via `use_http_index=True`; carries publisher trust manifests |
+
+With `use_http_index=True` the fetcher probes the legacy index locations first and the ARD well-known
+location last, then auto-detects the document format (`specVersion: "1.0"` + `entries[]` → ARD;
+keyed object → legacy). ARD entries whose artifact type is `application/mcp-server-card+json` or
+`application/a2a-agent-card+json` become agents (protocol inferred from the media type); inline
+nested catalogs recurse (depth ≤ 3); registry entries and non-agent artifacts are skipped. An
+entry's `trustManifest` is preserved on `AgentRecord.trust_manifest` (pass-through — dns-aid does
+not verify signatures, attestation digests, or identity↔publisher alignment).
 
 #### Returns
 
@@ -249,8 +263,8 @@ When every filter is unset, the input list is returned unchanged with no allocat
 
 - `ValueError` — `text_match` is an empty string, or `require_signature_algorithm`
   is set without `require_signed=True`.
-- `DNSSECError` — `require_dnssec=True` but the domain's response is not
-  authenticated.
+- `DNSSECError` — `require_dnssec=True` but a **DNS-plane** agent's response is not
+  authenticated (AD flag unset). ARD / HTTP-catalog agents are exempt.
 
 #### Example
 
@@ -305,7 +319,7 @@ async def verify(fqdn: str) -> VerifyResult
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `fqdn` | `str` | Yes | Fully qualified domain name (e.g., "_chat._mcp._agents.example.com") |
+| `fqdn` | `str` | Yes | Fully qualified domain name (e.g., "chat.example.com") |
 
 #### Returns
 
@@ -316,7 +330,7 @@ async def verify(fqdn: str) -> VerifyResult
 ```python
 from dns_aid import verify
 
-result = await verify("_chat._mcp._agents.example.com")
+result = await verify("chat.example.com")
 
 print(f"Record exists: {result.record_exists}")
 print(f"DNSSEC valid: {result.dnssec_valid}")
@@ -332,7 +346,7 @@ DCV is a stateless challenge/verify primitive that lets one party prove control 
 domain to another using a short-lived TXT record at `_agents-challenge.{domain}`.
 It implements [draft-ietf-dnsop-domain-verification-techniques-12](https://datatracker.ietf.org/doc/draft-ietf-dnsop-domain-verification-techniques/)
 plus the `bnd-req` binding extension from
-[draft-mozleywilliams-dnsop-dnsaid-01](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
+[draft-mozleywilliams-dnsop-dnsaid-02](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/).
 
 **Role split:**
 - *Challenger* — calls `issue()` and `verify()`; no DNS write credentials required.
@@ -573,14 +587,22 @@ agent = AgentRecord(
 | `bap` | `list[str]` | No | `[]` | Supported protocols with versions |
 | `policy_uri` | `str` | No | `None` | URI to agent policy document |
 | `realm` | `str` | No | `None` | Multi-tenant scope identifier |
-| `capability_source` | `str` | No | `None` | Where capabilities came from: `cap_uri`, `agent_card`, `http_index`, `txt_fallback`, `none` |
-| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `direct` |
+| `capability_source` | `str` | No | `None` | Where capabilities came from: `cap_uri`, `well_known`, `agent_card`, `http_index`, `ard_catalog`, `txt_fallback`, `none` |
+| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `ard_card` (real endpoint from a fetched ARD agent/server card), `ard_inline`, `direct`, `directory` |
+| `trust_manifest` | `TrustManifest` | No | `None` | Publisher trust claims from an ARD ai-catalog entry (identity, attestations, provenance, signature) — pass-through, not verified |
+| `catalog_trust` | `str \| None` | No | `None` | ARD-sourced records only — how the catalog was trusted: `tls_domain` (on-domain), `dnssec` (DNSSEC-validated off-domain pointer), or `jws` (JWS-signed off-domain). `None` for pure-DNS records. |
+| `dnssec_validated` | `bool` | No | `False` | `True` when this agent's DNS response carried the resolver **AD flag**. Set for DNS-plane agents when `require_dnssec` / `min_dnssec` / `verify_dane` is used; ARD / HTTP-catalog agents are exempt and stay `False`. AD-flag based — not independent DNSKEY→DS→RRSIG chain validation. |
+| `dane_verified` | `bool \| None` | No | `None` | DANE/TLSA endpoint-certificate binding (opt-in `verify_dane=True`): `True` = endpoint cert matched its DNSSEC-anchored TLSA record; `False` = TLSA mismatch; `None` = not checked, no TLSA record, or not DNSSEC-anchored. |
+
+The [ARD ai-catalog guide](ard-catalog.md) covers the full discovery flow (DNS pointer → catalog → per-agent DNS-first → card dereferencing), publishing the host-anywhere `_catalog._agents` / `_index._agents` pointer (`dns-aid index publish-catalog`, `publish_catalog_pointer` library/MCP), and the trust model.
 
 #### Properties
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `fqdn` | `str` | Full DNS-AID record name: `_{name}._{protocol}._agents.{domain}` |
+| `fqdn` | `str` | Full DNS-AID record name (draft-02 flat primary owner): `{name}.{domain}` |
+| `walkable_fqdn` | `str` | Optional walkable AliasMode form: `{name}._agents.{domain}` |
+| `legacy_fqdn` | `str` | Legacy -01 form: `_{name}._{protocol}._agents.{domain}` (used only by the back-compat discovery path) |
 | `endpoint_url` | `str` | Full URL: `https://{target_host}:{port}` |
 | `svcb_target` | `str` | SVCB target with trailing dot |
 
@@ -767,7 +789,7 @@ async with InfobloxBloxOneBackend() as backend:
 | `INFOBLOX_DNS_VIEW` | No | `default` | DNS view name |
 | `INFOBLOX_BASE_URL` | No | `https://csp.infoblox.com` | API URL |
 
-**DNS-AID Compliance**: Infoblox UDDI is **not fully compliant** with the [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/). It only supports alias mode SVCB (priority 0) and lacks `alpn`, `port`, and `mandatory` parameters. For full compliance, use Route53Backend, InfobloxNIOSBackend, NS1Backend, or DDNSBackend.
+**DNS-AID Compliance**: Infoblox UDDI is **not fully compliant** with the [DNS-AID draft](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/). It only supports alias mode SVCB (priority 0) and lacks `alpn`, `port`, and `mandatory` parameters. For full compliance, use Route53Backend, InfobloxNIOSBackend, NS1Backend, or DDNSBackend.
 
 ### InfobloxNIOSBackend
 
@@ -933,7 +955,7 @@ Sign a DNS record payload with a private key.
 from dns_aid.core.jwks import sign_record, RecordPayload
 
 payload = RecordPayload(
-    fqdn="_payment._mcp._agents.example.com",
+    fqdn="payment.example.com",
     target="payment.example.com",
     port=443,
     alpn="mcp",
@@ -1052,7 +1074,7 @@ dns-aid discover example.com --protocol mcp
 dns-aid discover example.com --use-http-index
 
 # Verify an agent
-dns-aid verify _my-agent._mcp._agents.example.com
+dns-aid verify my-agent.example.com
 
 # List all agents in a zone
 dns-aid list example.com
@@ -1076,7 +1098,7 @@ dns-aid index sync example.com           # Sync index with actual DNS records
 ```bash
 # Send a message to an A2A agent (discover-first: DNS → agent card → invoke)
 dns-aid message --domain ai.infoblox.com --name security-analyzer \
-    "Analyze security of _marketing._a2a._agents.ai.infoblox.com"
+    "Analyze security of marketing.ai.infoblox.com"
 
 # Send a message to an A2A agent (direct endpoint)
 dns-aid message --endpoint https://security-analyzer.ai.infoblox.com \
@@ -1521,7 +1543,7 @@ async with AgentClient(config) as client:
 
     # Get rankings for specific agents only
     rankings = await client.fetch_rankings(
-        fqdns=["_booking._mcp._agents.example.com"],
+        fqdns=["booking.example.com"],
         limit=10
     )
 
@@ -1843,6 +1865,6 @@ print(dns_aid.__version__)  # "0.6.0"
 ## See Also
 
 - [Getting Started Guide](getting-started.md)
-- [IETF Draft: DNS-AID](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-01/)
+- [IETF Draft: DNS-AID](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid-02/)
 - [RFC 9460: SVCB Records](https://www.rfc-editor.org/rfc/rfc9460.html)
-- [GitHub Repository](https://github.com/infobloxopen/dns-aid-core)
+- [GitHub Repository](https://github.com/dns-aid/dns-aid-core)

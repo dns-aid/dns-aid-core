@@ -5,7 +5,7 @@
 Data models for DNS-AID.
 
 These models represent agents, discovery results, and DNS records
-as specified in IETF draft-mozleywilliams-dnsop-dnsaid-01.
+as specified in IETF draft-mozleywilliams-dnsop-dnsaid-02.
 """
 
 from __future__ import annotations
@@ -14,13 +14,53 @@ import os
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+import structlog
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from dns_aid.utils.validation import validate_connect_class
 
-# DNS-AID custom SVCB param key mapping (IETF draft-01, Section 4.4.3)
+logger = structlog.get_logger(__name__)
+
+# Capability provenance — single source of truth.
+#
+# Each value records WHERE a record's capabilities came from, so
+# downstream consumers can make trust / audit / fallback decisions
+# without re-deriving the chain. Add new values here (and only here)
+# — the discoverer, SDK, indexer, and AgentRecord all import this
+# symbol so adding a value automatically widens every type-check site.
+#
+# Priority (most trusted → least): cap_uri > well_known > agent_card
+# > ard_catalog ≈ http_index > txt_fallback. ``ard_catalog`` records
+# that capabilities came from an ARD ai-catalog entry
+# (https://agenticresourcediscovery.org/spec/) — like http_index it is
+# publisher-asserted index data; the entry's trustManifest is carried
+# separately on AgentRecord.trust_manifest. ``descriptor_unreachable``
+# is a diagnostic source: the SVCB record declared a cap/well-known
+# locator but the fetch failed (timeout, TLS error, 5xx). Recording
+# this as a distinct source lets callers tell "no descriptor
+# declared" from "descriptor declared but unreachable right now"
+# without scraping log lines.
+CapabilitySource = Literal[
+    "cap_uri",
+    "well_known",
+    "agent_card",
+    "http_index",
+    "ard_catalog",
+    "txt_fallback",
+    "descriptor_unreachable",
+    "none",
+]
+
+# DNS-AID custom SVCB param key mapping (IETF draft-02 §4 IANA Considerations).
 # These use the RFC 9460 Private Use range (65280-65534).
 # Once IANA assigns official SvcParamKey numbers, update these values.
+#
+# Six of the entries below (cap, cap-sha256, bap, policy, realm, well-known)
+# correspond to keys that draft-02 requests IANA register normatively. The
+# remaining four (sig, connect-class, connect-meta, enroll-uri) are not in
+# the draft-02 normative set; they back features discussed in -02 §5 (Future Work and Experimental Mechanisms)
+# or shipping in dns-aid-core as extensions and remain at private-use code
+# points pending a follow-up discussion.
 DNS_AID_KEY_MAP: dict[str, str] = {
     "cap": "key65400",
     "cap-sha256": "key65401",
@@ -31,9 +71,18 @@ DNS_AID_KEY_MAP: dict[str, str] = {
     "connect-class": "key65406",
     "connect-meta": "key65407",
     "enroll-uri": "key65408",
+    "well-known": "key65409",
 }
 
 DNS_AID_KEY_MAP_REVERSE: dict[str, str] = {v: k for k, v in DNS_AID_KEY_MAP.items()}
+
+# SVCB record priorities per RFC 9460:
+#   priority=0 → AliasMode (the record is an alias to a canonical owner)
+#   priority>0 → ServiceMode (the record carries endpoint data; lower
+#                priorities are preferred when multiple are returned)
+# We use 1 as the default ServiceMode priority for primary-owner writes.
+SVCB_ALIAS_MODE: int = 0
+SVCB_SERVICE_MODE: int = 1
 
 
 def _use_string_keys() -> bool:
@@ -135,8 +184,27 @@ class SvcbRecord(BaseModel):
         default=None,
         description="Capability document URI mapped to the DNS-AID 'cap' SVCB parameter",
     )
-    cap_sha256: str | None = Field(default=None, description="SHA-256 digest for the cap URI")
-    bap: list[str] = Field(default_factory=list, description="Bulk application protocols")
+    cap_sha256: str | None = Field(
+        default=None,
+        description="SHA-256 digest for the cap URI. Presence does not imply the digest "
+        "was actually checked against fetched bytes — use ``cap_sha256_verified``.",
+    )
+    cap_sha256_verified: bool = Field(
+        default=False,
+        description="True when the discoverer fetched the descriptor and the SHA-256 of "
+        "its bytes matched ``cap_sha256``. Always False on records that didn't go "
+        "through the fetch path.",
+    )
+    bap: str | None = Field(
+        default=None,
+        description="Bulk Agent Protocol (draft-02 §5.1, §FutureWork). Carries a "
+        "single agent-protocol identifier per SVCB record in the draft's "
+        "delimited form: bare (``mcp``, ``a2a``) or versioned (``mcp=1.0``, "
+        "``a2a=1.1``). Experimental in draft-02 — alpn remains the protocol "
+        "carrier dns-aid-core treats as canonical for reconciliation. "
+        "Multi-protocol agents publish multiple SVCB records at the same flat "
+        "owner, each with its own alpn and (optionally) bap.",
+    )
     policy_uri: str | None = Field(default=None, description="Agent policy URI")
     realm: str | None = Field(default=None, description="Opaque authz realm identifier")
     sig: str | None = Field(default=None, description="JWS signature for the record")
@@ -155,11 +223,106 @@ class SvcbRecord(BaseModel):
         max_length=2048,
         description="Managed enrollment URI required before direct connection",
     )
+    well_known_path: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="RFC 8615 well-known path suffix mapped to the DNS-AID 'well-known' "
+        "SvcParamKey (per draft-02). Independent of 'uri'/'cap'; both may be present.",
+    )
 
     @field_validator("connect_class", mode="before")
     @classmethod
     def normalize_connect_class(cls, v: str | None) -> str | None:
         return _normalize_connect_class(v)
+
+    @field_validator("target", mode="after")
+    @classmethod
+    def _enforce_no_underscore_in_target(cls, v: str) -> str:
+        """Enforce draft-02 §3.2 (Known Organization, Unknown Agent) at the type boundary.
+
+        Earlier the no-underscore rule fired only inside ``publish()``;
+        anyone constructing an ``SvcbRecord`` directly (or via
+        ``AgentRecord.to_svcb_record()``) bypassed it. The field
+        validator makes the model itself the enforcer so the invariant
+        holds regardless of construction path.
+
+        Honours the operator-level env gate
+        ``DNS_AID_ALLOW_UNDERSCORE_TARGET=1`` — when set, underscored
+        targets construct successfully so the publisher's existing
+        ``allow_underscore_target=True`` path can still emit its
+        structured WARN. Without the env gate, no construction path
+        can produce an underscored target.
+        """
+        from dns_aid.utils.validation import (
+            _underscore_bypass_env_enabled,
+            validate_no_underscore_in_target,
+        )
+
+        validate_no_underscore_in_target(v, allow_underscore=_underscore_bypass_env_enabled())
+        return v
+
+    @field_validator("well_known_path", mode="after")
+    @classmethod
+    def _enforce_safe_well_known_path(cls, v: str | None) -> str | None:
+        """Constrain well-known to a safe RFC 8615 value at the type boundary.
+
+        Same reasoning as ``target`` above: the publisher-side check
+        isn't sufficient when consumers can deserialize SVCB records
+        directly into ``SvcbRecord`` (e.g. through ``to_svcb_record()``
+        round-trips). The field validator catches it.
+        """
+        if v is None:
+            return None
+        from dns_aid.utils.validation import validate_well_known_path
+
+        return validate_well_known_path(v)
+
+    @field_validator("bap", mode="after")
+    @classmethod
+    def _enforce_safe_bap(cls, v: str | None) -> str | None:
+        """Constrain ``bap`` to the draft-02 wire shape at the type boundary.
+
+        Without this validator a crafted value like
+        ``mcp" key65500="x`` would round-trip verbatim through
+        ``to_params()`` and the backend formatters, so dnspython
+        would parse two SvcParamKeys instead of one — the attacker
+        controls the second. Enforcing the constraint here catches it
+        on every construction path (direct, via ``to_svcb_record()``,
+        via ``publish()``).
+        """
+        if v is None:
+            return None
+        from dns_aid.core.bap import validate_bap
+
+        return validate_bap(v)
+
+    @field_validator(
+        "uri",
+        "cap_sha256",
+        "policy_uri",
+        "realm",
+        "sig",
+        "connect_meta",
+        "enroll_uri",
+        mode="after",
+    )
+    @classmethod
+    def _enforce_safe_svcparams(cls, v: str | None) -> str | None:
+        """Reject SVCB SvcParam-quote-breakout chars in the free-form params.
+
+        ``to_params()`` emits these as ``key="<value>"`` and the
+        presentation-format backends (Route53 / Cloudflare / DDNS) write
+        that verbatim, so a double quote, backslash, or control character
+        could break out of the quoting and inject an attacker-controlled
+        sibling SvcParamKey into the authoritative record — the same
+        server-side parameter injection ``bap`` already closes. Enforced at
+        the type boundary so every construction path inherits it.
+        """
+        if v is None:
+            return None
+        from dns_aid.utils.validation import validate_svcparam_value
+
+        return validate_svcparam_value(v)
 
     @property
     def normalized_target(self) -> str:
@@ -176,6 +339,16 @@ class SvcbRecord(BaseModel):
                 mandatory.append(normalized)
                 seen_mandatory.add(normalized)
 
+        # Resolve the wire-key style ONCE per to_params() call. Earlier
+        # each line below was calling _svcb_param_key() which re-reads
+        # the DNS_AID_SVCB_STRING_KEYS env var via os.environ.get —
+        # up to 11 env reads per serialization, multiplied by every
+        # publish call. Cache the mapping here so we pay one env read.
+        emit_string = _use_string_keys()
+
+        def _key(name: str) -> str:
+            return name if emit_string else DNS_AID_KEY_MAP.get(name, name)
+
         params = {
             "alpn": self.alpn,
             "port": str(self.port),
@@ -186,33 +359,184 @@ class SvcbRecord(BaseModel):
         if self.ipv6_hint:
             params["ipv6hint"] = self.ipv6_hint
         if self.uri:
-            params[_svcb_param_key("cap")] = self.uri
+            params[_key("cap")] = self.uri
         if self.cap_sha256:
-            params[_svcb_param_key("cap-sha256")] = self.cap_sha256
+            params[_key("cap-sha256")] = self.cap_sha256
         if self.bap:
-            params[_svcb_param_key("bap")] = ",".join(self.bap)
+            params[_key("bap")] = self.bap
         if self.policy_uri:
-            params[_svcb_param_key("policy")] = self.policy_uri
+            params[_key("policy")] = self.policy_uri
         if self.realm:
-            params[_svcb_param_key("realm")] = self.realm
+            params[_key("realm")] = self.realm
         if self.sig:
-            params[_svcb_param_key("sig")] = self.sig
+            params[_key("sig")] = self.sig
         if self.connect_class:
-            params[_svcb_param_key("connect-class")] = self.connect_class
+            params[_key("connect-class")] = self.connect_class
         if self.connect_meta:
-            params[_svcb_param_key("connect-meta")] = self.connect_meta
+            params[_key("connect-meta")] = self.connect_meta
         if self.enroll_uri:
-            params[_svcb_param_key("enroll-uri")] = self.enroll_uri
+            params[_key("enroll-uri")] = self.enroll_uri
+        if self.well_known_path:
+            params[_key("well-known")] = self.well_known_path
         return params
+
+
+class TrustAttestation(BaseModel):
+    """Single compliance/security attestation from an ARD trustManifest.
+
+    Per the ARD ai-catalog schema an attestation carries a free-form
+    ``type`` (e.g. ``SOC2-Type2``, ``ISO27001``, ``GDPR``, ``SPIFFE-X509``)
+    and the ``uri`` of the attestation document. ``mediaType`` is required
+    by the ARD JSON Schema but absent from the spec's prose table and its
+    own examples, so it is optional on read (tolerant parsing).
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    type: str = Field(..., min_length=1, description="Attestation type (e.g. 'SOC2-Type2')")
+    uri: str = Field(..., min_length=1, description="Location of the attestation document")
+    media_type: str | None = Field(
+        default=None,
+        alias="mediaType",
+        description="Media type of the attestation document (e.g. 'application/pdf')",
+    )
+    digest: str | None = Field(
+        default=None,
+        description="Digest of the attestation document as published (NOT verified)",
+    )
+
+
+class ProvenanceLink(BaseModel):
+    """Provenance link from an ARD trustManifest.
+
+    Relates the catalog entry to its source. The ARD schema enumerates
+    ``derivedFrom``, ``publishedFrom`` and ``copiedFrom`` for ``relation``;
+    unknown values are accepted for forward compatibility.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    relation: str = Field(..., min_length=1, description="Relation to the source")
+    source_id: str = Field(..., alias="sourceId", min_length=1, description="Source identifier")
+    source_digest: str | None = Field(
+        default=None, alias="sourceDigest", description="Digest of the source as published"
+    )
+
+
+class TrustSchema(BaseModel):
+    """Trust-schema reference from an ARD trustManifest."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    identifier: str = Field(..., min_length=1, description="Trust schema identifier")
+    version: str = Field(..., min_length=1, description="Trust schema version")
+    governance_uri: str | None = Field(
+        default=None, alias="governanceUri", description="Governance document URI"
+    )
+    verification_methods: list[str] = Field(
+        default_factory=list,
+        alias="verificationMethods",
+        description="Supported verification methods (e.g. 'did', 'x509', 'dns-01')",
+    )
+
+
+class TrustManifest(BaseModel):
+    """Publisher trust claims from an ARD ai-catalog entry.
+
+    Pass-through of published claims per the ARD specification
+    (https://agenticresourcediscovery.org/spec/ — trustManifest object).
+    dns-aid-core does NOT verify signatures, attestation digests, or
+    identity↔publisher-domain alignment in this release; consumers making
+    trust decisions must verify these claims themselves.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    identity: str = Field(
+        ...,
+        min_length=1,
+        description="Cryptographic workload identity (SPIFFE ID, DID, or HTTPS FQDN URI)",
+    )
+    identity_type: str | None = Field(
+        default=None,
+        alias="identityType",
+        description="Identity scheme: 'spiffe', 'did', 'https', or 'other'",
+    )
+    trust_schema: TrustSchema | None = Field(
+        default=None, alias="trustSchema", description="Trust schema reference"
+    )
+    attestations: list[TrustAttestation] = Field(
+        default_factory=list, description="Compliance/security attestations as published"
+    )
+    provenance: list[ProvenanceLink] = Field(
+        default_factory=list, description="Provenance links as published"
+    )
+    signature: str | None = Field(
+        default=None,
+        description="Detached JWS over the trustManifest content, stored verbatim (NOT verified)",
+    )
+
+    @classmethod
+    def from_wire(cls, data: Any) -> TrustManifest | None:
+        """Tolerantly build a TrustManifest from a wire-format dict.
+
+        Returns ``None`` when the payload is not a dict or fails core
+        validation (e.g. missing ``identity``). Malformed individual
+        attestations / provenance links are dropped with a warning rather
+        than failing the whole manifest — per the feature contract a bad
+        attestation must never cost the agent its valid trust data.
+        """
+        if not isinstance(data, dict):
+            return None
+        payload = dict(data)
+        raw_attestations = payload.pop("attestations", None)
+        raw_provenance = payload.pop("provenance", None)
+        try:
+            manifest = cls.model_validate(payload)
+        except ValidationError as e:
+            logger.warning("trust_manifest.invalid", error=str(e))
+            return None
+        if isinstance(raw_attestations, list):
+            for item in raw_attestations:
+                try:
+                    manifest.attestations.append(TrustAttestation.model_validate(item))
+                except ValidationError as e:
+                    logger.warning("trust_manifest.attestation_dropped", error=str(e))
+        if isinstance(raw_provenance, list):
+            for item in raw_provenance:
+                try:
+                    manifest.provenance.append(ProvenanceLink.model_validate(item))
+                except ValidationError as e:
+                    logger.warning("trust_manifest.provenance_dropped", error=str(e))
+        return manifest
+
+
+# Endpoint sources served from an HTTP catalog / ARD index rather than a genuine
+# DNS SVCB record. These agents have no DNS SVCB owner name to DNSSEC-validate —
+# their trust basis is ``catalog_trust`` (tls_domain / dnssec / jws) — so DNSSEC
+# enforcement (``require_dnssec`` / ``min_dnssec``) does not apply to them and they
+# are exempt rather than silently dropped. Every *other* source — a real
+# ``dns_svcb`` / ``dns_svcb_enriched`` record, or an explicit ``direct`` /
+# ``directory`` endpoint — IS subject to DNSSEC checking (fail-safe: an
+# unknown-provenance agent must still prove DNSSEC to satisfy ``min_dnssec``).
+CATALOG_ENDPOINT_SOURCES: frozenset[str] = frozenset(
+    {"http_index", "http_index_fallback", "ard_card", "ard_inline"}
+)
 
 
 class AgentRecord(BaseModel):
     """
     Represents an AI agent published via DNS-AID.
 
-    Maps to SVCB + TXT records in DNS per the DNS-AID specification:
-    - SVCB: _{name}._{protocol}._agents.{domain} → service binding
+    Maps to SVCB + TXT records in DNS per the DNS-AID specification
+    (draft-mozleywilliams-dnsop-dnsaid-02):
+
+    - SVCB: ``{name}.{domain}`` → service binding (flat primary owner)
     - TXT: capabilities, version, metadata
+
+    The agent protocol is no longer part of the FQDN under -02 — it
+    lives in the ``bap`` SvcParamKey (or ``alpn`` when only one
+    protocol is supported).
 
     Example:
         >>> agent = AgentRecord(
@@ -223,7 +547,7 @@ class AgentRecord(BaseModel):
         ...     capabilities=["ipam", "dns", "vpn"]
         ... )
         >>> agent.fqdn
-        '_network-specialist._mcp._agents.example.com'
+        'network-specialist.example.com'
         >>> agent.endpoint_url
         'https://mcp.example.com:443'
     """
@@ -282,17 +606,46 @@ class AgentRecord(BaseModel):
     #     add custom keys to the mandatory list for downgrade safety.
     cap_uri: str | None = Field(
         default=None,
-        description="URI or URN to capability descriptor (per DNS-AID draft Section 4.4.3 'cap')",
+        description="URI, URN, or compact JSON-Ref locator for the capability descriptor "
+        "(per draft-02 'cap' SvcParamKey)",
     )
     cap_sha256: str | None = Field(
         default=None,
-        description="Base64url-encoded SHA-256 digest of the capability descriptor "
-        "for integrity checks and cache revalidation (per DNS-AID draft 'cap-sha256')",
+        description="Base64url-encoded SHA-256 digest of the canonical capability descriptor "
+        "for integrity checks and cache revalidation (per draft-02 'cap-sha256' SvcParamKey). "
+        "Presence on a discovered AgentRecord does NOT imply the digest was checked against "
+        "fetched bytes — see ``cap_sha256_verified`` for that signal.",
     )
-    bap: list[str] = Field(
-        default_factory=list,
-        description="DNS-AID Application Protocols with versions understood by the endpoint "
-        "(e.g., ['mcp/1', 'a2a/1']). Distinct from transport-level alpn per draft Section 4.4.3.",
+    cap_sha256_verified: bool = Field(
+        default=False,
+        description="True when the discoverer actually fetched a capability descriptor and "
+        "the SHA-256 of its bytes matched ``cap_sha256``. False when no fetch happened "
+        "(no cap/well-known descriptor URL), the fetch failed for non-mismatch reasons, "
+        "or no ``cap_sha256`` was declared. Consumers keying trust off the integrity pin "
+        "MUST check this flag — relying on the mere presence of ``cap_sha256`` is a false "
+        "integrity signal because the pin only applies to the bytes that produced the "
+        "capabilities, and TXT-fallback / network-failure paths can leave it dangling.",
+    )
+    well_known_path: str | None = Field(
+        default=None,
+        description="RFC 8615 well-known path suffix (e.g. 'agent-card.json') under "
+        "/.well-known/ on the SVCB target's host. Per draft-02 'well-known' SvcParamKey. "
+        "Independent of 'cap'; both may be present. When dns-aid-core fetches a "
+        "capability descriptor it prefers 'cap' (explicit locator) and falls back to "
+        "reconstructing https://<svcb-target>/.well-known/<well_known_path>.",
+    )
+    bap: str | None = Field(
+        default=None,
+        description="Bulk Agent Protocol — single agent-protocol identifier "
+        "for this SVCB record in the draft's delimited form: bare "
+        "(``mcp``, ``a2a``) or versioned (``mcp=1.0``, ``a2a=1.1``). Per "
+        "draft-02 §5.1 / §FutureWork (Bulk Agent Protocol) this is "
+        "experimental; dns-aid-core treats ``alpn`` as the canonical "
+        "protocol carrier for reconciliation. bap adds version information "
+        "when present. Multi-protocol agents are published as multiple "
+        "AgentRecord instances at the same flat owner name, each with its "
+        "own alpn and (optionally) bap — NOT as a comma-separated list on "
+        "one record.",
     )
     policy_uri: str | None = Field(
         default=None,
@@ -326,20 +679,43 @@ class AgentRecord(BaseModel):
         description="JWS compact signature for record verification when DNSSEC unavailable. "
         "Contains signed payload with fqdn, target, port, alpn, iat, exp.",
     )
+    catalog_trust: str | None = Field(
+        default=None,
+        description=(
+            "For ARD / HTTP-index-discovered agents: the trust basis by which the "
+            "catalog was served — 'tls_domain' (served on the queried domain or a "
+            "subdomain, bound by TLS), 'dnssec' (DNSSEC-authenticated off-domain "
+            "pointer), or 'jws' (off-domain catalog followed under signature "
+            "verification). None for pure-DNS agents."
+        ),
+    )
 
     # Capability source tracking
-    capability_source: (
-        Literal["cap_uri", "agent_card", "http_index", "txt_fallback", "none"] | None
-    ) = Field(
+    capability_source: CapabilitySource | None = Field(
         default=None,
         description="Where capabilities were sourced from: 'cap_uri' (SVCB cap param), "
+        "'well_known' (SVCB well-known param, reconstructed against the target host), "
         "'agent_card' (A2A /.well-known/agent-card.json skills), "
         "'http_index' (HTTP index capabilities), "
-        "'txt_fallback' (TXT record), or 'none'",
+        "'txt_fallback' (TXT record), "
+        "'descriptor_unreachable' (cap/well-known declared but fetch failed), "
+        "or 'none'",
     )
 
     # DNS settings
     ttl: int = Field(default=3600, ge=30, le=86400, description="Time-to-live in seconds")
+
+    publish_walkable_alias: bool = Field(
+        default=False,
+        description="Whether to publish the optional walkable AliasMode SVCB record at "
+        "{name}._agents.{domain} pointing at the flat primary owner. Per draft-02 §3.1 "
+        "this record is operator-optional and serves DNS-SD-style enumeration "
+        "use cases. Default False because the record is an enumeration handle (a "
+        "crawler can walk _agents.<zone> and inventory every agent), which is "
+        "undesirable for most public deployments — see docs/privacy-considerations.md. "
+        "Set True when you actively want the agent discoverable via enumeration "
+        "(internal indexes, intentional public directories, DNS-SD-style consumers).",
+    )
 
     # Optional direct endpoint (overrides target_host:port for HTTP index agents)
     endpoint_override: str | None = Field(
@@ -353,6 +729,8 @@ class AgentRecord(BaseModel):
             "dns_svcb_enriched",
             "http_index",
             "http_index_fallback",
+            "ard_card",
+            "ard_inline",
             "direct",
             "directory",
         ]
@@ -362,7 +740,10 @@ class AgentRecord(BaseModel):
         description="Source of endpoint: 'dns_svcb' (from DNS SVCB record), "
         "'dns_svcb_enriched' (DNS + .well-known/agent-card.json path), "
         "'http_index' (DNS + HTTP index endpoint), "
-        "'http_index_fallback' (HTTP index without DNS), 'direct' (explicitly provided), "
+        "'http_index_fallback' (HTTP index without DNS), "
+        "'ard_card' (real endpoint from a dereferenced ARD agent/server card URL), "
+        "'ard_inline' (real endpoint from an ARD entry's inline card `data`), "
+        "'direct' (explicitly provided), "
         "'directory' (from directory API search, Phase 5.7)",
     )
 
@@ -389,13 +770,40 @@ class AgentRecord(BaseModel):
     )
 
     # DNSSEC validation status for THIS agent's DNS lookup.
-    # Populated by the discoverer when DNSSEC validation runs (either via
-    # ``require_dnssec=True`` or the ``min_dnssec`` Path A filter). Default ``False`` matches
-    # the prior behavior for any caller that doesn't enable DNSSEC validation.
+    # Populated by the discoverer for agents subject to DNSSEC — i.e. every source
+    # EXCEPT the HTTP-catalog / ARD sources in CATALOG_ENDPOINT_SOURCES — when
+    # ``require_dnssec``, ``min_dnssec``, or ``verify_dane`` is set. Catalog / ARD
+    # agents have no DNS SVCB record to validate (their trust is ``catalog_trust``)
+    # and are exempt, so this stays ``False`` for them. Default ``False`` matches the
+    # prior behavior for any caller that doesn't enable DNSSEC validation.
     dnssec_validated: bool = Field(
         default=False,
         description="True when the domain hosting this agent presented a DNSSEC-validated "
         "response (AD flag set). False when validation did not occur or did not succeed.",
+    )
+
+    # DANE/TLSA endpoint-certificate binding result (opt-in via ``verify_dane=True``).
+    # None when DANE was not checked, no TLSA record exists, or the result was demoted
+    # because the agent's DNS response was not DNSSEC-validated (DANE without DNSSEC
+    # carries no integrity guarantee — RFC 6698 §10.1). True when the endpoint
+    # certificate matched its TLSA record; False when a TLSA record exists but the
+    # certificate did not match.
+    dane_verified: bool | None = Field(
+        default=None,
+        description="True when the agent endpoint's TLS certificate matched its "
+        "DNSSEC-validated TLSA record; False on a TLSA mismatch; None when DANE was "
+        "not checked, not configured, or not DNSSEC-anchored.",
+    )
+
+    legacy_resolved: bool = Field(
+        default=False,
+        description="True when this agent record was resolved via the legacy "
+        "draft-01 FQDN shape (`_{name}._{protocol}._agents.{domain}`) rather "
+        "than the draft-02 flat form (`{name}.{domain}`). Callers should "
+        "down-weight or refuse legacy-resolved records in environments where "
+        "the publisher has had time to migrate. Set by the discoverer when "
+        "``allow_legacy=True`` (or the env-flag equivalent) lets a flat-FQDN "
+        "miss fall back to the legacy shape.",
     )
 
     # JWS verification result (populated by the discoverer's signature-verification step
@@ -413,6 +821,16 @@ class AgentRecord(BaseModel):
         description="JWS algorithm identifier (e.g., 'Ed25519', 'ES256') reported by a "
         "successful signature verification. None when verification did not succeed or was "
         "not attempted.",
+    )
+
+    # ARD trust manifest (populated when this agent was discovered from — or
+    # enriched by — an ARD ai-catalog entry carrying a trustManifest).
+    trust_manifest: TrustManifest | None = Field(
+        default=None,
+        description="Publisher trust manifest from an ARD ai-catalog entry (identity, "
+        "attestations, provenance, signature). Pass-through of published claims — "
+        "dns-aid does not verify signatures, digests, or identity↔publisher alignment "
+        "in this release.",
     )
 
     model_config = {"arbitrary_types_allowed": True}
@@ -436,13 +854,114 @@ class AgentRecord(BaseModel):
     def validate_connect_class(cls, v: str | None) -> str | None:
         return _normalize_connect_class(v)
 
+    @field_validator("target_host", mode="after")
+    @classmethod
+    def _enforce_no_underscore_in_target_host(cls, v: str) -> str:
+        """Mirror the SvcbRecord.target rule on AgentRecord's target_host.
+
+        Honours the operator env gate
+        ``DNS_AID_ALLOW_UNDERSCORE_TARGET=1`` so the publisher's
+        existing ``allow_underscore_target=True`` path can still pass
+        through. Without the env gate set no construction path can
+        produce an underscored target_host.
+        """
+        from dns_aid.utils.validation import (
+            _underscore_bypass_env_enabled,
+            validate_no_underscore_in_target,
+        )
+
+        validate_no_underscore_in_target(v, allow_underscore=_underscore_bypass_env_enabled())
+        return v
+
+    @field_validator("well_known_path", mode="after")
+    @classmethod
+    def _enforce_safe_well_known_path_on_agent(cls, v: str | None) -> str | None:
+        """Same as SvcbRecord — enforce the safe-value rule at the type."""
+        if v is None:
+            return None
+        from dns_aid.utils.validation import validate_well_known_path
+
+        return validate_well_known_path(v)
+
+    @field_validator("bap", mode="after")
+    @classmethod
+    def _enforce_safe_bap_on_agent(cls, v: str | None) -> str | None:
+        """Same as SvcbRecord — enforce the canonical bap shape at the type.
+
+        Closes the SvcParamKey-injection hole on the publish path;
+        also rejects ``bap=["mcp"]`` (list form) at the type boundary
+        so the list→scalar break is explicit instead of silently
+        coercing.
+        """
+        if v is None:
+            return None
+        from dns_aid.core.bap import validate_bap
+
+        return validate_bap(v)
+
+    @field_validator(
+        "cap_uri",
+        "cap_sha256",
+        "policy_uri",
+        "realm",
+        "sig",
+        "connect_meta",
+        "enroll_uri",
+        mode="after",
+    )
+    @classmethod
+    def _enforce_safe_svcparams_on_agent(cls, v: str | None) -> str | None:
+        """Reject SVCB SvcParam-quote-breakout chars in the free-form params.
+
+        The publish path emits these as ``key="<value>"`` verbatim, so a
+        double quote, backslash, or control character could inject a sibling
+        SvcParamKey — the same hole ``bap`` closes for its field. Enforced
+        here so it also drops a forged inbound record carrying such a value
+        during discovery.
+        """
+        if v is None:
+            return None
+        from dns_aid.utils.validation import validate_svcparam_value
+
+        return validate_svcparam_value(v)
+
     @property
     def fqdn(self) -> str:
         """
-        Fully qualified domain name for DNS-AID record.
+        Fully qualified domain name for the agent's primary owner record.
 
-        Format: _{name}._{protocol}._agents.{domain}
-        Per IETF draft section 3.1
+        Returns the flat form ``{name}.{domain}`` per draft-02. The agent
+        protocol is no longer part of the FQDN under -02 — it lives in
+        the ``bap`` SvcParamKey (or ``alpn`` when only one protocol is
+        supported). The flat FQDN is valid as an x.509 SAN dNSName.
+
+        For the optional walkable AliasMode form, see ``walkable_fqdn``.
+        For the legacy -01 form, see ``legacy_fqdn``.
+        """
+        return f"{self.name}.{self.domain}"
+
+    @property
+    def walkable_fqdn(self) -> str:
+        """
+        Optional walkable AliasMode FQDN at ``{name}._agents.{domain}``.
+
+        Per draft-02 §Known Agent, publishers MAY emit an SVCB AliasMode
+        record at this name pointing at the flat primary owner so that
+        DNS-SD-style consumers and enumeration crawlers can discover the
+        agent. dns-aid-core's publisher writes this record by default;
+        operators can disable it via ``SDKConfig`` if a deployment
+        doesn't need walkable enumeration.
+        """
+        return f"{self.name}._agents.{self.domain}"
+
+    @property
+    def legacy_fqdn(self) -> str:
+        """
+        Backwards-compatible -01 FQDN ``_{name}._{protocol}._agents.{domain}``.
+
+        Used only by the legacy-fallback discovery path when the env
+        flag ``DNS_AID_LEGACY_01_FALLBACK=1`` is set. Not used for
+        publishing under -02.
         """
         return f"_{self.name}._{self.protocol.value}._agents.{self.domain}"
 
@@ -477,6 +996,7 @@ class AgentRecord(BaseModel):
             connect_class=self.connect_class,
             connect_meta=self.connect_meta,
             enroll_uri=self.enroll_uri,
+            well_known_path=self.well_known_path,
         )
 
     def to_svcb_params(self) -> dict[str, str]:
@@ -542,6 +1062,18 @@ class PublishResult(BaseModel):
     backend: str = Field(..., description="DNS backend used")
     success: bool = Field(default=True, description="Whether publish succeeded")
     message: str | None = Field(default=None, description="Status message")
+    # Caller-visible advisories raised during the publish path (e.g.
+    # ``dns_aid.underscore_bypass`` when allow_underscore_target=True
+    # AND DNS_AID_ALLOW_UNDERSCORE_TARGET is set in the env). These
+    # are non-fatal — the publish still succeeded — but downstream
+    # observability needs to count and alert on them without scraping
+    # logs.
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Non-fatal advisories raised during publish. Each entry is a stable "
+        "warning_class identifier (e.g. 'dns_aid.underscore_bypass') so consumers can "
+        "match exactly without log-string parsing.",
+    )
 
 
 class VerifyResult(BaseModel):
@@ -592,7 +1124,13 @@ class VerifyResult(BaseModel):
             score += 20
         if self.dnssec_valid:
             score += 30
-        if self.dane_valid:
+        # DANE only contributes when DNSSEC also validated. TLSA without
+        # DNSSEC has no integrity guarantee (RFC 6698 §10.1), so we
+        # don't let it bump the score even if a caller hand-built this
+        # VerifyResult with both flags. The validator.py path already
+        # demotes ``dane_valid`` to None in that case; this is a
+        # second-line guard against bypass.
+        if self.dane_valid and self.dnssec_valid:
             score += 15
         if self.endpoint_reachable:
             score += 15

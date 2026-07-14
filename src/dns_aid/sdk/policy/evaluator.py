@@ -27,7 +27,7 @@ from dns_aid.sdk.policy.schema import (
     PolicyEnforcementLayer,
     PolicyRules,
 )
-from dns_aid.utils.url_safety import validate_fetch_url
+from dns_aid.utils.url_safety import validate_fetch_url_async
 
 if TYPE_CHECKING:
     from dns_aid.sdk.policy.cel_evaluator import CELRuleEvaluator
@@ -93,7 +93,7 @@ class PolicyEvaluator:
                 return entry.doc
 
             # Validate URL is safe (blocks SSRF)
-            validate_fetch_url(policy_uri)
+            await validate_fetch_url_async(policy_uri)
 
             # Fetch with size + timeout + content-type guards
             async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT) as client:

@@ -1,0 +1,401 @@
+; DNS-AID Wire Format - ABNF Grammar
+; Reference: draft-mozleywilliams-dnsop-dnsaid-01
+;
+; This document defines the wire format for DNS-AID records using
+; Augmented Backus-Naur Form (ABNF) as specified in RFC 5234.
+;
+; The grammar builds on RFC 9460 (SVCB) and extends it for
+; AI agent discovery use cases.
+
+; ==================================================================
+; Core ABNF Rules (from RFC 5234)
+; ==================================================================
+
+ALPHA          = %x41-5A / %x61-7A   ; A-Z / a-z
+DIGIT          = %x30-39             ; 0-9
+HEXDIG         = DIGIT / "A" / "B" / "C" / "D" / "E" / "F"
+                       / "a" / "b" / "c" / "d" / "e" / "f"
+SP             = %x20                ; space
+HTAB           = %x09                ; horizontal tab
+WSP            = SP / HTAB           ; whitespace
+DQUOTE         = %x22                ; " (double quote)
+VCHAR          = %x21-7E             ; visible (printing) characters
+
+; ==================================================================
+; DNS-AID FQDN Format
+; ==================================================================
+
+; DNS-AID agent FQDN follows the pattern:
+; _{agent-name}._{protocol}._agents.{domain}.
+
+dns-aid-fqdn   = "_" agent-name "._" protocol "._agents." domain "."
+
+agent-name     = 1*63(ALPHA / DIGIT / "-")
+                 ; Agent name: alphanumeric with hyphens
+                 ; Max 63 characters per DNS label rules
+
+protocol       = "mcp" / "a2a" / "https" / extension-protocol
+                 ; Supported protocols
+                 ; mcp  = Model Context Protocol
+                 ; a2a  = Agent-to-Agent Protocol
+                 ; https = Standard HTTPS
+
+extension-protocol = "x-" 1*62(ALPHA / DIGIT / "-")
+                     ; Experimental protocols prefixed with "x-"
+
+domain         = label *("." label)
+                 ; Standard DNS domain name
+
+label          = 1*63(ALPHA / DIGIT / "-")
+                 ; DNS label (RFC 1035)
+
+; ==================================================================
+; SVCB Record Format (RFC 9460)
+; ==================================================================
+
+; DNS-AID uses SVCB records for service discovery
+; Wire format follows RFC 9460 Section 2.2
+
+dns-aid-svcb   = svc-priority SP target-name [SP svc-params]
+
+svc-priority   = 1*5DIGIT
+                 ; Priority: 0-65535
+                 ; 0 = AliasMode (CNAME-like)
+                 ; 1-65535 = ServiceMode (higher = lower priority)
+
+target-name    = dns-name / "."
+                 ; Target hostname or "." for owner name
+
+dns-name       = label *("." label) "."
+                 ; Fully qualified domain name with trailing dot
+
+svc-params     = svc-param *(SP svc-param)
+                 ; One or more service parameters
+
+svc-param      = mandatory-param
+               / alpn-param
+               / no-default-alpn-param
+               / port-param
+               / ipv4hint-param
+               / ipv6hint-param
+               / cap-param           ; DNS-AID: capability document URI
+               / capsha256-param     ; DNS-AID: capability document hash
+               / bap-param           ; DNS-AID: application protocols
+               / policy-param        ; DNS-AID: policy document URI
+               / realm-param         ; DNS-AID: multi-tenant scope
+               / unknown-param
+
+; ==================================================================
+; SVCB Service Parameters
+; ==================================================================
+
+; Mandatory parameter (key 0)
+mandatory-param = "mandatory=" mandatory-keys
+mandatory-keys  = key-name *("," key-name)
+key-name        = 1*(ALPHA / DIGIT / "-")
+
+; ALPN parameter (key 1) - REQUIRED for DNS-AID
+alpn-param     = "alpn=" DQUOTE alpn-ids DQUOTE
+alpn-ids       = alpn-id *("," alpn-id)
+alpn-id        = "mcp" / "a2a" / "h2" / "h3" / "http/1.1" / token
+                 ; mcp = Model Context Protocol
+                 ; a2a = Agent-to-Agent Protocol
+                 ; h2  = HTTP/2 (RFC 9113)
+                 ; h3  = HTTP/3 (RFC 9114)
+token          = 1*tchar
+tchar          = "!" / "#" / "$" / "%" / "&" / "'" / "*"
+               / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~"
+               / DIGIT / ALPHA
+
+; No default ALPN parameter (key 2)
+no-default-alpn-param = "no-default-alpn"
+
+; Port parameter (key 3)
+port-param     = "port=" port-number
+port-number    = 1*5DIGIT
+                 ; Port: 1-65535
+
+; IPv4 hint parameter (key 4)
+ipv4hint-param = "ipv4hint=" ipv4-addresses
+ipv4-addresses = ipv4-address *("," ipv4-address)
+ipv4-address   = dec-octet "." dec-octet "." dec-octet "." dec-octet
+dec-octet      = DIGIT / %x31-39 DIGIT / "1" 2DIGIT
+               / "2" %x30-34 DIGIT / "25" %x30-35
+
+; IPv6 hint parameter (key 6)
+ipv6hint-param = "ipv6hint=" ipv6-addresses
+ipv6-addresses = ipv6-address *("," ipv6-address)
+ipv6-address   = 1*4HEXDIG 7(":" 1*4HEXDIG) / IPv6-compressed
+IPv6-compressed = *1(":" 1*4HEXDIG) "::" *1(1*4HEXDIG ":")
+                  ; Simplified - full IPv6 grammar is complex
+
+; ==================================================================
+; DNS-AID Custom SVCB Parameters (draft-01 Section 4.4.3)
+; ==================================================================
+
+; Capability document URI (key 65400)
+cap-param      = "cap=" DQUOTE cap-uri DQUOTE
+cap-uri        = URI
+                 ; URI to JSON capability descriptor document
+                 ; e.g., "https://agent.example.com/.well-known/agent-cap.json"
+
+; Capability document integrity hash (key 65401)
+capsha256-param = "capsha256=" DQUOTE base64url DQUOTE
+base64url      = 1*43(ALPHA / DIGIT / "-" / "_")
+                 ; Base64url-encoded SHA-256 digest (RFC 4648 Section 5)
+                 ; 32 bytes = 43 base64url characters (no padding)
+
+; DNS-AID Application Protocols (key 65402)
+bap-param      = "bap=" DQUOTE bap-list DQUOTE
+bap-list       = bap-entry *("," bap-entry)
+bap-entry      = protocol ["/" version-number]
+version-number = 1*3DIGIT
+                 ; e.g., "mcp/1,a2a/1"
+
+; Policy document URI (key 65403)
+policy-param   = "policy=" DQUOTE policy-uri DQUOTE
+policy-uri     = URI
+                 ; URI to agent policy document (terms of use, data handling)
+
+; Multi-tenant realm (key 65404)
+realm-param    = "realm=" DQUOTE realm-value DQUOTE
+realm-value    = 1*63(ALPHA / DIGIT / "-" / "_")
+                 ; Scope identifier for authorization
+                 ; e.g., "production", "staging", "tenant-42"
+
+; Generic URI rule (simplified from RFC 3986)
+URI            = scheme "://" authority path-abempty
+scheme         = "https" / "http"
+authority      = host [":" port-number]
+host           = label *("." label)
+path-abempty   = *("/" segment)
+segment        = *(ALPHA / DIGIT / "-" / "." / "_" / "~" / "%" / "!" / "@")
+
+; Wire format note: Until IANA assigns permanent key IDs,
+; implementations MUST use generic key encoding:
+;   key65400="https://..."   (cap)
+;   key65401="dGVzdGhhc2g"   (capsha256)
+;   key65402="mcp/1,a2a/1"   (bap)
+;   key65403="https://..."   (policy)
+;   key65404="production"    (realm)
+
+; Unknown/extension parameters
+unknown-param  = key-name "=" param-value
+param-value    = DQUOTE *(%x20-21 / %x23-7E) DQUOTE / token
+
+; ==================================================================
+; TXT Record Format (Capabilities)
+; ==================================================================
+
+; DNS-AID uses TXT records for capability advertisement
+; Multiple TXT strings may be concatenated
+
+dns-aid-txt    = capabilities-kv *(SP txt-kv)
+
+; Capabilities (REQUIRED)
+capabilities-kv = "capabilities=" capability-list
+capability-list = capability *("," capability)
+capability     = 1*32(ALPHA / DIGIT / "-")
+                 ; Known capabilities:
+                 ; chat     - Conversational AI
+                 ; code     - Code generation/analysis
+                 ; search   - Information retrieval
+                 ; image    - Image generation/analysis
+                 ; voice    - Voice/audio processing
+                 ; tools    - Tool/function calling
+                 ; memory   - Persistent context
+                 ; planning - Task planning/orchestration
+
+; Version (RECOMMENDED)
+version-kv     = "version=" semver
+semver         = major "." minor "." patch ["-" prerelease] ["+" build]
+major          = numeric-id
+minor          = numeric-id
+patch          = numeric-id
+prerelease     = dot-separated-ids
+build          = dot-separated-ids
+dot-separated-ids = id *("." id)
+id             = alphanumeric-id / numeric-id
+alphanumeric-id = *DIGIT id-char *(id-char / DIGIT)
+numeric-id     = "0" / positive-digit *DIGIT
+positive-digit = %x31-39
+id-char        = ALPHA / "-"
+
+; Generic key-value pairs
+txt-kv         = txt-key "=" txt-value
+txt-key        = 1*32(ALPHA / DIGIT / "-" / "_")
+txt-value      = 1*255(VCHAR / SP)
+                 ; Max 255 characters per TXT string chunk
+
+; ==================================================================
+; DNS-AID Error Codes
+; ==================================================================
+
+; Error codes returned by DNS-AID APIs and services
+
+error-code     = "DNS_AID_" 3DIGIT
+                 ; DNS_AID_001 through DNS_AID_999
+
+error-response = error-code SP error-name SP error-message
+
+error-name     = 1*32(ALPHA / "_")
+                 ; SCREAMING_SNAKE_CASE
+
+error-message  = 1*256(VCHAR / SP)
+                 ; Human-readable error description
+
+; ==================================================================
+; DNS-AID Index Record Format
+; ==================================================================
+
+; Optional index record for zone enumeration
+; Published at _index._agents.{domain}.
+
+index-record   = "_index._agents." domain "." SP "TXT" SP index-value
+
+index-value    = DQUOTE "agents=" agent-list DQUOTE
+
+agent-list     = agent-ref *("," agent-ref)
+agent-ref      = agent-name ":" protocol
+                 ; Reference to agent by name and protocol
+
+; Example:
+; _index._agents.example.com. TXT "agents=network:mcp,chat:a2a,assistant:https"
+
+; ==================================================================
+; DNS-AID Opt-Out Record Format
+; ==================================================================
+
+; Domain owners can opt out of directory indexing
+
+optout-record  = "_dns-aid-optout." domain "." SP "TXT" SP optout-value
+
+optout-value   = DQUOTE "optout=" optout-flag DQUOTE
+
+optout-flag    = "true" / "false"
+                 ; true  = Do not index this domain
+                 ; false = Allow indexing (default)
+
+; ==================================================================
+; DNS-AID DCV Challenge Record Format
+; ==================================================================
+
+; Implements domain control validation per:
+;   draft-mozleywilliams-dnsop-dnsaid-01   (bnd-req binding)
+;   draft-ietf-dnsop-domain-verification-techniques-12
+
+; Challenge owner name:  _agents-challenge.{domain}
+
+dcv-record     = "_agents-challenge." domain "." SP "TXT" SP dcv-value
+
+dcv-value      = DQUOTE "token=" dcv-token
+                 [ SP "bnd-req=" bnd-req-value ]
+                 SP "expiry=" rfc3339-utc
+                 DQUOTE
+
+dcv-token      = 32(dcv-char)
+                 ; 32 lowercase base32 characters (no padding)
+
+dcv-char       = %x61-7A / "2" / "3" / "4" / "5" / "6" / "7"
+                 ; [a-z2-7]  — alphabet used by base32 without padding
+
+bnd-req-value  = "svc:" agent-name "@" domain
+                 ; Scopes this challenge to a specific agent+issuer pair
+
+rfc3339-utc    = date "T" time "Z"
+                 ; UTC timestamp only — no offset forms are accepted
+
+date           = 4DIGIT "-" 2DIGIT "-" 2DIGIT
+
+time           = 2DIGIT ":" 2DIGIT ":" 2DIGIT
+
+; Parser requirements:
+;   - token= field MUST appear first (fail-closed: missing token → no match)
+;   - expiry= field MUST be present; absent or malformed expiry → invalid
+;   - Duplicate keys: first occurrence wins (anti-injection)
+;   - Implementations MUST strip exactly one layer of RFC-1035-style outer
+;     quotes ("...") added by some DNS backends before parsing
+
+; ==================================================================
+; DNS-AID Verification Record Format (legacy — prefer DCV record above)
+; ==================================================================
+
+; Used for domain ownership verification
+
+verify-record  = "_dns-aid-verify." domain "." SP "TXT" SP verify-value
+
+verify-value   = DQUOTE "token=" verify-token DQUOTE
+
+verify-token   = 32*64(ALPHA / DIGIT)
+                 ; Random token for verification
+                 ; 32-64 alphanumeric characters
+
+; ==================================================================
+; Complete Examples
+; ==================================================================
+
+; Example 1: MCP Agent SVCB Record
+;
+; _network._mcp._agents.example.com. 3600 IN SVCB 1 mcp.example.com. (
+;     mandatory="alpn"
+;     alpn="mcp"
+;     port="443"
+; )
+
+; Example 2: A2A Agent SVCB Record
+;
+; _chat._a2a._agents.example.com. 3600 IN SVCB 1 chat.example.com. (
+;     alpn="a2a"
+;     port="443"
+;     ipv4hint="192.0.2.1"
+; )
+
+; Example 3: SVCB Record with DNS-AID Custom Parameters (v0.4.8)
+;
+; _booking._mcp._agents.example.com. 3600 IN SVCB 1 booking.example.com. (
+;     mandatory="alpn,port"
+;     alpn="mcp"
+;     port="443"
+;     cap="https://booking.example.com/.well-known/agent-cap.json"
+;     bap="mcp/1"
+;     policy="https://example.com/agent-policy.json"
+;     realm="production"
+; )
+;
+; Wire format (Route 53 compatible with generic keys):
+; _booking._mcp._agents.example.com. 3600 IN SVCB 1 booking.example.com. (
+;     mandatory="alpn,port"
+;     alpn="mcp"
+;     port="443"
+;     key65400="https://booking.example.com/.well-known/agent-cap.json"
+;     key65402="mcp/1"
+;     key65403="https://example.com/agent-policy.json"
+;     key65404="production"
+; )
+
+; Example 4: TXT Capabilities Record
+;
+; _network._mcp._agents.example.com. 3600 IN TXT (
+;     "capabilities=chat,code,tools"
+;     "version=1.2.0"
+;     "model=claude-3"
+; )
+
+; Example 4: Index Record
+;
+; _index._agents.example.com. 3600 IN TXT "agents=network:mcp,chat:a2a"
+
+; Example 5: Opt-Out Record
+;
+; _dns-aid-optout.private.example.com. 3600 IN TXT "optout=true"
+
+; ==================================================================
+; Wire Format Notes
+; ==================================================================
+
+; 1. All DNS-AID records MUST be DNSSEC-signed
+; 2. SVCB records use RFC 9460 wire format (2-byte key, 2-byte length, value)
+; 3. TXT records use RFC 1035 format (1-byte length prefix per string)
+; 4. Maximum TXT record size is limited by UDP (typically 512 bytes)
+;    or TCP (up to 65535 bytes)
+; 5. Character encoding is ASCII for DNS labels, UTF-8 for TXT values

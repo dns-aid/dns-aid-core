@@ -7,6 +7,720 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.7] - 2026-07-08
+
+### Fixed
+
+- **Concurrent SSRF validations to the same host could be spuriously blocked under
+  load** — a regression surfaced by the 0.26.6 concurrency fix. `validate_fetch_url_async`
+  offloaded the blocking `getaddrinfo` via `asyncio.to_thread`, which shares the event
+  loop's default thread pool (`min(32, cpu+4)` workers) with all other offloaded work.
+  On a low-core host a wide discovery fan-out (e.g. 8 ARD capability-document fetches)
+  queued the excess validations, and the queue wait counted against the 3s timeout —
+  so the last-queued URLs timed out and surfaced as `UnsafeURLError` ("blocked by SSRF
+  protection"), even though they resolve to the same public host as their siblings.
+  Failed safe (the affected agents fell back to catalog-level data), but noisy and
+  wrong. SSRF resolution now runs on a **dedicated, generously-sized thread pool**
+  (32 workers, override with `DNS_AID_SSRF_RESOLVER_THREADS`) so concurrent validations
+  don't queue behind each other, and the per-call timeout is raised to 5s for headroom
+  against a slow-but-legitimate resolver (e.g. an AF_UNSPEC A+AAAA lookup with a slow
+  IPv6 leg). SSRF policy is unchanged.
+
+## [0.26.6] - 2026-07-08
+
+### Fixed
+
+- **A blocking `socket.getaddrinfo` in `validate_fetch_url` froze the event loop,
+  silently serializing concurrent SSRF-validated fetches.** The SSRF IP check is a
+  synchronous, un-timed `getaddrinfo`; called directly from the async fetch paths it
+  stalled the single-threaded event loop for each resolution, turning `asyncio.gather`
+  fan-outs (ARD capability-document dereference, agent-card / JWKS / policy-document /
+  OAuth-discovery fetches) into an accidental serial queue — e.g. an 8-agent ARD
+  catalog spent ~16s resolving one host after another that a real concurrent fan-out
+  finishes in ~3s. The seven direct async callers now offload validation through a new
+  `validate_fetch_url_async` (worker thread + bounded timeout); `catalog_pointer` —
+  which already offloaded inline — is refactored onto the same helper. SSRF policy is
+  unchanged (public passes; private / loopback / link-local / reserved / timeout fail
+  closed). The synchronous `validate_fetch_url` is retained unchanged for sync callers.
+
+## [0.26.5] - 2026-07-08
+
+### Added
+
+- **`trust_dnssec_pointers` is now exposed on the CLI (`--trust-dnssec-pointers`) and
+  the MCP `discover_agents_via_dns` tool**, closing a parity gap where the opt-in to
+  follow a DNSSEC-validated off-domain ARD catalog pointer was reachable only from the
+  SDK. All discovery trust controls — `require_dnssec`, `min_dnssec`, `verify_dane`,
+  and `trust_dnssec_pointers` — now have full SDK / CLI / MCP parity. (Off by default;
+  the pointer AD flag is only trustworthy with a validating resolver over a secure
+  path, and following it redirects discovery to a foreign host.)
+
+## [0.26.4] - 2026-07-07
+
+### Security
+
+- **DANE/TLSA certificate matching now honors the TLSA `usage` field (RFC 6698).**
+  `_match_dane_cert` previously always opened the endpoint with a PKIX-verifying
+  TLS context, so DANE-TA(2) / DANE-EE(3) associations — whose certificates are
+  self-signed or privately issued by design — failed the TLS handshake before the
+  certificate could be compared, silently yielding a mismatch. Usages 2/3 now
+  retrieve the peer certificate without PKIX/hostname enforcement and rely on the
+  DNSSEC-anchored TLSA digest as the trust anchor; usages 0/1 (PKIX-TA/PKIX-EE)
+  still additionally require PKIX + hostname validity.
+
+### Fixed
+
+- **`min_dnssec` no longer silently drops every ARD / HTTP-index agent.** DNSSEC
+  (`require_dnssec` / `min_dnssec`) is a property of the pure-DNS plane (agents
+  resolved from a DNS SVCB record). ARD / HTTP-index agents have no DNS SVCB owner
+  name to validate — their trust basis is `catalog_trust` — but the `min_dnssec`
+  filter matched on `dnssec_validated`, which is never set for them, so
+  `discover(..., min_dnssec=True)` returned an empty list against an all-ARD
+  catalog. ARD / HTTP-index agents (`endpoint_source` in `CATALOG_ENDPOINT_SOURCES`:
+  `ard_card`, `ard_inline`, `http_index`, `http_index_fallback`) are now exempt from
+  `min_dnssec` / `require_dnssec` — passed through rather than DNSSEC-failed — while
+  every other source (a real DNS SVCB record, or an explicit `direct` / `directory`
+  endpoint) must still present a DNSSEC-validated response (fail-safe). `min_dnssec`
+  also now actually triggers the DNSSEC check: previously it was gated behind
+  `require_dnssec`, so `min_dnssec=True` alone never stamped `dnssec_validated` and
+  dropped *every* agent, DNS-plane included.
+- **`require_dnssec=True` no longer raises `DNSSECError` for a working ARD catalog.**
+  For the same reason, an ARD-only discovery under `require_dnssec=True` previously
+  raised because the (never-validated) ARD agents were treated as DNSSEC failures.
+  DNSSEC enforcement is now scoped to DNS-plane agents; a mixed result raises only
+  when a genuine DNS-SVCB agent is unauthenticated.
+- **`cryptography` is now a core dependency, not a `[jws]` extra.** JWS signature
+  verification (`verify_signatures=True`) is the default off-domain ARD trust anchor
+  and imports `cryptography` at module load, so a base `pip install dns-aid` raised
+  `ImportError` the moment signatures were verified. `cryptography` moved into core
+  `dependencies`; the `[jws]` extra is retained as a compatibility alias.
+
+### Added
+
+- `discover(..., verify_dane=False)` — opt-in DANE/TLSA endpoint-certificate
+  verification for resolved agents, available across the SDK, the CLI
+  (`--verify-dane`), and the MCP `discover_agents_via_dns` tool. Defense-in-depth on
+  the endpoint that does NOT change the catalog/pointer trust decision; a positive
+  result is demoted to unknown unless the agent's DNS response was DNSSEC-validated
+  (DANE without DNSSEC carries no integrity guarantee, RFC 6698 §10.1), so pair it
+  with `require_dnssec` / `min_dnssec`.
+- `AgentRecord.dane_verified` (`bool | None`) surfaces the per-agent DANE result;
+  emitted in CLI `--json` and MCP discover output only when not `None`, keeping
+  legacy / pure-DNS output byte-identical.
+- The `verify` command and the `verify_agent_dns` MCP tool now surface
+  `dnssec_note`, `dnssec_detail`, and `dane_note`, making the AD-flag basis of the
+  DNSSEC verdict and the DANE result/demotion explicit.
+- **`require_dnssec` is now exposed on the CLI (`--require-dnssec`) and the MCP
+  `discover_agents_via_dns` tool**, closing a pre-existing gap where DNSSEC
+  enforcement was reachable only from the SDK. `require_dnssec`, `min_dnssec`, and
+  `verify_dane` now have full SDK / CLI / MCP parity.
+
+## [0.26.3] - 2026-07-07
+
+### Security
+
+- **Off-domain ARD catalog pointers are no longer followed unauthenticated.**
+  A `_catalog._agents` / `_index._agents` DNS pointer whose target is on a
+  *different* domain than the one queried is now trusted only when the catalog's
+  records are JWS-signed against the queried domain's JWKS (`verify_signatures=True`)
+  — the default, resolver-independent off-domain anchor — or, opt-in via
+  `trust_dnssec_pointers=True`, when the pointer record is DNSSEC-validated (the
+  library's canonical `_check_dnssec`; trustworthy only with a validating resolver
+  over a secure path).
+  Otherwise the off-domain target is ignored and discovery falls back to the
+  queried domain's own TLS-bound `/.well-known/ai-catalog.json`. This prevents a
+  spoofed or injected pointer from redirecting discovery to a forged off-domain
+  catalog. **Catalogs served on the queried domain (or a subdomain) are
+  unaffected** — TLS already binds them to the domain, and DNSSEC is never
+  required. An off-domain catalog followed under `verify_signatures` has its JWS
+  signature as its *only* trust anchor, so records that do not verify are dropped
+  automatically (regardless of `require_signed`).
+- The ARD `ard_trust_foreign_publisher` warning now anchors on the host that
+  actually served the catalog over TLS (not the queried domain), so it fires
+  correctly on the DNS-pointer path — where it was previously a no-op.
+
+### Fixed
+
+- **A valid-but-empty catalog source no longer shadows a real catalog.** The
+  HTTP-index fallback cascade stopped on the first source that returned HTTP 200
+  even when it parsed to zero agents (`[] is not None`), so a stale/empty pointer
+  or an empty legacy index silently suppressed a good `ai-catalog.json` further
+  down the cascade. The cascade now returns the first *non-empty* source and
+  yields an empty result only when every responding source is empty.
+
+### Added
+
+- `AgentRecord.catalog_trust` surfaces the trust basis by which an ARD /
+  HTTP-index catalog was served: `tls_domain`, `dnssec`, or `jws`.
+- `discover(..., trust_dnssec_pointers=False)` — opt-in to following an off-domain
+  ARD catalog pointer that is DNSSEC-validated. Off by default; JWS
+  (`verify_signatures`) is the default resolver-independent off-domain anchor.
+
+## [0.26.2] - 2026-07-06
+
+### Fixed
+
+- **ARD entry resolution now follows the spec's identity/location separation.**
+  Per ARD §4.2.1 an entry's `identifier` (`urn:air:…`) is an abstract, stable
+  name — *not* a network locator — and per §3.4 the agent's card is carried by
+  exactly one of `url` (fetch) or `data` (inline). Discovery previously
+  synthesized `{name}.{domain}` from the identifier and preferred a DNS SVCB
+  lookup for it, which (a) conflated identity with location against §4.2.1 and
+  (b) could overwrite a real endpoint with the card-locator URL when a domain
+  published both flat DNS records and an ARD catalog. ARD entries are now
+  resolved purely from their card: inline `data` (`endpoint_source="ard_inline"`)
+  or a dereferenced `url` (`endpoint_source="ard_card"`). The identifier is never
+  turned into a DNS query. DNS-AID's authoritative per-agent DNS discovery is
+  unchanged and remains the separate pure-DNS plane (`discover(domain)` over
+  SVCB records).
+
+### Added
+
+- Inline agent cards (ARD `data`) are now dereferenced (previously dropped);
+  new `endpoint_source="ard_inline"`.
+
+## [0.26.1] - 2026-07-06
+
+### Added
+
+- **`unpublish_catalog_pointer` — remove an ARD catalog DNS pointer.** The
+  inverse of `publish_catalog_pointer`, available across all three interfaces:
+  the library `unpublish_catalog_pointer(domain, ...)`, the CLI
+  `dns-aid index unpublish-catalog <domain>`, and the MCP
+  `unpublish_catalog_pointer` tool. Deletes the SVCB records under
+  `_catalog._agents.{domain}` and `_index._agents.{domain}` (`--catalog-only`
+  to leave the latter). Only the SVCB pointer is removed — any TXT at
+  `_index._agents` (org-index listing) is left intact. Idempotent: missing
+  records are a no-op.
+
+## [0.26.0] - 2026-07-06
+
+### Added
+
+- **ARD ai-catalog discovery support.** HTTP-index discovery now auto-detects
+  [ARD (Agentic Resource Discovery)](https://agenticresourcediscovery.org/spec/)
+  ai-catalog manifests (`specVersion: "1.0"` + `entries[]`) alongside the
+  legacy keyed-object index format, with zero new flags — the library
+  `discover(..., use_http_index=True)`, the CLI `--use-http-index` option and
+  the MCP `discover_agents_via_dns` tool all inherit it transparently:
+  - The ARD well-known location `https://{domain}/.well-known/ai-catalog.json`
+    is probed after the existing index endpoints (legacy precedence preserved).
+  - ARD `CatalogEntry` objects with MCP/A2A card artifact types map into the
+    existing discovery pipeline; agent name derives from the `urn:air:`
+    identifier's terminal segment and protocol from the artifact media type.
+  - Entry `trustManifest` data (publisher identity, SOC 2 / ISO 27001 / GDPR
+    attestations, provenance links, detached signature) is preserved on the
+    new `AgentRecord.trust_manifest` field via the new `TrustManifest`,
+    `TrustAttestation`, `ProvenanceLink` and `TrustSchema` models —
+    pass-through of published claims, never verified by dns-aid.
+  - New `capability_source` value `ard_catalog` marks ARD-sourced records.
+  - Inline nested catalogs recurse to depth 3 under the shared 500-agent
+    budget; registry entries (`application/ai-registry+json`), non-agent
+    artifacts and URL-referenced sub-catalogs are skipped with structured
+    log reasons; the existing 1 MB streaming size cap applies unchanged.
+  - Tolerant parsing per verified spec discrepancies: `attestations[].mediaType`
+    optional on read, unknown entry fields ignored, `representativeQueries`
+    count not enforced.
+
+- **ARD catalog DNS pointer (host-anywhere discovery).** A domain can advertise
+  *where* its ARD catalog lives via SVCB records under two DNS-SD labels —
+  `_catalog._agents.{domain}` (ARD §6.1) and `_index._agents.{domain}`
+  (DNS-AID draft-02 §3.2, whose index format the draft leaves open). Discovery
+  resolves the pointer first and fetches the catalog there, so the catalog can
+  be hosted anywhere (a dedicated host, a CDN, an S3 bucket, or a different
+  domain) and DNS becomes the authoritative, DNSSEC-signable source for its
+  location. Publish via the library `publish_catalog_pointer`, the CLI
+  `dns-aid index publish-catalog <domain> <catalog-host>`, or the MCP
+  `publish_catalog_pointer` tool (dual-label by default; `--catalog-only` /
+  `--force-index` to control the `_index` label; optional RFC 9460
+  `ipv4hint`/`ipv6hint` for fixed-IP origins). Fully opt-in: a domain with no
+  pointer sees no change, and pure-DNS discovery never touches it.
+- **ARD agent-card dereferencing.** For a catalog agent resolved from catalog
+  data (no authoritative DNS record), discovery now fetches the entry's
+  referenced card (A2A agent card / MCP server card) and applies its **real**
+  service endpoint, skills/tools → capabilities, and auth — so ARD-discovered
+  agents are as complete as DNS-discovered ones (new `endpoint_source`
+  `ard_card`; `capability_source` becomes `agent_card`). The card fetch is
+  SSRF-validated, size-capped, and refuses redirects; a card that can't be
+  fetched leaves the agent with its catalog-level data. CLI `discover --json`
+  now includes `endpoint_source` (parity with the MCP tool).
+
+### Security
+
+- ARD parsing introduces no new network calls: URL-referenced nested catalogs
+  are never fetched from the parse path, recursion depth is bounded, and the
+  agent-count budget is shared across nesting levels so nested floods cannot
+  amplify discovery fan-out.
+- **Trust-identity alignment checks (warning-only).** Two structured signals
+  guard against catalog impersonation (manifests are still passed through —
+  they are unverified published claims): `http_index.ard_trust_identity_mismatch`
+  when a manifest's identity domain (SPIFFE / did:web / HTTPS, extracted via
+  URL host parsing that is immune to userinfo spoofing like
+  `spiffe://acme.com:1@evil.com`) does not align with the entry URN's publisher
+  domain; and `http_index.ard_trust_foreign_publisher` when the URN publisher
+  does not align with the domain that actually served the catalog over TLS —
+  the true impersonation signal (a catalog on `evil.com` asserting an
+  `acme.com` agent), advisory because it may also be legitimate cross-publisher
+  federation.
+- **Untrusted-input hardening for production.** Total entries visited per
+  catalog are capped (`_MAX_ARD_ENTRIES`, shared across nesting) so a document
+  of thousands of invalid/registry entries cannot amplify work; per-entry skip
+  reasons are aggregated into a single `http_index.ard_entries_skipped` summary
+  (not one log line per bad entry); logged identifiers are length-bounded and
+  newline-escaped (no log injection/flooding); per-entry `capabilities[]` /
+  `representativeQueries[]` arrays and free-text strings are length-capped
+  (defense-in-depth beyond the 1 MB document cap); and a malformed port in an
+  artifact URL (`https://h:notaport/x`) is a clean per-entry skip-with-warning
+  rather than a silently dropped agent.
+- **Catalog-pointer resolution is SSRF-guarded.** A pointer's SVCB target is
+  attacker-influenceable, so the resolved catalog URL is checked with
+  `validate_fetch_url` (rejects private/loopback/link-local/reserved hosts) and
+  fetched with redirects refused; the SVCB record count and per-URL validation
+  time are bounded; and publish refuses to silently overwrite an existing
+  `_index._agents` pointer that targets a different host. The ARD card fetch
+  reuses the same posture (SSRF-validated, size-capped, redirects refused).
+
+## [0.25.0] - 2026-06-10
+
+### Added
+
+- **Full RFC 9460 ServiceMode SVCB support for the Infoblox UDDI backend.** The
+  backend now declares `supports_private_svcb_keys = True`, so the DNS-AID
+  custom SvcParams (`cap` / `cap-sha256` / `bap` / `policy` / `realm` / `sig` /
+  `connect-*` / `enroll-uri`, encoded as the private-use keys
+  `key65400`–`key65405`) are written natively on the SVCB record itself via the
+  UDDI DNS Data API's `svc_params` list rather than demoted to a TXT companion.
+  Verified against the live UDDI DNS Data API across the library, CLI, and MCP
+  interfaces, including idempotent upsert, concurrent publish, adversarial
+  values, and the SvcParam quote-breakout injection guard.
+
+### Changed
+
+- **The Infoblox UDDI backend emits true ServiceMode SVCB rdata.** SVCB records
+  now carry their real `priority` (ServiceMode when `> 0`) and a structured
+  `svc_params` list of `{"key", "value"}` objects. Previously the backend
+  hardcoded `priority` to `0` (AliasMode) and dropped all SvcParams, mirroring
+  a now-removed assumption that UDDI could not store them. Record listing and
+  lookup render through a single shared presentation helper so `list_records`
+  and `get_record` stay consistent. Records published by earlier versions
+  continue to resolve; re-publishing upgrades them to ServiceMode in place.
+
+### Fixed
+
+- **Infoblox UDDI writes are now a safe in-place upsert (no data-loss window).**
+  `create_svcb_record` / `create_txt_record` previously deleted the existing
+  record before creating the replacement, so a rejected or transient failure on
+  the follow-up create (throttle, 5xx, oversize payload during a re-publish)
+  could leave the name with no record — for SVCB, an agent silently dropping out
+  of DNS. The backend now reads the existing record and updates it in place with
+  `PATCH` (creating with `POST` only when none exists), so a failed write leaves
+  the previous record intact. This also resolves the repeated-index-update `409`
+  the delete-then-create was working around, and heals duplicate records left by
+  older non-idempotent writes. The expanded ServiceMode SvcParam payload made the
+  previous window materially larger, so it is closed here alongside that change.
+
+## [0.24.4] - 2026-06-10
+
+### Fixed
+
+- **`dns-aid[cli]` imports without the `mcp` extra.** The MCP telemetry seam
+  imported `mcp.shared._httpx_utils.McpHttpClientFactory` at module load for a
+  single return-type annotation, so `import dns_aid` (and therefore the CLI)
+  failed with `ModuleNotFoundError: No module named 'mcp'` whenever the `mcp`
+  extra was not installed. The import now lives under `TYPE_CHECKING`
+  (`from __future__ import annotations` already keeps the annotation lazy), so
+  the package and CLI import with the core dependencies alone.
+- **`list` and `list_published_agents` surface flat-FQDN agents.** Listing
+  filtered records by the `_agents` substring, which under draft-02 matched
+  only the organization index and walkable aliases and silently missed every
+  flat agent owner (`{name}.{domain}`). A new `dns_aid.core.lister` identifies
+  DNS-AID records by structure (SVCB owners + companion TXT + `_agents`
+  bookkeeping); the CLI `list` command and the `list_published_agents` MCP tool
+  now report the same, complete set.
+- **Idempotent Infoblox BloxOne writes.** `create_svcb_record` and
+  `create_txt_record` POST-created records unconditionally, so repeated index
+  updates and re-publishes accumulated duplicate records and eventually failed
+  with `409 Conflict` on the `_index._agents` TXT. They now replace any
+  existing record at the same `(name, type)` before writing — an upsert that
+  matches the Route 53 backend's `UPSERT` contract and self-heals pre-existing
+  duplicates.
+
+## [0.24.3] - 2026-06-04
+
+### Fixed
+
+- **Flattened a stale nested SVCB zone example** in
+  `docs/rfc/security-considerations.md` (Tampering → Zone Configuration)
+  that the flat-FQDN migration missed. It now shows the draft-02 flat
+  owner (`network.example.com` under `$ORIGIN example.com.`) instead of
+  the legacy `_network._mcp` / `$ORIGIN _agents.example.com.` shape; the
+  protocol stays in `alpn`/`bap`. The `wire-format-01.abnf` reference and
+  legacy back-compat test fixtures intentionally keep the nested shape.
+
+## [0.24.2] - 2026-06-04
+
+### Changed
+
+- **Repository URLs point to the `dns-aid` GitHub organization.** All
+  `github.com/...` links and the `io.github.*` MCP server name now use
+  `dns-aid/dns-aid-core` (was `infobloxopen/dns-aid-core`) across the
+  README, `pyproject.toml` project URLs, `CITATION.cff`, docs, and
+  packaging metadata, so the PyPI project-page links resolve to the
+  current organization. (Reimplements the intent of #152 on top of
+  current `main`.)
+
+### Fixed
+
+- **Restored the README IETF/LF positioning sections** ("Relationship to
+  IETF", "Scope of this Repository", "Background and Comparison", and the
+  Linux Foundation hosting note) that the 0.24.0 consolidation
+  inadvertently dropped.
+- **Repaired the CHANGELOG compare-link footer**, which had been frozen at
+  `v0.13.4` — backfilled every release since and pointed `[Unreleased]` at
+  the current version.
+
+### Added
+
+- **CI guard for the MCP Registry `mcp-name` tag.** A `readme-mcp-name` job
+  fails any PR whose README lacks `mcp-name: io.github.dns-aid/dns-aid`, so
+  the tag the MCP Registry validates against the published PyPI README
+  cannot be silently dropped again (it regressed in 0.24.0 and broke the
+  registry publish; restored in 0.24.1).
+
+## [0.24.1] - 2026-06-04
+
+### Fixed
+
+- **Restore the `mcp-name` README tag** dropped during the 0.24.0
+  consolidation, so the MCP Registry ownership validation against the
+  published PyPI package succeeds. No functional change from 0.24.0 —
+  the flat-FQDN migration and hardening shipped in 0.24.0.
+
+## [0.24.0] - 2026-06-04
+
+### Fixed — flat-FQDN completion
+
+- **MCP `verify_agent_dns` accepts flat FQDNs.** `validate_fqdn` no
+  longer requires the legacy `_agents` label, so verifying an agent at
+  its flat owner `{name}.{domain}` (the draft-02 default) now works
+  consistently across the SDK, CLI, and MCP surfaces.
+- **JWS signature binding is DNS-normalized.** The verifier compares the
+  signed `fqdn`/`target` to the record case-insensitively and ignoring a
+  trailing dot, so a legitimately-signed record with a dotted or
+  mixed-case endpoint is no longer falsely rejected.
+- **CLI/MCP output the flat owner name.** `delete` / `search` output and
+  the MCP unpublish result now show `{name}.{domain}` instead of the
+  legacy nested name.
+- **`index sync` enumerates flat primary owners.** Sync previously
+  discovered agents only via the walkable AliasMode (`{name}._agents`)
+  or the legacy shape, so a flat-only agent — the draft-02 default
+  publish shape — was silently omitted from the `_index._agents` TXT
+  enumeration (sync reported "No agents found to index"). It now detects
+  flat owners by their companion TXT record (publish writes SVCB + TXT
+  at the flat owner), reads the protocol off the SVCB SvcParams, and
+  dedups against any walkable alias for the same agent.
+- **Discovery reconciles the agent protocol from the SVCB record.** Under
+  draft-02 the protocol lives in the record (`bap`, or `alpn` as the
+  canonical carrier), not the FQDN. The discoverer now stamps the
+  record's true protocol on every path — `discover_at_fqdn`, the
+  common-name zone-walk, and the HTTP index — so a default-published
+  `a2a` / `https` agent (which carries `alpn` and no `bap`) is no longer
+  mislabeled `mcp`. The mislabel previously failed the JWS binding check
+  (`payload.alpn == agent.protocol.value`) for a correctly-signed agent
+  and selected the wrong protocol handler at invoke. The common-name
+  fallback now also dedups by `(fqdn, protocol)`, so a flat owner probed
+  once per candidate protocol yields a single record instead of duplicates.
+- **Flat-FQDN parser accepts short/internal zones and normalizes.**
+  `parse_dnsaid_fqdn` now accepts a flat owner in a two-label zone
+  (`agent.internal`) and normalizes case + a trailing dot up front, so
+  every consumer (discoverer, telemetry) sees lowercase, dot-trimmed
+  labels rather than re-implementing it.
+
+### Security — hardening
+
+- **SVCB SvcParam injection closed on every free-form field.** The `bap`
+  field validator already blocked SvcParam quote break-out injection; the
+  same guard now applies to `cap` / `cap-sha256` / `policy` / `realm` /
+  `sig` / `connect-meta` / `enroll-uri` on both `SvcbRecord` and
+  `AgentRecord`. A value containing a double quote, backslash, or control
+  character (which the Route53 / Cloudflare / DDNS presentation-format
+  backends emit verbatim as `key="<value>"`) is rejected at the type
+  boundary, so it cannot inject an attacker-controlled sibling
+  SvcParamKey into the authoritative record.
+- **JWKS fetch is SSRF-guarded, size-capped, and redirect-free.**
+  `fetch_jwks` routes through `validate_fetch_url` + the streaming
+  `safe_fetch_bytes` (64 KB cap, no cross-host redirects) instead of a raw
+  `httpx.get` + unbounded `.json()`, and the per-process JWKS cache is
+  bounded (FIFO eviction) so bulk cross-domain discovery can't grow it
+  without limit. This is the input that stamps `signature_verified`.
+- **JWS verification rejects algorithm and curve confusion.**
+  `verify_signature` now requires the protected-header `alg` to be `ES256`
+  (rejecting `none` / RSA / other), and `import_public_key_from_jwk`
+  requires `kty="EC"`, `crv="P-256"`, a signing `use`, and 32-byte
+  coordinates before any key material is trusted — closing
+  algorithm/curve confusion now that the JWKS source is attacker-influenceable.
+- **HTTP index fetch is bounded.** The agents-index fetch streams the body
+  with a 1 MB cap and processes at most 500 agents from a single index, so
+  a hostile index can't force an OOM or amplify into an unbounded
+  per-agent SVCB + descriptor + JWKS fan-out.
+
+### BREAKING
+
+- **SVCB TargetName underscore validator is strict by default.**
+  `dns_aid.publish()` and direct `SvcbRecord` / `AgentRecord`
+  construction now reject endpoints containing any underscored DNS
+  label, because the CA/Browser Forum Baseline Requirements and
+  RFC 5280 dNSName SANs forbid underscored labels — a publicly-issued
+  x.509 certificate cannot cover such a name. This is a deliberate,
+  versioned tightening per draft-mozleywilliams-dnsop-dnsaid-02
+  §3.2 (Known Organization, Unknown Agent).
+
+  **Migration from 0.23.0** for deployments that intentionally
+  publish underscored internal endpoints (not behind public PKI):
+
+  1. Preferred: rename the endpoint to use only LDH labels (letters,
+     digits, hyphens). This is the long-term spec-conformant path.
+  2. Operator opt-in: set `DNS_AID_ALLOW_UNDERSCORE_TARGET=1` on the
+     publishing process AND pass `allow_underscore_target=True` to
+     `publish()`. Both are required — the env gate prevents a calling
+     LLM or MCP client from unilaterally downgrading the MUST.
+  3. The opt-in surfaces `dns_aid.underscore_bypass` on
+     `PublishResult.warnings` (caller-visible structured signal) and
+     in structlog with `warning_class="dns_aid.underscore_bypass"`,
+     so operators can count and alert per zone.
+
+  Downstream wrappers and controllers that call `publish()` will
+  need to thread the new flag through their own config surface (CRD
+  field, CLI flag, env var) to preserve any intentional
+  underscored-endpoint behaviour. Until that wiring lands, those
+  deployments must rename the endpoint to LDH labels.
+
+### Changed
+
+- **Repository moved to the vendor-neutral `dns-aid` GitHub organization** (`github.com/dns-aid/dns-aid-core`), ahead of Linux Foundation graduation. Previous `infobloxopen/dns-aid-core` URLs redirect automatically, so existing clones, links, and badges continue to work. Contributors should update their git remotes (`git remote set-url <remote> https://github.com/dns-aid/dns-aid-core.git`). The PyPI Trusted Publisher and MCP Registry namespace are being updated to match the new organization.
+
+### Added — `well-known` SvcParamKey and TargetName validator (draft-02)
+
+- **New `well-known` SvcParamKey** at the project's interim private-use
+  code point `key65409` (final IANA assignment deferred per draft §7.1).
+  Carries an RFC 8615 path the discoverer reconstructs as
+  `https://<svcb-target>/.well-known/<value>` and fetches as the
+  capability descriptor. Independent of `cap`; both may be present.
+- **Absolute-path well-known values** (per draft Figure 3) — values
+  starting with `/` (e.g. `/.well-known/agent-card.json`,
+  `/not-well-known/other-card.json`) are used as origin-relative paths
+  without double-prefixing. Bare suffixes still get the `/.well-known/`
+  prefix.
+- **`validate_well_known_path`** constrains the value to a safe
+  character class (`[A-Za-z0-9._-]` per segment, length-bounded, no
+  `..` traversal, no `?` / `#` / control chars). Enforced on both
+  publish and discover; field-validator on `SvcbRecord.well_known_path`
+  and `AgentRecord.well_known_path` so direct model construction can't
+  bypass.
+- **`cap_sha256_verified: bool`** field on `AgentRecord` / `SvcbRecord`.
+  True only when the discoverer actually fetched the descriptor AND
+  the SHA-256 of its bytes matched `cap_sha256`. Consumers keying
+  trust off the integrity pin MUST check this flag — the mere presence
+  of `cap_sha256` is no longer a sufficient signal. Dangling case
+  (pin declared, never applied) logs a structured WARN with
+  `warning_class="dns_aid.dangling_cap_sha256"`.
+- **`PublishResult.warnings: list[str]`** — non-fatal advisories
+  raised during the publish path, surfaced as stable warning-class
+  identifiers (e.g. `dns_aid.underscore_bypass`) so consumers can
+  match exactly without log-string parsing.
+- **`capability_source="descriptor_unreachable"`** — distinct
+  provenance value when a record declares a `cap` or `well-known`
+  locator but the descriptor fetch fails (timeout, TLS error, 5xx).
+  Lets consumers tell transient outages from mis-configurations
+  without scraping log lines.
+- **`CapabilitySource` `Literal` consolidated in `core.models`** —
+  single source of truth for provenance values; the discoverer,
+  SDK, indexer, and `AgentRecord` all import the same symbol.
+- **Per-agent descriptor-fetch budget** — descriptor fetches are
+  now bounded by `asyncio.wait_for` with a 12-second total budget.
+  A single slow endpoint can no longer stall a bulk-discovery loop;
+  the agent records `capability_source="descriptor_unreachable"`.
+- **`validate_no_underscore_in_target`** — TargetName underscore
+  validator with operator-only bypass. The bypass requires both the
+  per-call `allow_underscore=True` flag AND
+  `DNS_AID_ALLOW_UNDERSCORE_TARGET=1` in the environment. Field
+  validators on `SvcbRecord.target` and `AgentRecord.target_host`
+  honour the same env gate so the rule fires at the type boundary.
+
+### Changed — correctness
+
+- **Non-HTTPS `cap` (URN, JSON-Ref) falls back to `well-known`** at
+  fetch time. Earlier `cap` presence was terminal, silently disabling
+  a perfectly good `well-known` and downgrading discovery to
+  unauthenticated TXT.
+- **`cap > well-known` precedence** now proven at fetch time, not
+  just at serialization. When both are set and `cap` is https-fetchable,
+  the cap URL drives the fetch and `capability_source="cap_uri"`.
+- **DNSSEC docstring on `validator.py`** rewritten to quote the
+  draft's actual SHOULD posture (§6.2) instead of the earlier
+  MAY/MUST framing. Also no longer overstates what the code does on
+  this branch — the fail-closed DANE demotion ships separately on
+  #155.
+
+### Security
+
+- **pyjwt 2.12.1 → 2.13.0** clears PYSEC-2026-175 / 177 / 178 / 179.
+
+### Internal
+
+- Validation logger migrated from stdlib `logging` to project-standard
+  `structlog`.
+- `_parse_svcb_custom_params` derives its recognised key set from
+  `DNS_AID_KEY_MAP` (was a hand-maintained literal that needed three-
+  file edits per new key).
+- `to_params()` reads `DNS_AID_SVCB_STRING_KEYS` once per call (was up
+  to 11× per serialization).
+
+### BREAKING CHANGE — `bap` SvcParamKey is now a single scalar
+
+The `bap` SvcParamKey value type changed from `list[str] | None` to
+`str | None` across the public API: `publish()`, the CLI `--bap`
+flag, the MCP `publish_agent_to_dns` tool, and the `AgentRecord` /
+`SvcbRecord` Pydantic models.
+
+The value form follows draft-02 §5.1: bare (`mcp`, `a2a`) or
+versioned with the draft's `=` delimiter (`mcp=1.0`, `a2a=1.1`).
+
+- `AgentRecord(bap=["mcp"])` now raises `ValidationError`. Field
+  validators on both models reject the list form at the type
+  boundary so the break direction is pinned.
+- `--bap mcp,a2a` no longer auto-splits — the CLI passes the value
+  through verbatim and the validator rejects the comma. Operators
+  who want both protocols publish two SVCB records, one per
+  protocol.
+- The MCP tool's input schema for `bap` changed from `array` to
+  `string`. Clients that bind to the JSON schema need updates.
+- The previous concatenated form (`mcp2.1`, `a2a1.0`) is rejected
+  because it is ambiguous to parse back into protocol and version.
+
+This is experimental territory in the draft (§FutureWork), but the
+public-API shape change still warrants the version bump. A new
+shared `dns_aid.core.bap.normalize_bap` helper coerces legacy
+comma-strings and list inputs into the canonical scalar on the
+discover / SDK / indexer paths so existing wire data on the network
+keeps deserializing without operator intervention.
+
+### Security
+
+- **`bap` field validator closes a SvcParamKey injection
+  vulnerability.** A crafted value such as `mcp" key65500="x` used
+  to round-trip verbatim through `to_params()` and the backend
+  formatters; dnspython would then parse two SvcParamKeys, with the
+  second attacker-controlled. On a multi-tenant publish path that is
+  server-side parameter injection. The new validator rejects
+  quotes, spaces, commas, and any character that could break SVCB
+  SvcParam quoting at every construction path.
+
+### BREAKING CHANGE — draft-02 flat FQDN + walkable AliasMode
+
+This release flips the wire-format default from
+draft-mozleywilliams-dnsop-dnsaid-01 to -02. The primary agent owner is
+now the flat FQDN `{name}.{domain}` (valid as an x.509 SAN dNSName); the
+agent protocol no longer travels in the FQDN — it lives in the SVCB
+`bap` SvcParamKey (or `alpn` when only one protocol is supported).
+
+Anyone with -01 records in production will need to either republish or
+opt into a per-call legacy fallback. See **Migrating from -01** below.
+
+### Added
+
+- **Flat primary owner record** at `{name}.{domain}`. SVCB + companion
+  TXT are written at this name on every publish.
+- **Optional walkable AliasMode** at `{name}._agents.{domain}` pointing
+  at the flat primary owner. **Off by default** under -02 to avoid an
+  enumeration handle — see `docs/privacy-considerations.md`. Opt in
+  per-publish via `publish_walkable_alias=True`, the CLI `--walkable`
+  flag, or the MCP `publish_walkable_alias=true` kwarg.
+- **Per-call legacy fallback** kwarg `allow_legacy: bool | None` on
+  `discover()` / `discover_at_fqdn()`. When set, a flat-FQDN miss falls
+  back to the -01 shape; the resulting `AgentRecord` is stamped
+  `legacy_resolved=True` so downstream filters can down-weight it.
+  The env-flag form `DNS_AID_LEGACY_01_FALLBACK=1` is preserved as a
+  process-wide back-compat for callers that can't easily thread the
+  kwarg; it now also logs a warning on each use and stamps the result.
+- **Per-agent DNSSEC validation** under flat-FQDN. Each agent's owner
+  is checked independently; the result-level `dnssec_validated` is
+  True only when every agent's check passed.
+- **`legacy_resolved: bool`** field on `AgentRecord` for filter-side
+  visibility into legacy-shape records.
+- **`docs/privacy-considerations.md`** — explains the enumeration vs.
+  discovery trade-off and when to enable the walkable record.
+- **`SVCB_ALIAS_MODE` / `SVCB_SERVICE_MODE`** constants in
+  `dns_aid.core.models` so backend code reads `priority=SVCB_ALIAS_MODE`
+  instead of a bare integer.
+- **`dns_aid.core.fqdn.parse_dnsaid_fqdn`** — a single FQDN parser
+  recognising all three shapes; the discoverer's `_parse_fqdn` and the
+  telemetry's `_parse_signal_fqdn` are thin projections over it.
+
+### Changed — Security
+
+- **JWS signature now binds to the record.** `signature_verified` is
+  True only when the signed `RecordPayload` fields (`fqdn`, `target`,
+  `port`, `alpn`) match the AgentRecord — closing a hole where a
+  validly-signed `sig` could be lifted off one record and pasted onto
+  a spoofed SVCB pointing at an attacker host.
+- **`cap-sha256` mismatch now refuses the record** instead of silently
+  downgrading to TXT fallback. `fetch_cap_document` raises
+  `CapDigestMismatchError` on digest mismatch (distinct from network
+  failure); the discoverer catches it and drops the affected record.
+  TXT-fallback records no longer carry `cap_sha256` because the pin
+  doesn't apply to the data we ended up using.
+- **`well-known` SvcParamKey value is now validated** to a safe
+  RFC 8615 single-segment suffix (`^[A-Za-z0-9._-]+$`, length-bounded,
+  no `..` traversal) on both publish and discover. Prevents path
+  traversal, query-string injection, and fragment injection through
+  the SVCB → URL reconstruction.
+- **Walkable AliasMode target is the flat primary owner.** Was the
+  endpoint host, which only coincided with the flat owner when those
+  names happened to match.
+- **DANE score gates on DNSSEC.** A TLSA record without a DNSSEC chain
+  has no integrity guarantee (RFC 6698 §10.1); the validator now
+  demotes `dane_valid` to `None` in that case, and `security_score`'s
+  +15 for DANE is gated on `dnssec_valid` as a second-line guard.
+- **`unpublish()` reports success only when the primary record was
+  deleted (or was already absent and cleanup ran).** Earlier the
+  success boolean OR'd in walkable / legacy cleanup, so a primary
+  delete that silently failed on Route53 / Cloudflare could be masked
+  by an unrelated cleanup succeeding — the MCP server would then
+  de-index a still-live agent.
+- **Agent name is validated at publish.** `validate_agent_name()` is
+  now called on the publisher path (previously only on the MCP path),
+  so SDK / CLI callers can't land records whose flat-FQDN SAN would
+  be unrepresentable.
+- **Underscore-target bypass log is now structured `WARN`** with a
+  `warning_class="dns_aid.underscore_bypass"` key so log aggregators
+  can count and alert on deliberate opt-ins per zone.
+
+### Changed — Code quality
+
+- `sync_index` performs a single backend enumeration instead of two
+  (the second was a subset of the first; doubled API quota burn on
+  every sync).
+- `discover_at_fqdn` for flat / walkable shapes resolves DNS once and
+  reads the actual protocol from the record's `bap` (preferred) or
+  `alpn` field instead of firing MCP-then-A2A back-to-back.
+- Validation logger migrated from stdlib `logging` to project-standard
+  `structlog`.
+
+### Migrating from -01
+
+1. **Re-publish your agents.** The publisher writes the flat shape by
+   default; nothing else to do for new records.
+2. **Existing -01 records keep resolving** when consumers set
+   `allow_legacy=True` on `discover()` or set the env-flag form
+   `DNS_AID_LEGACY_01_FALLBACK=1`. The returned `AgentRecord` will
+   have `legacy_resolved=True` so filters can down-weight.
+3. **`unpublish()` cleans up both shapes** in one call. No flag needed.
+4. **Walkable record is now opt-in.** Operators relying on
+   DNS-SD-style enumeration need to pass `--walkable` (CLI) /
+   `publish_walkable_alias=True` (SDK/MCP) — see
+   `docs/privacy-considerations.md`.
+
 ## [0.23.0] - 2026-05-26
 
 ### Added — Production-grade OpenTelemetry integration (spec 005)
@@ -238,7 +952,7 @@ quickstart.md, contracts/, tasks.md.
 
 ### Fixed
 
-- **DDNS backend `list_records()` yield shape ([#137](https://github.com/infobloxopen/dns-aid-core/issues/137))**:
+- **DDNS backend `list_records()` yield shape ([#137](https://github.com/dns-aid/dns-aid-core/issues/137))**:
   `DDNSBackend.list_records()` previously yielded one dict per rdata with a
   singular `data: str(rdata)` key, diverging from every other backend
   (Route53, Cloudflare, NS1, Cloud DNS, BloxOne, NIOS, Mock) which yield
@@ -377,7 +1091,7 @@ quickstart.md, contracts/, tasks.md.
   pattern with a per-CVE rationale comment; publicly acknowledged in
   `SECURITY.md` "Accepted dependency vulnerabilities" section with the
   full dispute context. Re-evaluation tracked at
-  [#141](https://github.com/infobloxopen/dns-aid-core/issues/141).
+  [#141](https://github.com/dns-aid/dns-aid-core/issues/141).
 
 ### Tests
 
@@ -764,7 +1478,7 @@ Explicit version floors added to our `pyproject.toml` because upstream parents (
 ## [0.17.3] - 2026-04-14
 
 ### Added
-- **MCP Registry listing** — added `mcp-name: io.github.infobloxopen/dns-aid` tag to README for MCP Registry ownership verification.
+- **MCP Registry listing** — added `mcp-name: io.github.dns-aid/dns-aid` tag to README for MCP Registry ownership verification.
 - **MCP bundle files** — `manifest.json`, `server.json`, `.mcpbignore` for `.mcpb` packaging and registry publishing.
 
 ## [0.17.2] - 2026-04-14
@@ -1514,43 +2228,76 @@ Explicit version floors added to our `pyproject.toml` because upstream parents (
 
 ## References
 
-- [IETF draft-mozleywilliams-dnsop-dnsaid-01](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/)
+- [IETF draft-mozleywilliams-dnsop-dnsaid-02](https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/)
 - [RFC 9460 - SVCB and HTTPS Resource Records](https://www.rfc-editor.org/rfc/rfc9460.html)
 - [RFC 4033-4035 - DNSSEC](https://www.rfc-editor.org/rfc/rfc4033.html)
 
-[Unreleased]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.4...HEAD
-[0.13.4]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.3...v0.13.4
-[0.13.3]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.2...v0.13.3
-[0.13.2]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.1...v0.13.2
-[0.13.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.13.0...v0.13.1
-[0.13.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.12.1...v0.13.0
-[0.12.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.12.0...v0.12.1
-[0.12.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.11.0...v0.12.0
-[0.11.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.10.1...v0.11.0
-[0.10.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.10.0...v0.10.1
-[0.10.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.9.0...v0.10.0
-[0.9.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.8.0...v0.9.0
-[0.8.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.7.3...v0.8.0
-[0.7.3]: https://github.com/infobloxopen/dns-aid-core/compare/v0.7.2...v0.7.3
-[0.7.2]: https://github.com/infobloxopen/dns-aid-core/compare/v0.7.1...v0.7.2
-[0.7.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.7.0...v0.7.1
-[0.7.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.9...v0.7.0
-[0.6.9]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.8...v0.6.9
-[0.6.8]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.7...v0.6.8
-[0.6.7]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.6...v0.6.7
-[0.6.6]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.5...v0.6.6
-[0.6.5]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.4...v0.6.5
-[0.6.4]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.3...v0.6.4
-[0.6.3]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.2...v0.6.3
-[0.6.2]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.1...v0.6.2
-[0.6.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.5.1...v0.6.0
-[0.5.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.5.0...v0.5.1
-[0.5.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.4.9...v0.5.0
-[0.4.9]: https://github.com/infobloxopen/dns-aid-core/compare/v0.4.8...v0.4.9
-[0.4.8]: https://github.com/infobloxopen/dns-aid-core/compare/v0.3.1...v0.4.8
-[0.3.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.3.1...v0.3.1
-[0.3.0]: https://github.com/infobloxopen/dns-aid-core/releases/tag/v0.3.1
-[0.2.1]: https://github.com/infobloxopen/dns-aid-core/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/infobloxopen/dns-aid-core/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/infobloxopen/dns-aid-core/releases/tag/v0.1.0
+[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.4...HEAD
+[0.24.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.3...v0.24.4
+[0.24.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.2...v0.24.3
+[0.24.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.1...v0.24.2
+[0.24.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.0...v0.24.1
+[0.24.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.23.0...v0.24.0
+[0.23.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.21.3...v0.23.0
+[0.21.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.21.2...v0.21.3
+[0.21.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.21.1...v0.21.2
+[0.21.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.21.0...v0.21.1
+[0.21.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.20.0...v0.21.0
+[0.20.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.18.6...v0.19.0
+[0.18.6]: https://github.com/dns-aid/dns-aid-core/compare/v0.18.5...v0.18.6
+[0.18.5]: https://github.com/dns-aid/dns-aid-core/compare/v0.18.4...v0.18.5
+[0.18.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.18.3...v0.18.4
+[0.18.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.18.2...v0.18.3
+[0.18.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.18.1...v0.18.2
+[0.18.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.18.0...v0.18.1
+[0.18.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.17.3...v0.18.0
+[0.17.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.17.2...v0.17.3
+[0.17.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.17.1...v0.17.2
+[0.17.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.17.0...v0.17.1
+[0.17.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.14.5...v0.15.0
+[0.14.5]: https://github.com/dns-aid/dns-aid-core/compare/v0.14.4...v0.14.5
+[0.14.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.14.3...v0.14.4
+[0.14.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.14.2...v0.14.3
+[0.14.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.14.1...v0.14.2
+[0.14.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.6...v0.14.0
+[0.13.6]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.5...v0.13.6
+[0.13.5]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.4...v0.13.5
+[0.13.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.3...v0.13.4
+[0.13.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.2...v0.13.3
+[0.13.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.1...v0.13.2
+[0.13.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.13.0...v0.13.1
+[0.13.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.12.1...v0.13.0
+[0.12.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.12.0...v0.12.1
+[0.12.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.10.1...v0.11.0
+[0.10.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.7.3...v0.8.0
+[0.7.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.9...v0.7.0
+[0.6.9]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.8...v0.6.9
+[0.6.8]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.7...v0.6.8
+[0.6.7]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.6...v0.6.7
+[0.6.6]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.4.9...v0.5.0
+[0.4.9]: https://github.com/dns-aid/dns-aid-core/compare/v0.4.8...v0.4.9
+[0.4.8]: https://github.com/dns-aid/dns-aid-core/compare/v0.3.1...v0.4.8
+[0.3.1]: https://github.com/dns-aid/dns-aid-core/releases/tag/v0.3.1
+[0.3.0]: https://github.com/dns-aid/dns-aid-core/releases/tag/v0.3.1
+[0.2.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/dns-aid/dns-aid-core/releases/tag/v0.1.0

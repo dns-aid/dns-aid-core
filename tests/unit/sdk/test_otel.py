@@ -201,10 +201,61 @@ class TestParseSignalFqdn:
         assert name == "network"
         assert domain == "example.com"
 
-    def test_no_agents_separator(self) -> None:
+    def test_flat_fqdn_form(self) -> None:
+        """draft-02 flat shape: the first label is the agent name."""
         from dns_aid.sdk.telemetry.otel import _parse_signal_fqdn
 
-        name, domain = _parse_signal_fqdn("invalid.fqdn.com")
+        name, domain = _parse_signal_fqdn("chat.example.com")
+        assert name == "chat"
+        assert domain == "example.com"
+
+    def test_walkable_fqdn_form(self) -> None:
+        """draft-02 walkable AliasMode shape: name is the label before `._agents.`."""
+        from dns_aid.sdk.telemetry.otel import _parse_signal_fqdn
+
+        name, domain = _parse_signal_fqdn("chat._agents.example.com")
+        assert name == "chat"
+        assert domain == "example.com"
+
+    def test_single_label_returns_none(self) -> None:
+        """Single-label input is not a valid FQDN; parser returns (None, None)."""
+        from dns_aid.sdk.telemetry.otel import _parse_signal_fqdn
+
+        name, domain = _parse_signal_fqdn("invalid")
+        assert name is None
+        assert domain is None
+
+    def test_two_label_flat_owner_parsed(self) -> None:
+        """A flat owner in a short/internal zone ({name}.{tld}) now parses."""
+        from dns_aid.sdk.telemetry.otel import _parse_signal_fqdn
+
+        name, domain = _parse_signal_fqdn("agent.internal")
+        assert name == "agent"
+        assert domain == "internal"
+
+    def test_single_label_input_returns_none(self) -> None:
+        """A bare single label is not a DNS-AID owner."""
+        from dns_aid.sdk.telemetry.otel import _parse_signal_fqdn
+
+        name, domain = _parse_signal_fqdn("localhost")
+        assert name is None
+        assert domain is None
+
+    def test_walkable_empty_suffix_returns_none(self) -> None:
+        """A walkable-shaped input with no domain ('foo._agents.') returns (None, None)."""
+        from dns_aid.sdk.telemetry.otel import _parse_signal_fqdn
+
+        name, domain = _parse_signal_fqdn("foo._agents.")
+        assert name is None
+        assert domain is None
+
+    def test_legacy_with_malformed_protocol_returns_none(self) -> None:
+        """A legacy-looking input where the protocol label lacks an underscore
+        prefix (e.g. '_booking.mcp._agents.foo.com') is treated as unparseable.
+        """
+        from dns_aid.sdk.telemetry.otel import _parse_signal_fqdn
+
+        name, domain = _parse_signal_fqdn("_booking.mcp._agents.foo.com")
         assert name is None
         assert domain is None
 

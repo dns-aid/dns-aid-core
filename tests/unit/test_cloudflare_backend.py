@@ -682,6 +682,7 @@ class TestCloudflarePublishAgentParamDemotion:
             port=443,
             capabilities=["testing"],
             realm="demo",
+            publish_walkable_alias=True,
         )
 
         backend = CloudflareBackend(api_token="token", zone_id="Z123")
@@ -703,9 +704,11 @@ class TestCloudflarePublishAgentParamDemotion:
         ):
             records = await backend.publish_agent(agent)
 
-        assert len(records) == 2
+        # SVCB primary + TXT companion + walkable AliasMode (default-on per draft-02)
+        assert len(records) == 3
         assert records[0].startswith("SVCB")
         assert records[1].startswith("TXT")
+        assert records[2].startswith("SVCB(AliasMode)")
 
         # SVCB params should NOT contain custom keys
         svcb_params = svcb_calls[0]["params"]
@@ -778,7 +781,7 @@ class TestCloudflarePublishAgentParamDemotion:
             capabilities=["all"],
             cap_uri="https://multi.example.com/cap.json",
             cap_sha256="abc123",
-            bap=["mcp", "a2a"],
+            bap="mcp=2.1",
             policy_uri="https://example.com/policy",
             realm="production",
         )

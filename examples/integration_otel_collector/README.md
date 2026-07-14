@@ -60,7 +60,7 @@ Open `http://localhost:16686`. In the Service dropdown:
 ```
 [caller.py]
    AgentClient.invoke()
-      ├─ opens span "dns-aid.invoke _echo._https._agents.demo.local"
+      ├─ opens span "dns-aid.invoke echo.demo.local"
       ├─ HTTPS protocol handler builds POST request
       ├─ inject_otel_context() event hook writes `traceparent` header
       ├─ httpx sends request to http://localhost:9000/invoke

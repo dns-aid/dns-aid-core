@@ -173,7 +173,7 @@ The `-s` flag automatically appends `Signed-off-by: Your Name <your@email.com>` 
 git push origin feat/your-feature-name
 ```
 
-Then open a Pull Request against the `main` branch on [infobloxopen/dns-aid-core](https://github.com/infobloxopen/dns-aid-core).
+Then open a Pull Request against the `main` branch on [dns-aid/dns-aid-core](https://github.com/dns-aid/dns-aid-core).
 
 ## Commit Message Guidelines
 
@@ -276,7 +276,7 @@ Releases are handled by maintainers:
 
 ## Reporting Issues
 
-Use the [issue templates](https://github.com/infobloxopen/dns-aid-core/issues/new/choose):
+Use the [issue templates](https://github.com/dns-aid/dns-aid-core/issues/new/choose):
 - **Bug Report** — include Python version, OS, dns-aid version, backend, and `dns-aid doctor` output
 - **Feature Request** — describe the motivation and proposed solution
 
@@ -304,5 +304,5 @@ By contributing, you agree that your contributions will be licensed under the Ap
 
 ## Questions?
 
-- Open a [GitHub Discussion](https://github.com/infobloxopen/dns-aid-core/discussions) for general questions
-- Open an [Issue](https://github.com/infobloxopen/dns-aid-core/issues) for bugs or feature requests
+- Open a [GitHub Discussion](https://github.com/dns-aid/dns-aid-core/discussions) for general questions
+- Open an [Issue](https://github.com/dns-aid/dns-aid-core/issues) for bugs or feature requests

@@ -9,8 +9,11 @@ orgb.test.		IN SOA	ns1.orgb.test. hostmaster.orgb.test. (
 			NS	ns1.orgb.test.
 $TTL 3600	; 1 hour
 _index._agents.orgb.test. TXT	"agents=assistant:mcp"
-_assistant._mcp._agents.orgb.test. TXT "version=1.0.0"
+; draft-02 flat primary owner.
+assistant.orgb.test.	TXT	"version=1.0.0"
 			TXT	"description=Org B assistant agent"
 			SVCB	1 assistant.orgb.test. mandatory=alpn,port alpn="mcp" port=443
+; Optional walkable AliasMode (draft-02 §Known Agent).
+assistant._agents.orgb.test.	SVCB	0 assistant.orgb.test.
 $TTL 300	; 5 minutes
 ns1.orgb.test.		A	172.28.0.11

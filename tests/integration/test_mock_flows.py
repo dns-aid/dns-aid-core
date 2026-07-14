@@ -241,14 +241,21 @@ class TestCapabilityDocumentFlow:
             assert agent.capability_source == "cap_uri"
             assert agent.capabilities == ["travel", "booking", "calendar"]
 
-    async def test_cap_sha256_mismatch_falls_back_to_txt(
+    async def test_cap_sha256_mismatch_drops_record(
         self,
         mock_backend: MockBackend,
         dns_bridge: MockDNSBridge,
         cap_data: dict,
         cap_uri: str,
     ):
-        """Wrong cap_sha256 → cap doc rejected → falls back to TXT capabilities."""
+        """Wrong cap_sha256 → record refused per draft §6.1.
+
+        Earlier this test asserted a fall-back to TXT-fallback
+        capabilities. Igor's #155 review (blocker #3) tightened this:
+        a digest mismatch is now an explicit MUST-refuse — the record
+        is dropped from the discovery result rather than silently
+        downgrading to unauthenticated TXT.
+        """
         await dns_aid.publish(
             name="travel",
             domain="example.com",
@@ -269,10 +276,11 @@ class TestCapabilityDocumentFlow:
                 name="travel",
                 enrich_endpoints=False,
             )
-            agent = result.agents[0]
-            # SHA-256 mismatch → cap doc rejected → TXT fallback
-            assert agent.capability_source == "txt_fallback"
-            assert agent.capabilities == ["fallback-cap"]
+            # Record refused — no agents in the result.
+            assert result.agents == [], (
+                "cap-sha256 digest mismatch MUST cause the record to be refused "
+                "(draft §6.1); no silent downgrade to TXT"
+            )
 
 
 # ── Scenario D: HTTP Index Discovery ───────────────────────────────────
@@ -303,7 +311,7 @@ class TestHttpIndexDiscovery:
                 "agents": {
                     "network": {
                         "location": {
-                            "fqdn": "_network._mcp._agents.example.com",
+                            "fqdn": "network.example.com",
                             "endpoint": "https://mcp.example.com/mcp",
                         },
                         "model-card": {
@@ -357,7 +365,7 @@ class TestSecurityScoring:
         dns_bridge.set_endpoint_reachable("mcp.example.com")
 
         with dns_bridge.patch_all():
-            verify = await dns_aid.verify("_secure._mcp._agents.example.com")
+            verify = await dns_aid.verify("secure.example.com")
             assert verify.record_exists
             assert verify.svcb_valid
             assert verify.dnssec_valid
@@ -382,7 +390,7 @@ class TestSecurityScoring:
         )
 
         with dns_bridge.patch_all():
-            verify = await dns_aid.verify("_basic._mcp._agents.example.com")
+            verify = await dns_aid.verify("basic.example.com")
             assert verify.record_exists
             assert verify.svcb_valid
             assert not verify.dnssec_valid
@@ -397,7 +405,7 @@ class TestSecurityScoring:
     ):
         """Agent doesn't exist → score 0."""
         with dns_bridge.patch_all():
-            verify = await dns_aid.verify("_ghost._mcp._agents.example.com")
+            verify = await dns_aid.verify("ghost.example.com")
             assert not verify.record_exists
             assert verify.security_score == 0
 
@@ -422,7 +430,7 @@ class TestDnsaidParamsRoundtrip:
             capabilities=["ipam"],
             cap_uri="https://cap.example.com/rich.json",
             cap_sha256="abc123",
-            bap=["mcp", "a2a"],
+            bap="mcp=2.1",
             policy_uri="https://example.com/policy",
             realm="demo",
             backend=mock_backend,
@@ -439,7 +447,7 @@ class TestDnsaidParamsRoundtrip:
             agent = result.agents[0]
             assert agent.cap_uri == "https://cap.example.com/rich.json"
             assert agent.cap_sha256 == "abc123"
-            assert agent.bap == ["mcp", "a2a"]
+            assert agent.bap == "mcp=2.1"
             assert agent.policy_uri == "https://example.com/policy"
             assert agent.realm == "demo"
 
@@ -471,7 +479,7 @@ class TestDnsaidParamsRoundtrip:
             assert agent.cap_uri == "https://cap.example.com/partial.json"
             assert agent.realm == "staging"
             assert agent.cap_sha256 is None
-            assert agent.bap == []
+            assert agent.bap is None
             assert agent.policy_uri is None
 
 
@@ -592,12 +600,23 @@ class TestDNSSECEnforcement:
 class TestDANECertMatching:
     """Default DANE behavior unchanged (TLSA existence only)."""
 
-    async def test_dane_advisory_default(
+    async def test_dane_advisory_default_demotes_without_dnssec(
         self,
         mock_backend: MockBackend,
         dns_bridge: MockDNSBridge,
     ):
-        """Default verify() → dane_valid=True when TLSA exists (no cert matching)."""
+        """Default verify() with TLSA present but DNSSEC unavailable
+        demotes ``dane_valid`` to ``None``.
+
+        RFC 6698 §10.1 — TLSA without DNSSEC has no integrity guarantee.
+        Igor's #155 review (trust-path #5) tightened this so the
+        validator demotes ``dane_valid`` to None rather than reporting
+        True, and ``security_score`` gates its +15 for DANE on
+        ``dnssec_valid`` as a second-line guard.
+
+        Under the mock harness DNSSEC is not validated (no AD flag), so
+        the TLSA presence here lands as 'unknown' rather than 'valid'.
+        """
         await dns_aid.publish(
             name="dane-test",
             domain="example.com",
@@ -611,9 +630,12 @@ class TestDANECertMatching:
         dns_bridge.set_endpoint_reachable("mcp.example.com")
 
         with dns_bridge.patch_all():
-            verify = await dns_aid.verify("_dane-test._mcp._agents.example.com")
+            verify = await dns_aid.verify("dane-test.example.com")
             assert verify.record_exists
             assert verify.svcb_valid
-            assert verify.dane_valid is True
-            # Confirm default note mentions advisory (no full cert matching)
-            assert "advisory" in verify.dane_note.lower()
+            # DNSSEC absent under the mock → DANE outcome is unknown,
+            # not True.
+            assert verify.dnssec_valid is False
+            assert verify.dane_valid is None
+            # Note explains the demotion.
+            assert "DNSSEC" in verify.dane_note

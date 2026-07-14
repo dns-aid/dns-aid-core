@@ -12,7 +12,7 @@ click==8.3.1
 colorama==0.4.6
 coverage==7.13.3
 cryptography==46.0.4
--e git+https://github.com/infobloxopen/dns-aid-core.git#egg=dns_aid
+-e git+https://github.com/dns-aid/dns-aid-core.git#egg=dns_aid
 dnspython==2.8.0
 h11==0.16.0
 httpcore==1.0.9

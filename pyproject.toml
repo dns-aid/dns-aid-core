@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dns-aid"
-version = "0.23.0"
+version = "0.26.7"
 description = "DNS-based Agent Identification and Discovery - Reference Implementation"
 readme = "README.md"
 license = "Apache-2.0"
@@ -40,6 +40,12 @@ dependencies = [
     "httpx>=0.27.0",
     "structlog>=24.0.0",
     "python-dotenv>=1.2.2",
+    # Core: JWS signature verification (core/jwks.py — imported at module level by
+    # the ``verify_signatures`` path, which is the default off-domain ARD trust
+    # anchor) and DANE/TLSA certificate matching (core/validator.py) both require
+    # cryptography. Previously only in the ``[jws]`` extra, which made a base
+    # install ImportError on ``verify_signatures=True``.
+    "cryptography>=46.0.7",
 ]
 
 [project.optional-dependencies]
@@ -52,7 +58,7 @@ mcp = [
     "uvicorn>=0.30.0",
     # Direct floors on transitive deps pulled by `mcp` to close Dependabot alerts
     # (mcp's upstream constraints are looser than the patched versions need).
-    "pyjwt>=2.12.0",            # CVE-2026-32597 (high) — accepts unknown 'crit' header
+    "pyjwt>=2.13.0",            # PYSEC-2026-175/177/178/179 (4 vulns); supersedes CVE-2026-32597 (unknown 'crit' header)
     "python-multipart>=0.0.27", # CVE-2026-42561 / GHSA-pp6c-gr5w-3c5g (high) — DoS via unbounded multipart headers; supersedes CVE-2026-40347
 ]
 route53 = [
@@ -78,8 +84,10 @@ ddns = [
     # Uses dnspython from core deps
 ]
 jws = [
-    # JWS signature support (alternative to DNSSEC)
-    "cryptography>=46.0.7",
+    # JWS signature support (alternative to DNSSEC).
+    # ``cryptography`` is now a CORE dependency (JWS verification is a core
+    # discovery trust anchor); this extra is retained as a compatibility alias so
+    # existing ``dns-aid[jws]`` installs keep working.
 ]
 sdk = [
     # SDK with protocol handlers, ranking, signals
@@ -131,7 +139,7 @@ all = [
     "mcp>=1.0.0",
     "uvicorn>=0.30.0",
     # Transitive floors via mcp (Dependabot)
-    "pyjwt>=2.12.0",
+    "pyjwt>=2.13.0",
     "python-multipart>=0.0.27",
     # Backends: Route53, Cloudflare, NS1, Cloud DNS, Infoblox BloxOne, NIOS, DDNS
     "boto3>=1.34.0",
@@ -160,12 +168,12 @@ dns-aid = "dns_aid.cli.main:app"
 dns-aid-mcp = "dns_aid.mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/infobloxopen/dns-aid-core"
-Documentation = "https://github.com/infobloxopen/dns-aid-core#readme"
-Repository = "https://github.com/infobloxopen/dns-aid-core"
-Changelog = "https://github.com/infobloxopen/dns-aid-core/blob/main/CHANGELOG.md"
-Issues = "https://github.com/infobloxopen/dns-aid-core/issues"
-Security = "https://github.com/infobloxopen/dns-aid-core/security/policy"
+Homepage = "https://github.com/dns-aid/dns-aid-core"
+Documentation = "https://github.com/dns-aid/dns-aid-core#readme"
+Repository = "https://github.com/dns-aid/dns-aid-core"
+Changelog = "https://github.com/dns-aid/dns-aid-core/blob/main/CHANGELOG.md"
+Issues = "https://github.com/dns-aid/dns-aid-core/issues"
+Security = "https://github.com/dns-aid/dns-aid-core/security/policy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dns_aid"]
