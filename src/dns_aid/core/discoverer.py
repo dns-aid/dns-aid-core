@@ -358,6 +358,9 @@ async def discover(
             text_match,
             require_signed,
             require_signature_algorithm,
+            allow_legacy,
+            trust_dnssec_pointers,
+            verify_dane,
             start_time,
         )
     finally:
@@ -382,6 +385,9 @@ async def _discover_body(
     text_match: str | None,
     require_signed: bool,
     require_signature_algorithm: list[str] | None,
+    allow_legacy: bool | None,
+    trust_dnssec_pointers: bool,
+    verify_dane: bool,
     start_time: float,
 ) -> DiscoveryResult:
     """Body of discover(), extracted so the public surface can wrap it in a
