@@ -237,6 +237,8 @@ def _check_backends() -> list[CheckResult]:
                     importlib.import_module("httpx")
                 elif name == "ddns":
                     importlib.import_module("dns.update")
+                elif name == "akamai-edgedns":
+                    importlib.import_module("akamai.edgegrid")
             except ImportError:
                 dep_ok = False
 
@@ -258,6 +260,40 @@ def _check_backends() -> list[CheckResult]:
                 results.append(CheckResult("pass", info.display_name, "credentials configured"))
             else:
                 results.append(CheckResult("warn", info.display_name, "no AWS credentials found"))
+        elif name == "akamai-edgedns":
+            akamai_env = [
+                "AKAMAI_HOST",
+                "AKAMAI_CLIENT_TOKEN",
+                "AKAMAI_CLIENT_SECRET",
+                "AKAMAI_ACCESS_TOKEN",
+            ]
+            have_any = any(os.environ.get(v) for v in akamai_env)
+            have_all = all(os.environ.get(v) for v in akamai_env)
+            if have_any and not have_all:
+                missing = [v for v in akamai_env if not os.environ.get(v)]
+                results.append(
+                    CheckResult(
+                        "fail",
+                        info.display_name,
+                        f"partial credentials — {', '.join(missing)} not set",
+                    )
+                )
+            elif have_all:
+                results.append(
+                    CheckResult("pass", info.display_name, "credentials configured (env vars)")
+                )
+            elif Path(os.path.expanduser(os.environ.get("AKAMAI_EDGERC", "~/.edgerc"))).exists():
+                results.append(
+                    CheckResult("pass", info.display_name, "credentials configured (~/.edgerc)")
+                )
+            else:
+                results.append(
+                    CheckResult(
+                        "warn",
+                        info.display_name,
+                        "no credentials found (set AKAMAI_* vars or configure ~/.edgerc)",
+                    )
+                )
         else:
             missing = [v for v in info.required_env if not os.environ.get(v)]
             if missing:

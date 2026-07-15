@@ -82,6 +82,7 @@ nios = [
 ]
 akamai-edgedns = [
     "edgegrid-python>=2.0.7",
+    "requests>=2.33.0",
 ]
 ddns = [
     # Uses dnspython from core deps

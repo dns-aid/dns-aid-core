@@ -132,16 +132,24 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             return
 
         # Explicit env vars take precedence over .edgerc file
-        have_env = all(
-            [
-                self._host,
-                self._client_token,
-                self._client_secret,
-                self._access_token,
-            ]
-        )
+        env_vals = [self._host, self._client_token, self._client_secret, self._access_token]
+        have_any = any(env_vals)
+        have_all = all(env_vals)
 
-        if have_env:
+        if have_any and not have_all:
+            env_names = [
+                "AKAMAI_HOST",
+                "AKAMAI_CLIENT_TOKEN",
+                "AKAMAI_CLIENT_SECRET",
+                "AKAMAI_ACCESS_TOKEN",
+            ]
+            missing = [name for name, val in zip(env_names, env_vals, strict=True) if not val]
+            raise ValueError(
+                f"Partial Akamai credentials detected — {missing} not set. "
+                "Provide all four AKAMAI_* variables or use ~/.edgerc instead."
+            )
+
+        if have_all:
             from akamai.edgegrid import EdgeGridAuth
 
             self._auth = EdgeGridAuth(
@@ -260,8 +268,13 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         except httpx.HTTPError as exc:
             raise ValueError(f"Akamai Edge DNS transport error ({method} {path}): {exc}") from exc
 
-        # 404 = record/zone not found — return None instead of raising
+        # 404 on reads/deletes = not found - None; on writes = zone/resource missing - raise
         if response.status_code == 404:
+            if method in ("POST", "PUT", "PATCH"):
+                raise ValueError(
+                    f"Akamai Edge DNS zone or resource not found ({method} {path}). "
+                    "Ensure the zone exists and credentials have write access."
+                )
             return None
 
         try:
@@ -401,7 +414,6 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         """Create or update a TXT record in Akamai Edge DNS."""
         fqdn = self._to_fqdn(name, zone)
         zone_clean = zone.rstrip(".")
-        content = " ".join(values)
 
         logger.info(
             "Creating TXT record",
@@ -415,7 +427,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             "name": fqdn,
             "type": "TXT",
             "ttl": ttl,
-            "rdata": [content],
+            "rdata": [f'"{v}"' for v in values],
         }
 
         path = f"/config-dns/v2/zones/{zone_clean}/names/{fqdn}/types/TXT"
@@ -487,8 +499,6 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         params: dict[str, str] = {"pageSize": "100"}
         if record_type:
             params["types"] = record_type.upper()
-        else:
-            params["types"] = ",".join(sorted(_SUPPORTED_RECORD_TYPES))
 
         page = 1
         while True:
@@ -517,6 +527,8 @@ class AkamaiEdgeDNSBackend(DNSBackend):
 
                 ttl = int(rs.get("ttl", 0))
                 values = rdata_list if rdata_list else []
+                if rtype == "TXT":
+                    values = [v.strip('"') for v in values]
 
                 yield {
                     "name": self._extract_name_from_fqdn(fqdn, zone_clean),
@@ -555,6 +567,9 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         rdata_list = data.get("rdata", [])
         ttl = int(data.get("ttl", 0))
 
+        if rtype == "TXT":
+            rdata_list = [v.strip('"') for v in rdata_list]
+
         return {
             "name": self._extract_name_from_fqdn(fqdn, zone_clean),
             "fqdn": fqdn,
@@ -588,7 +603,6 @@ class AkamaiEdgeDNSBackend(DNSBackend):
                 zone=zone_clean,
                 error=str(exc),
             )
-            self._zone_cache[zone_clean] = False
             return False
 
     async def list_zones(self) -> list[dict]:

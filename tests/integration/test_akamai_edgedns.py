@@ -138,6 +138,9 @@ class TestAkamaiEdgeDNSMutation:
             record = await backend.get_record(test_zone, unique_name, "TXT")
             assert record is not None
             assert record["type"] == "TXT"
+            record_values = record.get("values", [])
+            assert "capabilities=integration,test" in record_values
+            assert "version=0.0.1" in record_values
 
         finally:
             await backend.delete_record(test_zone, unique_name, "TXT")

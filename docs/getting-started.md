@@ -494,7 +494,7 @@ dns-aid delete \
 
 ```bash
 # Install the required dependency first
-uv pip install edgegrid-python
+pip install "dns-aid[akamai-edgedns]"
 
 export AKAMAI_TEST_ZONE="your-zone.com"
 

@@ -66,9 +66,7 @@ async def test_lists_flat_owners_and_bookkeeping(zone_records):
 
 
 async def test_empty_zone_returns_empty():
-    result = await list_dns_aid_records(
-        _FakeBackend([_rec("@", "example.com", "SOA")]), "example.com"
-    )
+    result = await list_dns_aid_records(_FakeBackend([_rec("@", "example.com", "SOA")]), "example.com")
     assert result == []
 
 

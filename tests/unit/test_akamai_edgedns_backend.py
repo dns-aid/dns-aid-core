@@ -33,18 +33,22 @@ class TestAkamaiEdgeDNSBackendInit:
         assert backend._client_secret == "cs-xxx"
         assert backend._access_token == "at-xxx"
 
-    def test_init_from_env_vars(self):
+    def test_init_from_env_vars(self, monkeypatch):
         """Backend reads credentials from AKAMAI_* env vars when kwargs omitted."""
-        env = {
-            "AKAMAI_HOST": "akab-env.luna.akamaiapis.net",
-            "AKAMAI_CLIENT_TOKEN": "ct-env",
-            "AKAMAI_CLIENT_SECRET": "cs-env",
-            "AKAMAI_ACCESS_TOKEN": "at-env",
-        }
-        with patch.dict("os.environ", env):
-            backend = AkamaiEdgeDNSBackend()
-            assert backend._host == "akab-env.luna.akamaiapis.net"
-            assert backend._client_token == "ct-env"
+        for var in (
+            "AKAMAI_HOST",
+            "AKAMAI_CLIENT_TOKEN",
+            "AKAMAI_CLIENT_SECRET",
+            "AKAMAI_ACCESS_TOKEN",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AKAMAI_HOST", "akab-env.luna.akamaiapis.net")
+        monkeypatch.setenv("AKAMAI_CLIENT_TOKEN", "ct-env")
+        monkeypatch.setenv("AKAMAI_CLIENT_SECRET", "cs-env")
+        monkeypatch.setenv("AKAMAI_ACCESS_TOKEN", "at-env")
+        backend = AkamaiEdgeDNSBackend()
+        assert backend._host == "akab-env.luna.akamaiapis.net"
+        assert backend._client_token == "ct-env"
 
     def test_init_defaults(self):
         """Lazy state (client, auth, zone cache) starts uninitialised; edgerc defaults apply."""
@@ -143,18 +147,16 @@ class TestAkamaiEdgeDNSBackendAuth:
         backend._ensure_auth()
         assert backend._auth is existing_auth
 
-    def test_ensure_auth_falls_back_to_edgerc(self):
+    def test_ensure_auth_falls_back_to_edgerc(self, monkeypatch):
         """When env creds are absent, _ensure_auth() reads credentials from .edgerc."""
-        with patch.dict(
-            "os.environ",
-            {
-                "AKAMAI_HOST": "",
-                "AKAMAI_CLIENT_TOKEN": "",
-                "AKAMAI_CLIENT_SECRET": "",
-                "AKAMAI_ACCESS_TOKEN": "",
-            },
+        for var in (
+            "AKAMAI_HOST",
+            "AKAMAI_CLIENT_TOKEN",
+            "AKAMAI_CLIENT_SECRET",
+            "AKAMAI_ACCESS_TOKEN",
         ):
-            backend = AkamaiEdgeDNSBackend()
+            monkeypatch.delenv(var, raising=False)
+        backend = AkamaiEdgeDNSBackend()
 
         mock_edgerc = MagicMock()
         mock_edgerc.get.return_value = "akab-from-edgerc.luna.akamaiapis.net"
@@ -170,8 +172,50 @@ class TestAkamaiEdgeDNSBackendAuth:
         assert backend._auth is mock_auth_instance
         mock_ega_cls.from_edgerc.assert_called_once_with(mock_edgerc, "default")
 
-    def test_ensure_auth_raises_without_credentials(self):
+    def test_ensure_auth_raises_on_partial_credentials(self, monkeypatch):
+        """Only some AKAMAI_* vars set (e.g. a typo'd name) raises ValueError naming what's missing."""
+        for var in (
+            "AKAMAI_HOST",
+            "AKAMAI_CLIENT_TOKEN",
+            "AKAMAI_CLIENT_SECRET",
+            "AKAMAI_ACCESS_TOKEN",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        backend = AkamaiEdgeDNSBackend(
+            host="akab-test.luna.akamaiapis.net",
+            client_token="ct",
+            # client_secret omitted
+            access_token="at",
+        )
+        with pytest.raises(ValueError, match="Partial Akamai credentials"):
+            backend._ensure_auth()
+
+    def test_ensure_auth_raises_on_typo_in_env_var_name(self, monkeypatch):
+        """Typo'd env var (e.g. AKAMAI_CLIENT_SCRT) causes partial-creds raise, not silent .edgerc fallback."""
+        for var in (
+            "AKAMAI_HOST",
+            "AKAMAI_CLIENT_TOKEN",
+            "AKAMAI_CLIENT_SECRET",
+            "AKAMAI_ACCESS_TOKEN",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AKAMAI_HOST", "akab-test.luna.akamaiapis.net")
+        monkeypatch.setenv("AKAMAI_CLIENT_TOKEN", "ct")
+        monkeypatch.setenv("AKAMAI_CLIENT_SCRT", "cs")  # typo — wrong var name
+        monkeypatch.setenv("AKAMAI_ACCESS_TOKEN", "at")
+        backend = AkamaiEdgeDNSBackend()  # reads env; client_secret will be None
+        with pytest.raises(ValueError, match="Partial Akamai credentials"):
+            backend._ensure_auth()
+
+    def test_ensure_auth_raises_without_credentials(self, monkeypatch):
         """Missing creds and missing .edgerc raises ValueError with setup hint."""
+        for var in (
+            "AKAMAI_HOST",
+            "AKAMAI_CLIENT_TOKEN",
+            "AKAMAI_CLIENT_SECRET",
+            "AKAMAI_ACCESS_TOKEN",
+        ):
+            monkeypatch.delenv(var, raising=False)
         backend = AkamaiEdgeDNSBackend()
         backend._edgerc_path = "/nonexistent/.edgerc"
         with pytest.raises(ValueError, match="credentials not configured"):
@@ -310,6 +354,25 @@ class TestAkamaiEdgeDNSBackendRequest:
             result = await backend._request("GET", "/config-dns/v2/zones/missing.com")
 
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_request_raises_on_404_for_writes(self):
+        """A 404 on POST/PUT raises ValueError instead of returning None (zone does not exist)."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+        backend._auth = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=_make_response(404))
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch.object(backend, "_sign_request", return_value={}),
+        ):
+            with pytest.raises(ValueError, match="zone or resource not found"):
+                await backend._request(
+                    "POST", "/config-dns/v2/zones/missing.com/names/foo/types/TXT"
+                )
 
     @pytest.mark.asyncio
     async def test_request_raises_value_error_on_transport_error(self):
@@ -643,7 +706,9 @@ class TestAkamaiEdgeDNSBackendCreateTxt:
 
         assert result == "_chat._agents.example.com"
         assert captured_payload[0]["type"] == "TXT"
-        assert "capabilities=chat,code version=1.0.0" in captured_payload[0]["rdata"][0]
+        rdata = captured_payload[0]["rdata"]
+        assert '"capabilities=chat,code"' in rdata
+        assert '"version=1.0.0"' in rdata
 
     @pytest.mark.asyncio
     async def test_create_txt_record_update_existing(self):
@@ -800,6 +865,40 @@ class TestAkamaiEdgeDNSBackendListRecords:
         assert len(records) == 2
         assert records[0]["type"] == "SVCB"
         assert records[1]["type"] == "TXT"
+
+    @pytest.mark.asyncio
+    async def test_list_records_strips_txt_quotes(self):
+        """TXT rdata in list_records has surrounding master-file quotes stripped."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        async def mock_request(method, path, *, params=None, **kwargs):
+            return {
+                "recordsets": [
+                    {
+                        "name": "_chat._agents.example.com",
+                        "type": "TXT",
+                        "ttl": 3600,
+                        "rdata": ['"capabilities=chat,code"', '"version=1.0.0"'],
+                    },
+                ],
+                "metadata": {"totalElements": 1, "pageSize": 100},
+            }
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            records = []
+            async for record in backend.list_records(zone="example.com"):
+                records.append(record)
+
+        assert len(records) == 1
+        values = records[0]["values"]
+        assert "capabilities=chat,code" in values
+        assert "version=1.0.0" in values
+        assert '"capabilities=chat,code"' not in values
 
     @pytest.mark.asyncio
     async def test_list_records_filter_by_name(self):
@@ -1091,6 +1190,32 @@ class TestAkamaiEdgeDNSBackendGetRecord:
         assert record["type"] == "SVCB"
         assert record["fqdn"] == "_chat._agents.example.com"
         assert '1 chat.example.com. alpn="a2a"' in record["values"]
+
+    @pytest.mark.asyncio
+    async def test_get_record_strips_txt_quotes(self):
+        """TXT rdata returned by Akamai in master-file format has surrounding quotes stripped."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h",
+            client_token="ct",
+            client_secret="cs",
+            access_token="at",
+        )
+
+        async def mock_request(method, path, **kwargs):
+            return {
+                "name": "_chat._agents.example.com",
+                "type": "TXT",
+                "ttl": 3600,
+                "rdata": ['"capabilities=chat,code"', '"version=1.0.0"'],
+            }
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            record = await backend.get_record("example.com", "_chat._agents", "TXT")
+
+        assert record is not None
+        assert "capabilities=chat,code" in record["values"]
+        assert "version=1.0.0" in record["values"]
+        assert '"capabilities=chat,code"' not in record["values"]
 
     @pytest.mark.asyncio
     async def test_get_record_not_found(self):

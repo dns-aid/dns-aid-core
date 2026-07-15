@@ -28,7 +28,9 @@ async def main() -> int:
     # ── Step 1: Connect to DNS-AID MCP server ──────────────────
     print("\n[1/3] Connecting to DNS-AID MCP server via StdioServerParams...")
 
-    server = StdioServerParams(command=sys.executable, args=["-m", "dns_aid.mcp.server"])
+    server = StdioServerParams(
+        command=sys.executable, args=["-m", "dns_aid.mcp.server"]
+    )
     tools = await mcp_server_tools(server)
 
     print(f"  OK: Connected and loaded {len(tools)} tools")
