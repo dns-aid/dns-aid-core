@@ -59,32 +59,56 @@ class TestDetectBackend:
     _NO_AKAMAI = "dns_aid.cli.backends._has_akamai_credentials"
 
     def test_no_env_returns_none(self):
-        with patch.dict(os.environ, {}, clear=True), patch(self._NO_BOTO3, return_value=False), patch(self._NO_AKAMAI, return_value=False):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(self._NO_BOTO3, return_value=False),
+            patch(self._NO_AKAMAI, return_value=False),
+        ):
             assert detect_backend() is None
 
     def test_detects_route53_via_boto3(self):
         """Route 53 detected via boto3 credential chain, not env vars."""
-        with patch.dict(os.environ, {}, clear=True), patch(self._NO_BOTO3, return_value=True), patch(self._NO_AKAMAI, return_value=False):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(self._NO_BOTO3, return_value=True),
+            patch(self._NO_AKAMAI, return_value=False),
+        ):
             assert detect_backend() == "route53"
 
     def test_detects_cloudflare(self):
         env = {"CLOUDFLARE_API_TOKEN": "cf-token"}
-        with patch.dict(os.environ, env, clear=True), patch(self._NO_BOTO3, return_value=False), patch(self._NO_AKAMAI, return_value=False):
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(self._NO_BOTO3, return_value=False),
+            patch(self._NO_AKAMAI, return_value=False),
+        ):
             assert detect_backend() == "cloudflare"
 
     def test_detects_infoblox(self):
         env = {"INFOBLOX_API_KEY": "ib-key"}
-        with patch.dict(os.environ, env, clear=True), patch(self._NO_BOTO3, return_value=False), patch(self._NO_AKAMAI, return_value=False):
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(self._NO_BOTO3, return_value=False),
+            patch(self._NO_AKAMAI, return_value=False),
+        ):
             assert detect_backend() == "infoblox"
 
     def test_detects_ddns(self):
         env = {"DDNS_SERVER": "ns1.example.com"}
-        with patch.dict(os.environ, env, clear=True), patch(self._NO_BOTO3, return_value=False), patch(self._NO_AKAMAI, return_value=False):
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(self._NO_BOTO3, return_value=False),
+            patch(self._NO_AKAMAI, return_value=False),
+        ):
             assert detect_backend() == "ddns"
 
     def test_multiple_raises(self):
         env = {"CLOUDFLARE_API_TOKEN": "cf-token"}
-        with patch.dict(os.environ, env, clear=True), patch(self._NO_BOTO3, return_value=True), patch(self._NO_AKAMAI, return_value=False):
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(self._NO_BOTO3, return_value=True),
+            patch(self._NO_AKAMAI, return_value=False),
+        ):
             with pytest.raises(ValueError, match="Multiple backends"):
                 detect_backend()
 

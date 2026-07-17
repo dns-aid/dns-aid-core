@@ -216,10 +216,6 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         we create a throw-away ``requests.PreparedRequest`` to compute the
         ``Authorization`` header, then hand those headers to httpx for the
         actual async I/O.  No HTTP call goes through ``requests``.
-
-        ``requests`` is a transitive dependency of ``edgegrid-python`` and
-        is always available whenever the ``akamai-edgedns`` extra is
-        installed; we deliberately do not list it as a direct dependency.
         """
         import requests as req_lib  # type: ignore[import-untyped]
 
@@ -267,6 +263,10 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             )
         except httpx.HTTPError as exc:
             raise ValueError(f"Akamai Edge DNS transport error ({method} {path}): {exc}") from exc
+
+        # 409 on POST - retry as PUT to converge
+        if response.status_code == 409 and method == "POST":
+            return await self._request("PUT", path, json_data=json_data, params=params)
 
         # 404 on reads/deletes = not found - None; on writes = zone/resource missing - raise
         if response.status_code == 404:

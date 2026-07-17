@@ -375,6 +375,37 @@ class TestAkamaiEdgeDNSBackendRequest:
                 )
 
     @pytest.mark.asyncio
+    async def test_request_retries_post_as_put_on_409(self):
+        """409 on POST (concurrent upsert race) is retried transparently as PUT."""
+        backend = AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+        backend._auth = MagicMock()
+        call_log = []
+
+        async def fake_request(method, url, **kwargs):
+            call_log.append(method)
+            if method == "POST":
+                return _make_response(409)
+            return _make_response(200, {})
+
+        mock_client = AsyncMock()
+        mock_client.request = fake_request
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch.object(backend, "_sign_request", return_value={}),
+        ):
+            result = await backend._request(
+                "POST",
+                "/config-dns/v2/zones/example.com/names/foo/types/TXT",
+                json_data={"rdata": ['"v"']},
+            )
+
+        assert call_log == ["POST", "PUT"]
+        assert result == {}
+
+    @pytest.mark.asyncio
     async def test_request_raises_value_error_on_transport_error(self):
         """httpx.HTTPError raised by the client is converted to ValueError."""
         backend = AkamaiEdgeDNSBackend(
