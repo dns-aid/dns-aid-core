@@ -937,7 +937,7 @@ DDNS (Dynamic DNS) is a universal backend that works with any DNS server support
 
 ### Cloudflare Setup
 
-Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to its free tier and excellent API support. DNS-AID fully supports Cloudflare's SVCB record implementation.
+Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to its free tier and excellent API support. DNS-AID fully supports Cloudflare's SVCB record implementation, including **native private-use SVCB keys** — DNS-AID's custom parameters (`cap`, `cap-sha256`, `bap`, `policy`, `realm`, ...) are written directly to the SVCB record (`key65400`–`key65409`), with no TXT demotion.
 
 #### Environment Variables
 
@@ -999,6 +999,7 @@ Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to it
 
 - **Free tier**: DNS hosting is free for unlimited domains
 - **SVCB support**: Full RFC 9460 compliance with SVCB Type 64 records
+- **Native private-use SVCB keys**: DNS-AID custom params go straight into the SVCB record (`key65400`–`key65409`) — no TXT demotion, matching NS1 and NIOS
 - **Global anycast**: Fast DNS resolution worldwide
 - **Simple API**: Well-documented REST API v4
 - **Full DNS-AID compliance**: Supports ServiceMode SVCB with all parameters
