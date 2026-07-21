@@ -11,6 +11,7 @@ Supports zone ID or automatic zone lookup by domain name.
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -21,8 +22,39 @@ from dns_aid.backends.base import DNSBackend
 
 logger = structlog.get_logger(__name__)
 
-# Private-use SVCB key demotion is handled by the DNSBackend base class.
-# Cloudflare rejects key65280–key65534 — base class demotes them to TXT.
+# Cloudflare API error code returned when an identical record already exists.
+# Used to make create-then-update idempotent under concurrent publishes.
+_CF_ERR_IDENTICAL_RECORD = 81058
+
+
+def _quote_txt_value(value: str) -> str:
+    """Wrap a single TXT value as one RFC 1035 <character-string>.
+
+    Embedded backslashes and double quotes are escaped so the value survives
+    Cloudflare's presentation-format parser as a single string.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _parse_txt_content(content: str) -> list[str]:
+    """Parse a Cloudflare TXT ``content`` string into its character-strings.
+
+    Cloudflare returns TXT rdata in DNS presentation format: one or more
+    double-quoted (or bare) character-strings separated by whitespace, e.g.
+    ``"cap=..." "version=1.0.0"``. ``shlex`` splits on whitespace while
+    honouring quotes and backslash escapes, which matches DNS master-file
+    semantics and inverts :func:`_quote_txt_value`.
+    """
+    if not content:
+        return []
+    try:
+        return shlex.split(content)
+    except ValueError:
+        # Unbalanced quotes (shouldn't happen from Cloudflare) — fall back to
+        # returning the raw content as a single value rather than raising.
+        logger.debug("Unparseable TXT content; returning raw", content=content)
+        return [content]
 
 
 class CloudflareBackend(DNSBackend):
@@ -68,6 +100,19 @@ class CloudflareBackend(DNSBackend):
     @property
     def name(self) -> str:
         return "cloudflare"
+
+    @property
+    def supports_private_svcb_keys(self) -> bool:
+        """Cloudflare accepts private-use SVCB keys (key65280–key65534) natively.
+
+        Verified against the Cloudflare API v4: the SVCB record ``data.value``
+        field accepts RFC 9460 generic private-use SvcParamKeys in ``keyNNNNN``
+        form (e.g. the DNS-AID ``key65400``–``key65409`` set for cap, cap-sha256,
+        bap, policy, realm, ...). They are stored and served verbatim, so the
+        base class passes all params straight to the SVCB record instead of
+        demoting the DNS-AID custom keys to TXT.
+        """
+        return True
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create httpx async client.
@@ -208,6 +253,84 @@ class CloudflareBackend(DNSBackend):
             "value": value_str,
         }
 
+    async def _write_record(
+        self,
+        zone_id: str,
+        fqdn: str,
+        record_type: str,
+        request_data: dict[str, Any],
+        existing_id: str | None,
+    ) -> str:
+        """Create (POST) or update (PUT) a record; idempotent under both races.
+
+        There is an unavoidable check-then-act window between looking up an
+        existing record id (``_get_record_id``) and writing. A concurrent
+        publisher can change the world in that window in two ways, and this
+        method converges on the intended state for both:
+
+        * **Create race** — we found no existing record and POST, but a racer
+          created an identical one first. Cloudflare answers HTTP 400 with error
+          code 81058 ("An identical record already exists"). For an idempotent
+          upsert that is success, not failure, so we return the fqdn.
+        * **Delete race** — we found an existing id and PUT, but a racer deleted
+          it first, so the PUT 404s. We recreate the record with a POST.
+
+        Any other non-success response raises ``ValueError`` carrying the
+        Cloudflare error payload (more actionable than a bare ``HTTPStatusError``
+        and uniform whether the failure arrives as a 4xx/5xx or as a 200 with
+        ``success: false``).
+        """
+        client = await self._get_client()
+
+        if existing_id:
+            response = await client.put(
+                f"/zones/{zone_id}/dns_records/{existing_id}",
+                json=request_data,
+            )
+            # Delete race: the record vanished between lookup and update.
+            if response.status_code == 404:
+                logger.info(
+                    "Record vanished before update; recreating",
+                    fqdn=fqdn,
+                    type=record_type,
+                )
+                response = await client.post(
+                    f"/zones/{zone_id}/dns_records",
+                    json=request_data,
+                )
+        else:
+            response = await client.post(
+                f"/zones/{zone_id}/dns_records",
+                json=request_data,
+            )
+
+        try:
+            data = response.json()
+        except ValueError:
+            # Non-JSON body (e.g. an edge 5xx returning HTML).
+            data = {}
+
+        # Create race: an identical record already exists — idempotent success.
+        if response.status_code == 400 and any(
+            e.get("code") == _CF_ERR_IDENTICAL_RECORD for e in (data.get("errors") or [])
+        ):
+            logger.info(
+                "Record already exists; treating as idempotent success",
+                fqdn=fqdn,
+                type=record_type,
+            )
+            return fqdn
+
+        if not data.get("success", False):
+            errors = data.get("errors") or []
+            raise ValueError(
+                f"Failed to write {record_type} record (HTTP {response.status_code}): {errors}"
+            )
+
+        record_id = data["result"]["id"]
+        logger.info("Record written", fqdn=fqdn, type=record_type, record_id=record_id)
+        return fqdn
+
     async def create_svcb_record(
         self,
         zone: str,
@@ -219,7 +342,6 @@ class CloudflareBackend(DNSBackend):
     ) -> str:
         """Create SVCB record in Cloudflare."""
         zone_id = await self._get_zone_id(zone)
-        client = await self._get_client()
 
         # Build FQDN
         fqdn = f"{name}.{zone}".rstrip(".")
@@ -247,30 +369,7 @@ class CloudflareBackend(DNSBackend):
             "ttl": ttl,
         }
 
-        if existing_id:
-            # Update existing record
-            response = await client.put(
-                f"/zones/{zone_id}/dns_records/{existing_id}",
-                json=request_data,
-            )
-        else:
-            # Create new record
-            response = await client.post(
-                f"/zones/{zone_id}/dns_records",
-                json=request_data,
-            )
-
-        response.raise_for_status()
-        data = response.json()
-
-        if not data.get("success"):
-            errors = data.get("errors", [])
-            raise ValueError(f"Failed to create SVCB record: {errors}")
-
-        record_id = data["result"]["id"]
-        logger.info("SVCB record created", fqdn=fqdn, record_id=record_id)
-
-        return fqdn
+        return await self._write_record(zone_id, fqdn, "SVCB", request_data, existing_id)
 
     async def create_txt_record(
         self,
@@ -281,7 +380,6 @@ class CloudflareBackend(DNSBackend):
     ) -> str:
         """Create TXT record in Cloudflare."""
         zone_id = await self._get_zone_id(zone)
-        client = await self._get_client()
 
         # Build FQDN
         fqdn = f"{name}.{zone}".rstrip(".")
@@ -298,10 +396,14 @@ class CloudflareBackend(DNSBackend):
         # Check if record exists (for update)
         existing_id = await self._get_record_id(zone_id, fqdn, "TXT")
 
-        # Cloudflare TXT records use "content" field — raw value, no extra quoting.
-        # The API stores whatever string is provided literally; adding '"..."' wrapping
-        # causes those literal quote characters to appear in RDATA and break parsing.
-        content = " ".join(values)
+        # Each value must be its own RFC 1035 <character-string>. Cloudflare's
+        # "content" field is DNS presentation format, so we wrap each value in
+        # double quotes (escaping embedded quotes/backslashes). Space-joining
+        # unquoted would collapse all values into a SINGLE character-string on
+        # the wire, and the discoverer iterates character-strings one by one
+        # (see core/discoverer.py) — merging them corrupts capability parsing
+        # and any value containing a space. Mirrors the Route 53 backend.
+        content = " ".join(_quote_txt_value(v) for v in values)
 
         request_data = {
             "type": "TXT",
@@ -310,33 +412,11 @@ class CloudflareBackend(DNSBackend):
             "ttl": ttl,
         }
 
-        if existing_id:
-            # Update existing record
-            response = await client.put(
-                f"/zones/{zone_id}/dns_records/{existing_id}",
-                json=request_data,
-            )
-        else:
-            # Create new record
-            response = await client.post(
-                f"/zones/{zone_id}/dns_records",
-                json=request_data,
-            )
+        return await self._write_record(zone_id, fqdn, "TXT", request_data, existing_id)
 
-        response.raise_for_status()
-        data = response.json()
-
-        if not data.get("success"):
-            errors = data.get("errors", [])
-            raise ValueError(f"Failed to create TXT record: {errors}")
-
-        record_id = data["result"]["id"]
-        logger.info("TXT record created", fqdn=fqdn, record_id=record_id)
-
-        return fqdn
-
-    # publish_agent() inherited from DNSBackend base class — automatically
-    # demotes private-use SVCB keys to TXT since Cloudflare rejects them.
+    # publish_agent() is inherited from DNSBackend. Because
+    # supports_private_svcb_keys is True, the base class writes DNS-AID's
+    # private-use SVCB keys directly to the SVCB record (no TXT demotion).
 
     async def delete_record(
         self,
@@ -424,7 +504,7 @@ class CloudflareBackend(DNSBackend):
 
                 # Extract values based on record type
                 if rtype == "TXT":
-                    values = [record.get("content", "")]
+                    values = _parse_txt_content(record.get("content", ""))
                 elif rtype == "SVCB":
                     # SVCB records have structured data
                     svcb_data = record.get("data", {})
@@ -487,44 +567,43 @@ class CloudflareBackend(DNSBackend):
         # Build FQDN
         fqdn = f"{name}.{zone}".rstrip(".")
 
-        try:
-            response = await client.get(
-                f"/zones/{zone_id}/dns_records",
-                params={"name": fqdn, "type": record_type},
-            )
-            response.raise_for_status()
-            data = response.json()
+        response = await client.get(
+            f"/zones/{zone_id}/dns_records",
+            params={"name": fqdn, "type": record_type},
+        )
+        # A successful query for a non-existent record returns an empty result
+        # set, not an error. Only that means "not found" — auth, network, or
+        # server errors must propagate rather than be masked as a missing
+        # record (which would let reconciliation silently recreate/overwrite).
+        response.raise_for_status()
+        data = response.json()
 
-            records = data.get("result", [])
-            if not records:
-                return None
-
-            record = records[0]
-
-            # Extract values based on record type
-            if record_type == "TXT":
-                values = [record.get("content", "")]
-            elif record_type == "SVCB":
-                svcb_data = record.get("data", {})
-                priority = svcb_data.get("priority", 0)
-                target = svcb_data.get("target", "")
-                value = svcb_data.get("value", "")
-                values = [f"{priority} {target} {value}".strip()]
-            else:
-                values = [record.get("content", "")]
-
-            return {
-                "name": name,
-                "fqdn": fqdn,
-                "type": record_type,
-                "ttl": record.get("ttl", 0),
-                "values": values,
-                "id": record.get("id"),
-            }
-
-        except Exception as e:
-            logger.debug("Record not found", fqdn=fqdn, type=record_type, error=str(e))
+        records = data.get("result", [])
+        if not records:
             return None
+
+        record = records[0]
+
+        # Extract values based on record type
+        if record_type == "TXT":
+            values = _parse_txt_content(record.get("content", ""))
+        elif record_type == "SVCB":
+            svcb_data = record.get("data", {})
+            priority = svcb_data.get("priority", 0)
+            target = svcb_data.get("target", "")
+            value = svcb_data.get("value", "")
+            values = [f"{priority} {target} {value}".strip()]
+        else:
+            values = [record.get("content", "")]
+
+        return {
+            "name": name,
+            "fqdn": fqdn,
+            "type": record_type,
+            "ttl": record.get("ttl", 0),
+            "values": values,
+            "id": record.get("id"),
+        }
 
     async def list_zones(self) -> list[dict]:
         """

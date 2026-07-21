@@ -848,6 +848,29 @@ backend = NS1Backend(
 
 **DNS-AID Compliance**: NS1 supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65408`). NS1 natively accepts private-use SVCB keys — cap_uri, policy_uri, and realm go directly into the SVCB record without TXT demotion.
 
+### CloudflareBackend
+
+Cloudflare DNS REST API v4 implementation.
+
+```python
+from dns_aid.backends.cloudflare import CloudflareBackend
+
+backend = CloudflareBackend()  # reads CLOUDFLARE_API_TOKEN from env
+
+# Or with explicit configuration
+backend = CloudflareBackend(
+    api_token="your-api-token",
+    zone_id="optional-zone-id",  # auto-discovered from domain if omitted
+)
+```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CLOUDFLARE_API_TOKEN` | Yes | - | API token with Zone → DNS → Edit (and Read) permissions |
+| `CLOUDFLARE_ZONE_ID` | No | - | Zone ID (auto-discovered by zone name if omitted) |
+
+**DNS-AID Compliance**: Cloudflare supports ServiceMode SVCB records (priority > 0) with full SVC parameters including private-use keys (`key65400`–`key65409`). Cloudflare natively accepts private-use SVCB keys via the `supports_private_svcb_keys` property — cap_uri, cap_sha256, bap, policy_uri, and realm go directly into the SVCB record without TXT demotion. TXT records are still written for human-readable metadata (capabilities, version, description), each value stored as its own RFC 1035 character-string.
+
 ### DDNSBackend
 
 RFC 2136 Dynamic DNS implementation. Works with BIND, Windows DNS, PowerDNS, Knot DNS, and any RFC 2136 compliant server.
