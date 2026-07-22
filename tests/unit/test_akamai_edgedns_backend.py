@@ -1394,3 +1394,181 @@ class TestAkamaiEdgeDNSBackendFactoryWiring:
         from dns_aid.cli.backends import BACKEND_REGISTRY
 
         assert BACKEND_REGISTRY["akamai-edgedns"].required_env == {}
+
+
+# ---------------------------------------------------------------------------
+# Hardening: concurrent-zone-modification retry
+# ---------------------------------------------------------------------------
+
+
+def _resp(status: int, *, json_body=None, text: str = "") -> httpx.Response:
+    """Build an httpx.Response with a request attached (so raise_for_status works)."""
+    req = httpx.Request("POST", "https://akamai.example/config-dns/v2/zones/z")
+    if json_body is not None:
+        return httpx.Response(status, json=json_body, request=req)
+    return httpx.Response(status, text=text, request=req)
+
+
+def _wire(backend: AkamaiEdgeDNSBackend, monkeypatch, responses):
+    """Wire a backend's HTTP seam: stub client.request with `responses`, no real sleep/sign."""
+    import dns_aid.backends.akamai_edgedns as mod
+
+    monkeypatch.setattr(mod.asyncio, "sleep", AsyncMock())
+    client = MagicMock()
+    client.request = AsyncMock(side_effect=responses)
+    monkeypatch.setattr(backend, "_get_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(backend, "_sign_request", lambda *a, **k: {})
+    return client
+
+
+class TestAkamaiZoneLockRetry:
+    """409 concurrentZoneModification must retry the same op, not misfire to PUT."""
+
+    def _backend(self) -> AkamaiEdgeDNSBackend:
+        return AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+
+    async def test_retries_then_succeeds(self, monkeypatch):
+        backend = self._backend()
+        client = _wire(
+            backend,
+            monkeypatch,
+            [
+                _resp(409, text='{"title":"concurrentZoneModification"}'),
+                _resp(409, text="concurrentZoneModification"),
+                _resp(200, json_body={"ok": True}),
+            ],
+        )
+        result = await backend._request("POST", "/zones/z/names/n/types/SVCB", json_data={"x": 1})
+        assert result == {"ok": True}
+        assert client.request.await_count == 3  # 2 retries + success
+
+    async def test_exhausts_retries_then_raises(self, monkeypatch):
+        backend = self._backend()
+        client = _wire(
+            backend,
+            monkeypatch,
+            [_resp(409, text="concurrentZoneModification")] * 20,
+        )
+        with pytest.raises(ValueError, match="Akamai Edge DNS API error"):
+            await backend._request("POST", "/zones/z/names/n/types/SVCB", json_data={"x": 1})
+        assert client.request.await_count == backend._MAX_ZONE_LOCK_RETRIES + 1
+
+    async def test_genuine_conflict_still_converges_post_to_put(self, monkeypatch):
+        backend = self._backend()
+        methods: list[str] = []
+
+        def responder(method, url, **kwargs):
+            methods.append(method)
+            if method == "POST":
+                return _resp(409, text='{"title":"recordSetAlreadyExists"}')
+            return _resp(200, json_body={"updated": True})
+
+        _wire(backend, monkeypatch, responder)
+        result = await backend._request("POST", "/zones/z/names/n/types/SVCB", json_data={"x": 1})
+        assert result == {"updated": True}
+        assert methods == ["POST", "PUT"]  # genuine "exists" 409 → PUT, not a retry loop
+
+
+# ---------------------------------------------------------------------------
+# Hardening: presentation-format escaping + path-segment encoding
+# ---------------------------------------------------------------------------
+
+
+class TestAkamaiEscaping:
+    def test_escape_char_string_basic(self):
+        assert AkamaiEdgeDNSBackend._escape_char_string("plain") == "plain"
+        assert AkamaiEdgeDNSBackend._escape_char_string('x"y') == 'x\\"y'
+
+    def test_escape_unescape_roundtrip(self):
+        for s in ["plain", 'a"b', "a\\b", 'q"and\\s', '""', "\\", 'desc="v" a=b']:
+            esc = AkamaiEdgeDNSBackend._escape_char_string(s)
+            assert AkamaiEdgeDNSBackend._unescape_char_string(esc) == s
+
+    def test_svcb_param_value_is_escaped(self):
+        rdata = AkamaiEdgeDNSBackend._format_svcb_rdata(1, "t.example.com.", {"realm": 'a"b'})
+        assert 'key65404="a\\"b"' in rdata
+
+    async def test_create_txt_escapes_embedded_quote(self, monkeypatch):
+        backend = AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+        captured: dict = {}
+
+        async def mock_request(method, path, *, json_data=None, params=None, **kwargs):
+            if method == "GET":
+                return None  # doesn't exist -> POST
+            captured["payload"] = json_data
+            return {}
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            await backend.create_txt_record("example.com", "a", values=['x="evil" injected'])
+        rd = captured["payload"]["rdata"][0]
+        assert rd.startswith('"') and rd.endswith('"')
+        assert "\\" in rd  # the embedded quote was escaped, not left bare
+        assert AkamaiEdgeDNSBackend._unescape_char_string(rd[1:-1]) == 'x="evil" injected'
+
+    def test_seg_encodes_path_separators(self):
+        assert AkamaiEdgeDNSBackend._seg("a/b") == "a%2Fb"
+        assert AkamaiEdgeDNSBackend._seg("x?y#z") == "x%3Fy%23z"
+        assert AkamaiEdgeDNSBackend._seg("example.com") == "example.com"  # FQDNs pass through
+
+
+# ---------------------------------------------------------------------------
+# Hardening: pagination must not truncate when metadata is absent
+# ---------------------------------------------------------------------------
+
+
+class TestAkamaiPaginationNoMetadata:
+    async def test_list_records_walks_until_short_page(self):
+        backend = AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+        page1 = [
+            {"name": f"r{i}.example.com", "type": "TXT", "ttl": 300, "rdata": ["v"]}
+            for i in range(100)
+        ]
+        page2 = [
+            {"name": f"s{i}.example.com", "type": "TXT", "ttl": 300, "rdata": ["v"]}
+            for i in range(3)
+        ]
+        calls = 0
+
+        async def mock_request(method, path, *, params=None, **kwargs):
+            nonlocal calls
+            calls += 1
+            return {"recordsets": page1 if calls == 1 else page2}  # NO metadata key
+
+        with patch.object(backend, "_request", side_effect=mock_request):
+            recs = [r async for r in backend.list_records("example.com")]
+        assert len(recs) == 103  # did NOT truncate at 100 despite missing metadata
+        assert calls == 2
+
+
+# ---------------------------------------------------------------------------
+# Hardening: 409 convergence is scoped to single-record paths
+# ---------------------------------------------------------------------------
+
+
+class TestAkamaiBulkPathNeverConverges:
+    """A 409 on the bulk /recordsets path must raise, never auto-convert to PUT.
+
+    PUT on /zones/{zone}/recordsets replaces the ENTIRE zone's record sets, so
+    the POST→PUT upsert convergence is guarded to /names/... paths only.
+    """
+
+    async def test_bulk_recordsets_409_raises_instead_of_put(self, monkeypatch):
+        backend = AkamaiEdgeDNSBackend(
+            host="h", client_token="ct", client_secret="cs", access_token="at"
+        )
+        methods: list[str] = []
+
+        def responder(method, url, **kwargs):
+            methods.append(method)
+            return _resp(409, text='{"title":"recordSetAlreadyExists"}')
+
+        _wire(backend, monkeypatch, responder)
+        with pytest.raises(ValueError, match="status=409"):
+            await backend._request("POST", "/config-dns/v2/zones/z/recordsets", json_data={"x": 1})
+        assert methods == ["POST"]  # no PUT was ever issued on the bulk path
