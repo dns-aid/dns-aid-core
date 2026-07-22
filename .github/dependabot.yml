@@ -5,11 +5,8 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "automated"
     groups:
-      patch-security:
+      patches:
         update-types:
           - "patch"
 
@@ -17,6 +14,4 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-    labels:
-      - "dependencies"
-      - "automated"
+    open-pull-requests-limit: 5
