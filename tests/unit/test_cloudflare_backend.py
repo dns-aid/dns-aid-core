@@ -10,7 +10,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from dns_aid.backends.cloudflare import CloudflareBackend
+from dns_aid.backends.cloudflare import (
+    CloudflareBackend,
+    _escape_dns_char_string,
+    _parse_txt_content,
+    _quote_txt_value,
+)
 
 
 class TestCloudflareBackendInit:
@@ -993,9 +998,8 @@ class TestCloudflareGetRecord:
         other non-success response) has to raise, otherwise a transient
         auth/network/server error would look identical to a missing record and
         let reconciliation silently recreate or overwrite an existing record.
-        This is an intentional divergence from the route53/ns1 backends, which
-        still swallow to ``None``; guard it so a future "align the backends"
-        refactor can't quietly revert it.
+        Guard the raising contract so a future "align the backends" refactor
+        can't quietly revert it to swallowing errors.
         """
         backend = CloudflareBackend(api_token="token", zone_id="Z123")
 
@@ -1018,3 +1022,79 @@ class TestCloudflareGetRecord:
         with patch.object(backend, "_get_client", return_value=mock_client):
             with pytest.raises(httpx.HTTPStatusError):
                 await backend.get_record("example.com", "_chat._a2a._agents", "SVCB")
+
+
+class TestCloudflareTxtCharacterStringHelpers:
+    """Round-trip and edge-case coverage for the TXT presentation-format helpers.
+
+    These are the security-relevant boundary (escaping) and the read-path
+    parser; the live integration test exercises them end-to-end, but these
+    mocked unit tests lock the behavior so CI catches a regression.
+    """
+
+    def test_escape_backslash_and_quote(self):
+        assert _escape_dns_char_string('a"b\\c') == 'a\\"b\\\\c'
+
+    def test_escape_noop_when_clean(self):
+        assert _escape_dns_char_string("cap=chat,code") == "cap=chat,code"
+
+    def test_quote_wraps_and_escapes(self):
+        assert _quote_txt_value('say "hi"') == '"say \\"hi\\""'
+
+    def test_roundtrip_plain_values(self):
+        values = ["capabilities=chat,code", "version=1.0.0"]
+        content = " ".join(_quote_txt_value(v) for v in values)
+        assert _parse_txt_content(content) == values
+
+    def test_roundtrip_value_with_spaces(self):
+        # The whole motivation: a value containing spaces must survive as ONE
+        # character-string, not fragment into several.
+        values = ["description=A helpful chat agent", "version=1.0.0"]
+        content = " ".join(_quote_txt_value(v) for v in values)
+        assert _parse_txt_content(content) == values
+
+    def test_roundtrip_embedded_quotes_and_backslashes(self):
+        values = ['note=he said "hi"', "path=C:\\tmp\\x"]
+        content = " ".join(_quote_txt_value(v) for v in values)
+        assert _parse_txt_content(content) == values
+
+    def test_parse_empty_content_returns_empty_list(self):
+        # Behavior change from the old backend: empty content is [] not [""].
+        assert _parse_txt_content("") == []
+
+    def test_parse_single_bare_value(self):
+        assert _parse_txt_content("capabilities=chat") == ["capabilities=chat"]
+
+    def test_parse_unbalanced_quotes_falls_back_to_raw(self):
+        # shlex raises ValueError on an unbalanced quote; we return the raw
+        # content rather than raising (shouldn't happen from Cloudflare).
+        assert _parse_txt_content('"unterminated') == ['"unterminated']
+
+    @pytest.mark.asyncio
+    async def test_get_record_parses_multistring_txt_back_to_list(self):
+        """get_record read path splits presentation-format content into values."""
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "success": True,
+            "result": [
+                {
+                    "id": "rec1",
+                    "name": "_chat._a2a._agents.example.com",
+                    "type": "TXT",
+                    "ttl": 3600,
+                    "content": '"capabilities=chat,code" "description=A helpful agent"',
+                }
+            ],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            record = await backend.get_record("example.com", "_chat._a2a._agents", "TXT")
+
+        assert record is not None
+        assert record["values"] == ["capabilities=chat,code", "description=A helpful agent"]
