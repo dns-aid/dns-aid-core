@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (quoted, with escaping) instead of space-joining all values into a single string.
   The discoverer iterates character-strings individually, so the previous join
   corrupted capability parsing and any value containing a space. Read paths parse the
-  presentation-format `content` back into a list. Mirrors the Route 53 backend.
+  presentation-format `content` back into a list. Like the Route 53 backend's
+  per-value quoting, but additionally escaping embedded quotes and backslashes.
   *Migration note:* TXT records written by the previous Cloudflare backend (unquoted,
   space-joined) now read back split on whitespace. For `key=value` tokens this is the
   correct recovery, but a single legacy value that legitimately contained spaces

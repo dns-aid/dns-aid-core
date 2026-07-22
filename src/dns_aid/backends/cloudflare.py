@@ -27,14 +27,23 @@ logger = structlog.get_logger(__name__)
 _CF_ERR_IDENTICAL_RECORD = 81058
 
 
+def _escape_dns_char_string(value: str) -> str:
+    """Escape backslashes and double quotes for a DNS presentation-format string.
+
+    Shared by the TXT and SVCB writers so a value carrying a ``"`` or ``\\``
+    survives Cloudflare's presentation-format parser as a single, intact token
+    rather than terminating the quoted string early.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _quote_txt_value(value: str) -> str:
     """Wrap a single TXT value as one RFC 1035 <character-string>.
 
     Embedded backslashes and double quotes are escaped so the value survives
     Cloudflare's presentation-format parser as a single string.
     """
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    return f'"{_escape_dns_char_string(value)}"'
 
 
 def _parse_txt_content(content: str) -> list[str]:
@@ -242,9 +251,14 @@ class CloudflareBackend(DNSBackend):
 
         # Build the value string for SVCB params
         # Format: alpn="mcp" port="443"
+        # publish_agent's params are already validated at the model boundary
+        # (validate_svcparam_value rejects embedded quotes/backslashes/control
+        # chars), but create_svcb_record is public and can be called directly
+        # with an arbitrary params dict, so escape here for defense-in-depth —
+        # symmetric with the TXT writer.
         param_parts = []
         for key, value in params.items():
-            param_parts.append(f'{key}="{value}"')
+            param_parts.append(f'{key}="{_escape_dns_char_string(value)}"')
         value_str = " ".join(param_parts) if param_parts else ""
 
         return {
@@ -327,7 +341,9 @@ class CloudflareBackend(DNSBackend):
                 f"Failed to write {record_type} record (HTTP {response.status_code}): {errors}"
             )
 
-        record_id = data["result"]["id"]
+        # A success response should always carry result.id, but guard against a
+        # null/absent result rather than raising KeyError on a surprising body.
+        record_id = (data.get("result") or {}).get("id")
         logger.info("Record written", fqdn=fqdn, type=record_type, record_id=record_id)
         return fqdn
 
@@ -402,7 +418,9 @@ class CloudflareBackend(DNSBackend):
         # unquoted would collapse all values into a SINGLE character-string on
         # the wire, and the discoverer iterates character-strings one by one
         # (see core/discoverer.py) — merging them corrupts capability parsing
-        # and any value containing a space. Mirrors the Route 53 backend.
+        # and any value containing a space. Like the Route 53 backend's
+        # per-value quoting, but additionally escaping embedded quotes and
+        # backslashes (which Route 53's writer does not).
         content = " ".join(_quote_txt_value(v) for v in values)
 
         request_data = {
