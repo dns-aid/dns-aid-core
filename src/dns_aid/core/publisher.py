@@ -350,6 +350,14 @@ async def unpublish(
 
     Returns:
         True if records were deleted
+
+    Raises:
+        Exception: Propagates backend errors from the pre-delete existence
+            probes (``get_record``). This is deliberate: a swallowed probe
+            error would look like "record absent" and disarm the masked-failure
+            guard below, so we fail closed rather than risk reporting success
+            while a still-live agent remains in DNS. Callers (MCP server, CLI)
+            catch this and surface it as an unpublish failure.
     """
     # Normalize protocol
     if isinstance(protocol, str):

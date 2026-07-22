@@ -443,19 +443,24 @@ class TestRoute53BackendGetRecord:
         """A real API error must propagate, NOT be masked as 'record absent'.
 
         Route 53 signals a missing record with an empty result set, never an
-        exception. Swallowing an error (auth/throttling/network — here a stand-in
-        RuntimeError) to None makes a transient failure indistinguishable from
-        absence, which lets callers such as publisher._unpublish disarm their
-        masked-failure guard and de-index a still-live agent. Guard the raising
-        contract so a future refactor can't silently re-introduce the swallow.
+        exception. Swallowing a genuine failure (auth/throttling/network) to
+        None makes a transient error indistinguishable from absence, which lets
+        callers such as publisher._unpublish disarm their masked-failure guard
+        and de-index a still-live agent. Guard the raising contract so a future
+        refactor can't silently re-introduce the swallow.
         """
+        from botocore.exceptions import ClientError
+
         backend = Route53Backend(zone_id="Z123")
 
         mock_client = MagicMock()
-        mock_client.list_resource_record_sets.side_effect = RuntimeError("Throttling")
+        mock_client.list_resource_record_sets.side_effect = ClientError(
+            {"Error": {"Code": "Throttling", "Message": "Rate exceeded"}},
+            "ListResourceRecordSets",
+        )
 
         with patch.object(backend, "_get_client", return_value=mock_client):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(ClientError):
                 await backend.get_record("example.com", "_chat._a2a._agents", "SVCB")
 
 

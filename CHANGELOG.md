@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `get_record` before deleting), and could let an unpublish report success while
   the agent's records are still live in DNS. Now only the real not-found signal
   (an empty result set for Route 53, a `404` for NS1) returns `None`; every other
-  error propagates. Aligns both backends with the `CloudflareBackend.get_record`
-  contract.
+  error propagates — the same "only the real not-found signal returns None"
+  contract used by `CloudflareBackend.get_record`.
 
 ## [0.26.7] - 2026-07-08
 
