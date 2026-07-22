@@ -10,8 +10,8 @@ Supports zone ID or automatic zone lookup by domain name.
 
 from __future__ import annotations
 
+import asyncio
 import os
-import shlex
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -25,6 +25,14 @@ logger = structlog.get_logger(__name__)
 # Cloudflare API error code returned when an identical record already exists.
 # Used to make create-then-update idempotent under concurrent publishes.
 _CF_ERR_IDENTICAL_RECORD = 81058
+
+# Cloudflare rate-limiting: the documented cap is 1,200 requests per 5-minute
+# window. All API traffic routes through ``_request`` so a 429 is retried
+# uniformly — honouring ``Retry-After`` when present, otherwise backing off
+# exponentially from ``_CF_RETRY_BASE_DELAY`` up to ``_CF_MAX_RETRY_DELAY``.
+_CF_MAX_RETRIES = 3
+_CF_RETRY_BASE_DELAY = 1.0
+_CF_MAX_RETRY_DELAY = 30.0
 
 
 def _escape_dns_char_string(value: str) -> str:
@@ -49,21 +57,79 @@ def _quote_txt_value(value: str) -> str:
 def _parse_txt_content(content: str) -> list[str]:
     """Parse a Cloudflare TXT ``content`` string into its character-strings.
 
-    Cloudflare returns TXT rdata in DNS presentation format: one or more
-    double-quoted (or bare) character-strings separated by whitespace, e.g.
-    ``"cap=..." "version=1.0.0"``. ``shlex`` splits on whitespace while
-    honouring quotes and backslash escapes, which matches DNS master-file
-    semantics and inverts :func:`_quote_txt_value`.
+    Cloudflare returns TXT rdata in DNS presentation format (RFC 1035 §5.1):
+    one or more double-quoted (or bare) ``<character-string>`` tokens separated
+    by whitespace, e.g. ``"cap=..." "version=1.0.0"``. This is a DNS master-file
+    tokenizer, not a shell one — ``shlex`` was wrong for two live cases: a bare
+    apostrophe (``it's fine``) raised ``ValueError`` (dumping the whole blob back
+    as a single value), and Cloudflare returns non-ASCII octets as ``\\DDD``
+    decimal escapes that ``shlex`` left mangled. This tokenizer:
+
+    * splits on unquoted whitespace while honouring double-quoted tokens,
+    * decodes ``\\DDD`` (three decimal digits) to the corresponding octet and
+      ``\\X`` to the literal ``X`` (inverting :func:`_escape_dns_char_string`),
+    * accumulates decoded octets per token and UTF-8 decodes them together, so a
+      multi-byte character split across several ``\\DDD`` escapes round-trips,
+    * never raises — an unterminated quote simply ends the final token.
+
+    Matches the read-back behaviour of the Akamai backend and drops the shell
+    dependency entirely.
     """
     if not content:
         return []
-    try:
-        return shlex.split(content)
-    except ValueError:
-        # Unbalanced quotes (shouldn't happen from Cloudflare) — fall back to
-        # returning the raw content as a single value rather than raising.
-        logger.debug("Unparseable TXT content; returning raw", content=content)
-        return [content]
+
+    values: list[str] = []
+    buf = bytearray()
+    in_quotes = False
+    have_token = False  # a token is "open" (covers a quoted empty string)
+    i = 0
+    n = len(content)
+
+    def flush() -> None:
+        nonlocal have_token
+        if have_token:
+            values.append(buf.decode("utf-8", errors="replace"))
+            buf.clear()
+            have_token = False
+
+    while i < n:
+        c = content[i]
+
+        if c == "\\" and i + 1 < n:
+            nxt = content[i + 1]
+            # \DDD decimal octet escape: exactly three ASCII digits, value
+            # 0–255. Use isascii()+isdecimal() rather than isdigit() — the
+            # latter is True for characters int() can't parse (superscripts) and
+            # for non-ASCII/full-width digits, which would either crash or
+            # silently misdecode. RFC 1035 \DDD is strictly ASCII decimal.
+            esc = content[i + 1 : i + 4]
+            if len(esc) == 3 and esc.isascii() and esc.isdecimal() and int(esc) <= 255:
+                buf.append(int(esc))
+                i += 4
+            else:
+                # \X — emit the escaped character literally.
+                buf.extend(nxt.encode("utf-8"))
+                i += 2
+            have_token = True
+            continue
+
+        if c == '"':
+            in_quotes = not in_quotes
+            have_token = True
+            i += 1
+            continue
+
+        if c.isspace() and not in_quotes:
+            flush()
+            i += 1
+            continue
+
+        buf.extend(c.encode("utf-8"))
+        have_token = True
+        i += 1
+
+    flush()
+    return values
 
 
 class CloudflareBackend(DNSBackend):
@@ -130,8 +196,6 @@ class CloudflareBackend(DNSBackend):
         uses multiple asyncio.run() calls). This is necessary because httpx
         clients are bound to the event loop they were created in.
         """
-        import asyncio
-
         current_loop_id = id(asyncio.get_running_loop())
 
         # Check if we need to recreate the client due to loop change
@@ -161,6 +225,95 @@ class CloudflareBackend(DNSBackend):
             self._client_loop_id = current_loop_id
         return self._client
 
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> float | None:
+        """Return the ``Retry-After`` delay in seconds, if the header is usable.
+
+        Cloudflare sends ``Retry-After`` as an integer number of seconds. A
+        missing or unparseable header returns ``None`` so the caller falls back
+        to exponential backoff.
+        """
+        raw = response.headers.get("Retry-After")
+        if raw is None:
+            return None
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _is_rate_limited(response: httpx.Response) -> bool:
+        """Report whether a response signals Cloudflare rate limiting.
+
+        A genuine throttle is HTTP 429. As defence-in-depth we also treat an
+        HTTP 200 body carrying a ``success: false`` rate-limit error as
+        throttled, in case a limit ever surfaces as something other than a clean
+        429. Non-200 responses are left untouched — parsing an error body here
+        would undermine the ``get_record`` contract that only an empty result
+        set means "not found" while auth/network/server errors propagate.
+        """
+        if response.status_code == 429:
+            return True
+        if response.status_code != 200:
+            return False
+        try:
+            data = response.json()
+        except Exception:
+            return False
+        if not isinstance(data, dict) or data.get("success", True):
+            return False
+        errors = data.get("errors") or []
+        return any(
+            "rate limit" in str(e.get("message", "")).lower() for e in errors if isinstance(e, dict)
+        )
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Issue an HTTP request, transparently retrying on rate limiting.
+
+        All Cloudflare API traffic (reads, writes, deletes) routes through here
+        so a 429 is handled the same way everywhere. On a rate-limited response
+        we honour ``Retry-After`` when present, otherwise back off exponentially
+        — both bounded by :data:`_CF_MAX_RETRY_DELAY` so a hostile or
+        misconfigured ``Retry-After`` cannot stall the publish path — for up to
+        :data:`_CF_MAX_RETRIES` retries. If the limit still has not cleared we
+        raise, rather than hand back a throttled body: otherwise a persistent
+        200 ``success: false`` rate-limit response would parse to an empty
+        result and be misread by ``get_record``/``list_*`` as "not found" or an
+        empty zone. Other status interpretation (``raise_for_status``, the 81058
+        idempotency check, ``success`` parsing) stays at the call sites.
+        """
+        client = await self._get_client()
+        send = getattr(client, method.lower())
+        delay = _CF_RETRY_BASE_DELAY
+
+        response = await send(path, **kwargs)
+        for attempt in range(_CF_MAX_RETRIES):
+            if not self._is_rate_limited(response):
+                return response
+            header_wait = self._retry_after_seconds(response)
+            if header_wait is None:
+                wait = delay
+                delay = min(delay * 2, _CF_MAX_RETRY_DELAY)
+            else:
+                wait = min(header_wait, _CF_MAX_RETRY_DELAY)
+            logger.warning(
+                "Cloudflare rate limited; backing off before retry",
+                method=method,
+                path=path,
+                attempt=attempt + 1,
+                max_retries=_CF_MAX_RETRIES,
+                wait_seconds=wait,
+            )
+            await asyncio.sleep(wait)
+            response = await send(path, **kwargs)
+
+        if self._is_rate_limited(response):
+            raise ValueError(
+                f"Cloudflare rate limit not cleared after {_CF_MAX_RETRIES} retries "
+                f"({method} {path}); giving up rather than masking as an empty result"
+            )
+        return response
+
     async def _get_zone_id(self, zone: str) -> str:
         """
         Get Cloudflare zone ID for a domain.
@@ -183,10 +336,8 @@ class CloudflareBackend(DNSBackend):
         if domain in self._zone_cache:
             return self._zone_cache[domain]
 
-        client = await self._get_client()
-
         # List zones and find matching one
-        response = await client.get("/zones", params={"name": domain})
+        response = await self._request("GET", "/zones", params={"name": domain})
         response.raise_for_status()
         data = response.json()
 
@@ -220,9 +371,8 @@ class CloudflareBackend(DNSBackend):
         Returns:
             Record ID if found, None otherwise
         """
-        client = await self._get_client()
-
-        response = await client.get(
+        response = await self._request(
+            "GET",
             f"/zones/{zone_id}/dns_records",
             params={"name": fqdn, "type": record_type},
         )
@@ -289,18 +439,29 @@ class CloudflareBackend(DNSBackend):
         * **Delete race** — we found an existing id and PUT, but a racer deleted
           it first, so the PUT 404s. We recreate the record with a POST.
 
+        The 81058 idempotency shortcut applies **only to a POST**. Cloudflare
+        permits multiple records at one name and ``_get_record_id`` returns the
+        first, so a PUT that hits 81058 means the update collided with a
+        *different* record at the same name — the record we targeted was *not*
+        changed. Treating that as success would tell the caller we wrote when we
+        did not, so on a PUT 81058 falls through and raises.
+
         Any other non-success response raises ``ValueError`` carrying the
         Cloudflare error payload (more actionable than a bare ``HTTPStatusError``
         and uniform whether the failure arrives as a 4xx/5xx or as a 200 with
         ``success: false``).
         """
-        client = await self._get_client()
+        # Track whether the response we ultimately interpret came from a POST,
+        # since 81058 is only idempotent success for a create (see docstring).
+        wrote_via_post: bool
 
         if existing_id:
-            response = await client.put(
+            response = await self._request(
+                "PUT",
                 f"/zones/{zone_id}/dns_records/{existing_id}",
                 json=request_data,
             )
+            wrote_via_post = False
             # Delete race: the record vanished between lookup and update.
             if response.status_code == 404:
                 logger.info(
@@ -308,15 +469,19 @@ class CloudflareBackend(DNSBackend):
                     fqdn=fqdn,
                     type=record_type,
                 )
-                response = await client.post(
+                response = await self._request(
+                    "POST",
                     f"/zones/{zone_id}/dns_records",
                     json=request_data,
                 )
+                wrote_via_post = True
         else:
-            response = await client.post(
+            response = await self._request(
+                "POST",
                 f"/zones/{zone_id}/dns_records",
                 json=request_data,
             )
+            wrote_via_post = True
 
         try:
             data = response.json()
@@ -324,9 +489,13 @@ class CloudflareBackend(DNSBackend):
             # Non-JSON body (e.g. an edge 5xx returning HTML).
             data = {}
 
-        # Create race: an identical record already exists — idempotent success.
-        if response.status_code == 400 and any(
-            e.get("code") == _CF_ERR_IDENTICAL_RECORD for e in (data.get("errors") or [])
+        # Create race: an identical record already exists — idempotent success,
+        # but only for a POST. A PUT hitting 81058 collided with a different
+        # record at the same name and did not apply, so let it raise below.
+        if (
+            wrote_via_post
+            and response.status_code == 400
+            and any(e.get("code") == _CF_ERR_IDENTICAL_RECORD for e in (data.get("errors") or []))
         ):
             logger.info(
                 "Record already exists; treating as idempotent success",
@@ -444,7 +613,6 @@ class CloudflareBackend(DNSBackend):
     ) -> bool:
         """Delete a DNS record from Cloudflare."""
         zone_id = await self._get_zone_id(zone)
-        client = await self._get_client()
 
         # Build FQDN
         fqdn = f"{name}.{zone}".rstrip(".")
@@ -463,7 +631,7 @@ class CloudflareBackend(DNSBackend):
             return False
 
         # Delete the record
-        response = await client.delete(f"/zones/{zone_id}/dns_records/{record_id}")
+        response = await self._request("DELETE", f"/zones/{zone_id}/dns_records/{record_id}")
         response.raise_for_status()
         data = response.json()
 
@@ -483,7 +651,6 @@ class CloudflareBackend(DNSBackend):
     ) -> AsyncIterator[dict]:
         """List DNS records in Cloudflare zone."""
         zone_id = await self._get_zone_id(zone)
-        client = await self._get_client()
 
         logger.debug(
             "Listing records",
@@ -501,7 +668,7 @@ class CloudflareBackend(DNSBackend):
         page = 1
         while True:
             params["page"] = page
-            response = await client.get(f"/zones/{zone_id}/dns_records", params=params)
+            response = await self._request("GET", f"/zones/{zone_id}/dns_records", params=params)
             response.raise_for_status()
             data = response.json()
 
@@ -580,12 +747,12 @@ class CloudflareBackend(DNSBackend):
         More efficient than list_records for single record lookup.
         """
         zone_id = await self._get_zone_id(zone)
-        client = await self._get_client()
 
         # Build FQDN
         fqdn = f"{name}.{zone}".rstrip(".")
 
-        response = await client.get(
+        response = await self._request(
+            "GET",
             f"/zones/{zone_id}/dns_records",
             params={"name": fqdn, "type": record_type},
         )
@@ -630,12 +797,11 @@ class CloudflareBackend(DNSBackend):
         Returns:
             List of zone info dicts with id, name, status
         """
-        client = await self._get_client()
         zones = []
 
         page = 1
         while True:
-            response = await client.get("/zones", params={"page": page, "per_page": 50})
+            response = await self._request("GET", "/zones", params={"page": page, "per_page": 50})
             response.raise_for_status()
             data = response.json()
 
