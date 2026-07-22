@@ -984,3 +984,37 @@ class TestCloudflareGetRecord:
             record = await backend.get_record("example.com", "_missing._agents", "SVCB")
 
         assert record is None
+
+    @pytest.mark.asyncio
+    async def test_get_record_propagates_server_error(self):
+        """get_record must NOT mask errors as 'not found'.
+
+        Only an empty result set means the record is absent. A 5xx (or any
+        other non-success response) has to raise, otherwise a transient
+        auth/network/server error would look identical to a missing record and
+        let reconciliation silently recreate or overwrite an existing record.
+        This is an intentional divergence from the route53/ns1 backends, which
+        still swallow to ``None``; guard it so a future "align the backends"
+        refactor can't quietly revert it.
+        """
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                "500 Internal Server Error",
+                request=httpx.Request("GET", "https://api.cloudflare.com"),
+                response=httpx.Response(500),
+            )
+        )
+        # json() must never be consulted once raise_for_status has fired.
+        mock_response.json = MagicMock(
+            side_effect=AssertionError("json() should not be called on an error response")
+        )
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with pytest.raises(httpx.HTTPStatusError):
+                await backend.get_record("example.com", "_chat._a2a._agents", "SVCB")
