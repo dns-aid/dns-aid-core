@@ -417,6 +417,96 @@ class TestCloudflareBackendCreateSvcb:
         mock_client.put.assert_called_once()
         mock_client.post.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_put_81058_raises_not_silent_success(self):
+        """A PUT hitting 81058 must RAISE, not report success.
+
+        Cloudflare allows multiple records at one name and ``_get_record_id``
+        returns the first. If our PUT would make the targeted record identical
+        to a *different* record at the same name, Cloudflare answers 400/81058
+        and the update does NOT apply — the record still resolves to its old
+        value. Treating that as idempotent success (as a POST race legitimately
+        is) would tell the caller we wrote when we did not, so it must raise.
+        """
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        # Pre-check finds an existing record, so we PUT.
+        mock_get_response = MagicMock()
+        mock_get_response.json.return_value = {"success": True, "result": [{"id": "alpha1"}]}
+        mock_get_response.raise_for_status = MagicMock()
+
+        # The PUT collides with a different record at the same name -> 81058.
+        mock_put_response = MagicMock()
+        mock_put_response.status_code = 400
+        mock_put_response.json.return_value = {
+            "success": False,
+            "errors": [{"code": 81058, "message": "An identical record already exists."}],
+        }
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_get_response)
+        mock_client.put = AsyncMock(return_value=mock_put_response)
+        mock_client.post = AsyncMock()
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with pytest.raises(ValueError, match="81058"):
+                await backend.create_svcb_record(
+                    zone="example.com",
+                    name="_chat._a2a._agents",
+                    priority=1,
+                    target="chat.example.com",
+                    params={"alpn": "a2a"},
+                )
+
+        # We must NOT have fallen back to a POST on a 400 (only a 404 recreates).
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fallback_post_after_put_404_still_idempotent_on_81058(self):
+        """Delete-race fallback POST that itself loses a create race converges.
+
+        A PUT 404s (record deleted), we fall back to POST, and that POST races a
+        concurrent publisher into 81058. Because the write we interpret is a
+        POST, 81058 is still idempotent success — the record exists as intended.
+        """
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        mock_get_response = MagicMock()
+        mock_get_response.json.return_value = {"success": True, "result": [{"id": "gone123"}]}
+        mock_get_response.raise_for_status = MagicMock()
+
+        mock_put_response = MagicMock()
+        mock_put_response.status_code = 404
+        mock_put_response.json.return_value = {
+            "success": False,
+            "errors": [{"code": 81044, "message": "record does not exist"}],
+        }
+
+        mock_post_response = MagicMock()
+        mock_post_response.status_code = 400
+        mock_post_response.json.return_value = {
+            "success": False,
+            "errors": [{"code": 81058, "message": "An identical record already exists."}],
+        }
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_get_response)
+        mock_client.put = AsyncMock(return_value=mock_put_response)
+        mock_client.post = AsyncMock(return_value=mock_post_response)
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            result = await backend.create_svcb_record(
+                zone="example.com",
+                name="_chat._a2a._agents",
+                priority=1,
+                target="chat.example.com",
+                params={"alpn": "a2a"},
+            )
+
+        assert result == "_chat._a2a._agents.example.com"
+        mock_client.put.assert_called_once()
+        mock_client.post.assert_called_once()
+
 
 class TestCloudflareBackendCreateTxt:
     """Tests for TXT record creation."""
@@ -1065,10 +1155,58 @@ class TestCloudflareTxtCharacterStringHelpers:
     def test_parse_single_bare_value(self):
         assert _parse_txt_content("capabilities=chat") == ["capabilities=chat"]
 
-    def test_parse_unbalanced_quotes_falls_back_to_raw(self):
-        # shlex raises ValueError on an unbalanced quote; we return the raw
-        # content rather than raising (shouldn't happen from Cloudflare).
-        assert _parse_txt_content('"unterminated') == ['"unterminated']
+    def test_parse_unterminated_quote_recovers_gracefully(self):
+        # The DNS tokenizer never raises on malformed input (shouldn't happen
+        # from Cloudflare). An unterminated quote simply ends the final token,
+        # recovering the content instead of dumping the raw blob back.
+        assert _parse_txt_content('"unterminated') == ["unterminated"]
+
+    def test_parse_bare_apostrophe(self):
+        # Regression: shlex raised ValueError on a bare apostrophe and the
+        # fallback returned the whole blob as one value. The DNS tokenizer
+        # splits it into character-strings normally.
+        assert _parse_txt_content("it's fine") == ["it's", "fine"]
+
+    def test_parse_decimal_octet_escapes_utf8(self):
+        # Cloudflare returns non-ASCII as \DDD decimal octet escapes; a
+        # multi-byte character split across escapes must UTF-8 decode back.
+        # "café" -> é is U+00E9 = UTF-8 0xC3 0xA9 = \195\169.
+        assert _parse_txt_content('"caf\\195\\169"') == ["café"]
+
+    def test_parse_single_char_escape(self):
+        # \X (non-digit) emits the literal X, inverting _escape_dns_char_string.
+        assert _parse_txt_content(r'"a\"b\\c"') == ['a"b\\c']
+
+    def test_roundtrip_unicode_value(self):
+        # Escaping does not touch non-ASCII (it stays literal in content), but a
+        # value survives the round-trip intact regardless.
+        values = ["description=café ☕", "version=1.0.0"]
+        content = " ".join(_quote_txt_value(v) for v in values)
+        assert _parse_txt_content(content) == values
+
+    def test_parse_out_of_range_octet_not_treated_as_escape(self):
+        # \999 exceeds a single octet (0–255), so it is not a valid \DDD escape.
+        # The backslash-digit is treated as a literal \X escape (emitting "9"),
+        # yielding "999" rather than raising or corrupting the value.
+        assert _parse_txt_content(r"\999") == ["999"]
+
+    def test_parse_superscript_digits_do_not_crash(self):
+        # Regression: '²'.isdigit() is True but int('²') raises. The tokenizer
+        # must NOT treat \²²² as a \DDD escape (isascii()+isdecimal() guard),
+        # and must honour its "never raises" contract.
+        assert _parse_txt_content("\\\u00b2\u00b2\u00b2") == ["\u00b2\u00b2\u00b2"]
+
+    def test_parse_quoted_empty_string(self):
+        # A quoted empty string is one (empty) character-string, not zero.
+        assert _parse_txt_content('""') == [""]
+
+    def test_roundtrip_value_with_literal_backslash_digits(self):
+        # The interesting round-trip: a value containing a literal backslash
+        # followed by digits (which the parser must not misread as a \DDD octet
+        # after _quote_txt_value doubles the backslash).
+        values = ["path=x\\123y", "version=1.0.0"]
+        content = " ".join(_quote_txt_value(v) for v in values)
+        assert _parse_txt_content(content) == values
 
     @pytest.mark.asyncio
     async def test_get_record_parses_multistring_txt_back_to_list(self):
@@ -1098,3 +1236,208 @@ class TestCloudflareTxtCharacterStringHelpers:
 
         assert record is not None
         assert record["values"] == ["capabilities=chat,code", "description=A helpful agent"]
+
+
+class TestCloudflareRateLimitHandling:
+    """The shared _request helper retries uniformly on Cloudflare 429s."""
+
+    def _resp(self, status_code, *, headers=None, json_body=None):
+        r = MagicMock()
+        r.status_code = status_code
+        r.headers = headers or {}
+        r.json.return_value = json_body if json_body is not None else {}
+        r.raise_for_status = MagicMock()
+        return r
+
+    @pytest.mark.asyncio
+    async def test_request_retries_on_429_then_succeeds(self):
+        """A 429 followed by a 200 is retried transparently; caller sees 200."""
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        limited = self._resp(429, headers={"Retry-After": "0"})
+        ok = self._resp(200, json_body={"success": True, "result": []})
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[limited, ok])
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(secs):
+            sleeps.append(secs)
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with patch("dns_aid.backends.cloudflare.asyncio.sleep", fake_sleep):
+                response = await backend._request("GET", "/zones")
+
+        assert response is ok
+        assert mock_client.get.await_count == 2
+        # Honoured the Retry-After header (0s) rather than the backoff default.
+        assert sleeps == [0.0]
+
+    @pytest.mark.asyncio
+    async def test_request_honours_retry_after_header(self):
+        """Retry-After takes precedence over exponential backoff."""
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        limited = self._resp(429, headers={"Retry-After": "7"})
+        ok = self._resp(200, json_body={"success": True})
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[limited, ok])
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(secs):
+            sleeps.append(secs)
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with patch("dns_aid.backends.cloudflare.asyncio.sleep", fake_sleep):
+                await backend._request("GET", "/zones")
+
+        assert sleeps == [7.0]
+
+    @pytest.mark.asyncio
+    async def test_request_backs_off_when_no_retry_after(self):
+        """Without Retry-After, sleep uses the exponential backoff schedule."""
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        r1 = self._resp(429)
+        r2 = self._resp(429)
+        ok = self._resp(200, json_body={"success": True})
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[r1, r2, ok])
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(secs):
+            sleeps.append(secs)
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with patch("dns_aid.backends.cloudflare.asyncio.sleep", fake_sleep):
+                await backend._request("GET", "/zones")
+
+        # Base delay then doubled.
+        assert sleeps == [1.0, 2.0]
+
+    @pytest.mark.asyncio
+    async def test_request_raises_when_rate_limit_never_clears(self):
+        """A persistent 429 raises after _CF_MAX_RETRIES rather than returning it.
+
+        Returning a throttled body would let a persistent 200 success:false
+        rate-limit response be misread downstream as "not found"/empty.
+        """
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        # Distinct objects per send so we prove the loop exhausts, not that it
+        # trivially returns the same mock.
+        responses = [self._resp(429) for _ in range(4)]
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=responses)
+
+        async def fake_sleep(secs):
+            return None
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with patch("dns_aid.backends.cloudflare.asyncio.sleep", fake_sleep):
+                with pytest.raises(ValueError, match="rate limit not cleared"):
+                    await backend._request("GET", "/zones")
+
+        # Initial attempt + _CF_MAX_RETRIES retries.
+        assert mock_client.get.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_request_caps_absurd_retry_after(self):
+        """A huge Retry-After is clamped to _CF_MAX_RETRY_DELAY, not obeyed."""
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        limited = self._resp(429, headers={"Retry-After": "86400"})
+        ok = self._resp(200, json_body={"success": True})
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[limited, ok])
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(secs):
+            sleeps.append(secs)
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with patch("dns_aid.backends.cloudflare.asyncio.sleep", fake_sleep):
+                await backend._request("GET", "/zones")
+
+        assert sleeps == [30.0]  # _CF_MAX_RETRY_DELAY
+
+    @pytest.mark.asyncio
+    async def test_request_unparseable_retry_after_falls_back_to_backoff(self):
+        """A non-numeric Retry-After (e.g. an HTTP-date) uses exponential backoff."""
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        limited = self._resp(429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})
+        ok = self._resp(200, json_body={"success": True})
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[limited, ok])
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(secs):
+            sleeps.append(secs)
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with patch("dns_aid.backends.cloudflare.asyncio.sleep", fake_sleep):
+                await backend._request("GET", "/zones")
+
+        assert sleeps == [1.0]  # base backoff, header ignored
+
+    @pytest.mark.asyncio
+    async def test_get_record_raises_on_persistent_rate_limit_body(self):
+        """A persistent 200 success:false rate-limit body must not read as None."""
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        limited = MagicMock()
+        limited.status_code = 200
+        limited.headers = {}
+        limited.json.return_value = {
+            "success": False,
+            "errors": [{"code": 10000, "message": "Rate limit exceeded"}],
+        }
+        limited.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=limited)
+
+        async def fake_sleep(secs):
+            return None
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with patch("dns_aid.backends.cloudflare.asyncio.sleep", fake_sleep):
+                with pytest.raises(ValueError, match="rate limit not cleared"):
+                    await backend.get_record("example.com", "_chat._a2a._agents", "TXT")
+
+    @pytest.mark.asyncio
+    async def test_request_detects_rate_limit_in_200_body(self):
+        """A throttle surfacing as HTTP 200 success:false is still retried."""
+        backend = CloudflareBackend(api_token="token", zone_id="Z123")
+
+        limited = self._resp(
+            200,
+            json_body={
+                "success": False,
+                "errors": [{"code": 10000, "message": "Rate limit exceeded"}],
+            },
+        )
+        ok = self._resp(200, json_body={"success": True})
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[limited, ok])
+
+        async def fake_sleep(secs):
+            return None
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with patch("dns_aid.backends.cloudflare.asyncio.sleep", fake_sleep):
+                response = await backend._request("GET", "/zones")
+
+        assert response is ok
+        assert mock_client.get.await_count == 2

@@ -29,14 +29,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   corrupted capability parsing and any value containing a space. Read paths parse the
   presentation-format `content` back into a list. Like the Route 53 backend's
   per-value quoting, but additionally escaping embedded quotes and backslashes.
+  The read path uses a DNS master-file tokenizer (not `shlex`): it splits
+  quoted/bare `<character-string>` tokens, decodes `\DDD` decimal octet escapes
+  (how Cloudflare returns non-ASCII) back to UTF-8, and never raises on malformed
+  input — fixing a bare apostrophe dumping the whole value back as one string and
+  non-ASCII values reading back mangled.
   *Migration note:* TXT records written by the previous Cloudflare backend (unquoted,
   space-joined) now read back split on whitespace. For `key=value` tokens this is the
   correct recovery, but a single legacy value that legitimately contained spaces
   (e.g. a free-text description) will read back fragmented until it is re-published.
 - **Cloudflare record writes converge under concurrent-publish races.** A shared
   `_write_record` helper treats Cloudflare error 81058 ("identical record already
-  exists") on POST as idempotent success, and recreates via POST when a PUT 404s
-  because the record was deleted between lookup and update.
+  exists") as idempotent success **only on a POST**, and recreates via POST when a
+  PUT 404s because the record was deleted between lookup and update. An 81058 on a
+  PUT now raises: Cloudflare allows multiple records at one name, so a PUT colliding
+  with a *different* record there does not apply the update, and reporting success
+  would falsely claim the write took effect.
+- **Cloudflare API traffic honours rate limits.** All requests route through a shared
+  `_request` helper that retries on HTTP 429 (and on a 200 body carrying a rate-limit
+  error), honouring the `Retry-After` header when present and otherwise backing off
+  exponentially, so reads, writes, and deletes all handle throttling uniformly.
 - **`CloudflareBackend.get_record` no longer masks auth/network/server errors as
   "record not found."** Only an empty result set means not-found; other errors
   propagate so reconciliation cannot silently recreate or overwrite records.
