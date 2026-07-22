@@ -274,7 +274,9 @@ def publish_agent_to_dns(
         use_cases: List of use cases for this agent (e.g., ["Generate invoices", "Process refunds"]).
         category: Agent category (e.g., "network", "security", "finance", "chat").
         ttl: DNS record TTL in seconds (default: 3600).
-        backend: DNS backend to use - "route53" for AWS Route53 or "mock" for testing.
+        backend: DNS backend to use - "route53", "cloudflare", "ns1", "infoblox",
+            "nios", "akamai-edgedns", "ddns", or "mock" (testing). Requires the
+            matching API credentials configured in the environment.
         update_index: Whether to update the domain's agent index record (default: True).
         cap_uri: URI to capability document (DNS-AID draft-compliant, e.g.,
             "https://mcp.example.com/.well-known/agent-cap.json"). When set, the

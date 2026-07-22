@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-22
+
 ### Added
 
 - **Akamai Edge DNS backend** (`akamai-edgedns`). New DNS backend using the
@@ -42,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     authoritative when present; a short page terminates otherwise.
   - URL path segments are percent-encoded (defense-in-depth for direct
     callers), and retry jitter uses `SystemRandom`.
+
+### Security
+
+- **Bumped `mcp` to `>=1.28.1`** — `mcp 1.26.0` carried CVE-2026-52870 and
+  CVE-2026-52869 (both fixed in 1.27.2) and CVE-2026-59950 (fixed in 1.28.1),
+  which had kept the Dependency Audit gate red.
 
 ## [0.26.7] - 2026-07-08
 
