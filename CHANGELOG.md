@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The discoverer iterates character-strings individually, so the previous join
   corrupted capability parsing and any value containing a space. Read paths parse the
   presentation-format `content` back into a list. Mirrors the Route 53 backend.
+  *Migration note:* TXT records written by the previous Cloudflare backend (unquoted,
+  space-joined) now read back split on whitespace. For `key=value` tokens this is the
+  correct recovery, but a single legacy value that legitimately contained spaces
+  (e.g. a free-text description) will read back fragmented until it is re-published.
 - **Cloudflare record writes converge under concurrent-publish races.** A shared
   `_write_record` helper treats Cloudflare error 81058 ("identical record already
   exists") on POST as idempotent success, and recreates via POST when a PUT 404s
