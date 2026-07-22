@@ -428,8 +428,9 @@ class NS1Backend(DNSBackend):
         # Every other failure (5xx, auth, network, a malformed body) MUST propagate:
         # swallowing it to None makes a transient error indistinguishable from
         # "record absent", which lets callers such as publisher._unpublish disarm
-        # their masked-failure guard and de-index a still-live agent. Mirrors the
-        # CloudflareBackend.get_record contract.
+        # their masked-failure guard and de-index a still-live agent. Applies the
+        # "only the real not-found signal returns None" contract that
+        # CloudflareBackend.get_record also uses.
         response = await client.get(f"/zones/{domain}/{fqdn}/{record_type}")
         if response.status_code == 404:
             return None

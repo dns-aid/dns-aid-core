@@ -438,6 +438,48 @@ class TestUnpublish:
         assert result is False
 
     @pytest.mark.asyncio
+    async def test_unpublish_fails_closed_when_get_record_raises(self, mock_backend: MockBackend):
+        """A backend error during the pre-delete existence probe must propagate.
+
+        This is the regression the route53/ns1 get_record fix guards: if
+        get_record swallowed a transient error to None, primary_*_existed would
+        be False, the masked-failure guard would be disarmed, and unpublish
+        could report success while the records are still live. With get_record
+        raising, unpublish must fail closed — propagate, and not proceed to
+        delete.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        # Publish first so the zone_exists check passes.
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="a2a",
+            endpoint="chat.example.com",
+            backend=mock_backend,
+        )
+
+        with (
+            patch.object(
+                mock_backend,
+                "get_record",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("transient backend error"),
+            ),
+            patch.object(mock_backend, "delete_record", new_callable=AsyncMock) as mock_delete,
+        ):
+            with pytest.raises(RuntimeError):
+                await unpublish(
+                    name="chat",
+                    domain="example.com",
+                    protocol="a2a",
+                    backend=mock_backend,
+                )
+
+        # Fail closed: the probe error aborted the call before any deletion.
+        mock_delete.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_unpublish_protocol_string(self, mock_backend: MockBackend):
         """Test unpublish accepts a string protocol and normalizes it."""
         await publish(

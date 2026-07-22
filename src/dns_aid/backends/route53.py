@@ -441,7 +441,8 @@ class Route53Backend(DNSBackend):
         # and those MUST propagate. Swallowing them to None makes a transient error
         # indistinguishable from "record absent", which lets callers such as
         # publisher._unpublish disarm their masked-failure guard and de-index a
-        # still-live agent. Mirrors the CloudflareBackend.get_record contract.
+        # still-live agent. Applies the "only the real not-found signal returns
+        # None" contract that CloudflareBackend.get_record also uses.
         response = client.list_resource_record_sets(
             HostedZoneId=zone_id,
             StartRecordName=fqdn,
