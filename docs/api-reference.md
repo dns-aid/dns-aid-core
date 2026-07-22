@@ -1141,7 +1141,7 @@ dns-aid call --domain example.com --name network-specialist get_subnets \
 
 | Variable | Description |
 |----------|-------------|
-| `DNS_AID_BACKEND` | Default backend: "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", or "mock" |
+| `DNS_AID_BACKEND` | Default backend: "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", or "mock" |
 | `DNS_AID_LOG_LEVEL` | Logging level: DEBUG, INFO, WARNING, ERROR |
 
 **AWS Route 53:**
@@ -1183,6 +1183,19 @@ Route 53 uses boto3's credential chain. No env vars are required if `~/.aws/cred
 | `DDNS_KEY_SECRET` | TSIG key secret, base64 (required) |
 | `DDNS_KEY_ALGORITHM` | TSIG algorithm (default: hmac-sha256) |
 | `DDNS_PORT` | DNS server port (default: 53) |
+
+**Akamai Edge DNS:**
+
+Akamai supports two credential sources. All four `AKAMAI_*` vars take precedence over `~/.edgerc` when set.
+
+| Variable | Description |
+|----------|-------------|
+| `AKAMAI_HOST` | EdgeGrid API hostname (e.g. `akab-xxxx.luna.akamaiapis.net`) |
+| `AKAMAI_CLIENT_TOKEN` | EdgeGrid client token |
+| `AKAMAI_CLIENT_SECRET` | EdgeGrid client secret |
+| `AKAMAI_ACCESS_TOKEN` | EdgeGrid access token |
+| `AKAMAI_EDGERC` | Path to `.edgerc` credentials file (default: `~/.edgerc`) |
+| `AKAMAI_EDGERC_SECTION` | Section within `.edgerc` (default: `default`) |
 
 ---
 

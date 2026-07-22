@@ -28,7 +28,7 @@ COPY pyproject.toml README.md ./
 COPY src/ src/
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip wheel --no-cache-dir --wheel-dir /wheels ".[mcp,route53]" \
+    && pip wheel --no-cache-dir --wheel-dir /wheels ".[mcp,route53,akamai-edgedns]" \
     && pip wheel --no-cache-dir --wheel-dir /wheels .
 
 # Production image

@@ -629,10 +629,15 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+akamai-edgedns = [
+    { name = "edgegrid-python" },
+    { name = "requests" },
+]
 all = [
     { name = "boto3" },
     { name = "boto3-stubs", extra = ["route53"] },
     { name = "cryptography" },
+    { name = "edgegrid-python" },
     { name = "google-auth" },
     { name = "lxml" },
     { name = "mcp" },
@@ -714,6 +719,8 @@ requires-dist = [
     { name = "cryptography", marker = "extra == 'dev'", specifier = ">=46.0.7" },
     { name = "cyclonedx-bom", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "dnspython", specifier = ">=2.6.0" },
+    { name = "edgegrid-python", marker = "extra == 'akamai-edgedns'", specifier = ">=2.0.7" },
+    { name = "edgegrid-python", marker = "extra == 'all'", specifier = ">=2.0.7" },
     { name = "google-auth", marker = "extra == 'all'", specifier = ">=2.30.0" },
     { name = "google-auth", marker = "extra == 'cloud-dns'", specifier = ">=2.30.0" },
     { name = "httpx", specifier = ">=0.27.0" },
@@ -746,6 +753,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-multipart", marker = "extra == 'all'", specifier = ">=0.0.27" },
     { name = "python-multipart", marker = "extra == 'mcp'", specifier = ">=0.0.27" },
+    { name = "requests", marker = "extra == 'akamai-edgedns'", specifier = ">=2.33.0" },
     { name = "requests", marker = "extra == 'cloud-dns'", specifier = ">=2.33.0" },
     { name = "rich", marker = "extra == 'all'", specifier = ">=13.0.0" },
     { name = "rich", marker = "extra == 'cli'", specifier = ">=13.0.0" },
@@ -759,7 +767,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'all'", specifier = ">=0.30.0" },
     { name = "uvicorn", marker = "extra == 'mcp'", specifier = ">=0.30.0" },
 ]
-provides-extras = ["cli", "mcp", "route53", "cloud-dns", "infoblox", "cloudflare", "ns1", "nios", "ddns", "jws", "sdk", "otel", "cel", "pqc", "dev", "all"]
+provides-extras = ["cli", "mcp", "route53", "cloud-dns", "infoblox", "cloudflare", "ns1", "nios", "akamai-edgedns", "ddns", "jws", "sdk", "otel", "cel", "pqc", "dev", "all"]
 
 [[package]]
 name = "dnspython"
@@ -768,6 +776,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/8c/8b/57666417c0f90f08bcafa776861060426765fdb422eb10212086fb811d26/dnspython-2.8.0.tar.gz", hash = "sha256:181d3c6996452cb1189c4046c61599b84a5a86e099562ffde77d26984ff26d0f", size = 368251, upload-time = "2025-09-07T18:58:00.022Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ba/5a/18ad964b0086c6e62e2e7500f7edc89e3faa45033c71c1893d34eed2b2de/dnspython-2.8.0-py3-none-any.whl", hash = "sha256:01d9bbc4a2d76bf0db7c1f729812ded6d912bd318d3b1cf81d30c0f845dbf3af", size = 331094, upload-time = "2025-09-07T18:57:58.071Z" },
+]
+
+[[package]]
+name = "edgegrid-python"
+version = "2.0.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "requests-toolbelt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2f/a9/518023db7619e8fdae662a9cd48e58a56484d09fb589cd6a9c614b6df7cf/edgegrid_python-2.0.7.tar.gz", hash = "sha256:80d261ff9673384d04f8a0681d4649c709de684a942234779aa94e7f2821a14d", size = 23605, upload-time = "2026-05-19T12:04:35.649Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bf/27/374ebb3f79bbb038823233f6c3607a9bc02db7a8d4a0be76e65110dedc45/edgegrid_python-2.0.7-py3-none-any.whl", hash = "sha256:da6058a6ba2f434640a11478cb3cbb135e541a662c77a671b425ad43cd51b5dc", size = 26423, upload-time = "2026-05-19T12:04:34.147Z" },
 ]
 
 [[package]]
@@ -1982,6 +2003,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5f/a4/98b9c7c6428a668bf7e42ebb7c79d576a1c3c1e3ae2d47e674b468388871/requests-2.33.1.tar.gz", hash = "sha256:18817f8c57c6263968bc123d237e3b8b08ac046f5456bd1e307ee8f4250d3517", size = 134120, upload-time = "2026-03-30T16:09:15.531Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/8e/7540e8a2036f79a125c1d2ebadf69ed7901608859186c856fa0388ef4197/requests-2.33.1-py3-none-any.whl", hash = "sha256:4e6d1ef462f3626a1f0a0a9c42dd93c63bad33f9f1c1937509b8c5c8718ab56a", size = 64947, upload-time = "2026-03-30T16:09:13.83Z" },
+]
+
+[[package]]
+name = "requests-toolbelt"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f3/61/d7545dafb7ac2230c70d38d31cbfe4cc64f7144dc41f6e4e4b78ecd9f5bb/requests-toolbelt-1.0.0.tar.gz", hash = "sha256:7681a0a3d047012b5bdc0ee37d7f8f07ebe76ab08caeccfc3921ce23c88d5bc6", size = 206888, upload-time = "2023-05-01T04:11:33.229Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/51/d4db610ef29373b879047326cbf6fa98b6c1969d6f6dc423279de2b1be2c/requests_toolbelt-1.0.0-py2.py3-none-any.whl", hash = "sha256:cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06", size = 54481, upload-time = "2023-05-01T04:11:28.427Z" },
 ]
 
 [[package]]

@@ -155,6 +155,27 @@ BACKEND_REGISTRY: dict[str, BackendInfo] = {
             "Set NIOS_VERIFY_SSL=true if you have a valid TLS certificate",
         ],
     ),
+    "akamai-edgedns": BackendInfo(
+        name="akamai-edgedns",
+        display_name="Akamai Edge DNS",
+        required_env={},  # credentials resolved via env vars or ~/.edgerc
+        optional_env={
+            "AKAMAI_HOST": "EdgeGrid API hostname (e.g., akab-xxx.luna.akamaiapis.net)",
+            "AKAMAI_CLIENT_TOKEN": "EdgeGrid client token",  # nosec B105 — description, not a credential
+            "AKAMAI_CLIENT_SECRET": "EdgeGrid client secret",  # nosec B105 — description, not a credential
+            "AKAMAI_ACCESS_TOKEN": "EdgeGrid access token",  # nosec B105 — description, not a credential
+            "AKAMAI_EDGERC": "Path to .edgerc file (default: ~/.edgerc)",
+            "AKAMAI_EDGERC_SECTION": "Section within .edgerc (default: default)",
+        },
+        optional_dep="akamai-edgedns",
+        setup_url="https://techdocs.akamai.com/developer/docs/set-up-authentication-credentials",
+        setup_steps=[
+            "Create API credentials at control.akamai.com → Identity & Access",
+            "Grant DNS—Zone Record Management read-write permission",
+            "Set AKAMAI_HOST, AKAMAI_CLIENT_TOKEN, AKAMAI_CLIENT_SECRET, AKAMAI_ACCESS_TOKEN",
+            "Or configure ~/.edgerc",
+        ],
+    ),
     "ddns": BackendInfo(
         name="ddns",
         display_name="RFC 2136 Dynamic DNS",
@@ -202,6 +223,20 @@ def _has_boto3_credentials() -> bool:
         return False
 
 
+def _has_akamai_credentials() -> bool:
+    """Check if Akamai credentials are available via env vars or ~/.edgerc."""
+    akamai_vars = [
+        "AKAMAI_HOST",
+        "AKAMAI_CLIENT_TOKEN",
+        "AKAMAI_CLIENT_SECRET",
+        "AKAMAI_ACCESS_TOKEN",
+    ]
+    if all(os.environ.get(v) for v in akamai_vars):
+        return True
+    edgerc_path = os.environ.get("AKAMAI_EDGERC", "~/.edgerc")
+    return os.path.exists(os.path.expanduser(edgerc_path))
+
+
 def detect_backend() -> str | None:
     """Auto-detect a backend from configured environment variables.
 
@@ -223,6 +258,12 @@ def detect_backend() -> str | None:
         # Route 53: required_env is empty; check boto3 credential chain
         if name == "route53":
             if _has_boto3_credentials():
+                detected.append(name)
+            continue
+
+        # Akamai Edge DNS: required_env is empty; check AKAMAI_* vars or ~/.edgerc
+        if name == "akamai-edgedns":
+            if _has_akamai_credentials():
                 detected.append(name)
             continue
 
