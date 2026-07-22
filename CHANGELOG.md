@@ -15,6 +15,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so all DNS-AID custom SvcParams are written directly on the SVCB record without TXT demotion.
   Install: `pip install dns-aid[akamai-edgedns]`.
 
+### Fixed
+
+- **Akamai Edge DNS backend hardening** — concurrency, injection, and pagination
+  fixes surfaced by live stress-testing against a real Edge DNS zone:
+  - *Concurrent publishes no longer fail.* Akamai serializes modifications per
+    zone; overlapping writes return `409 concurrentZoneModification` ("Please
+    try your request again"), which the backend previously misread as
+    "record exists" and converted to a `PUT` that then failed with
+    `400 does not exist`. A live 12-way concurrent publish succeeded for only
+    1 of 12 agents. Writes are now serialized per zone with an `asyncio.Lock`
+    (removing self-inflicted contention) and transient zone-lock 409s are
+    retried with exponential backoff + jitter — Akamai's prescribed handling.
+    The same 12-way stress now lands 12/12 with zero errors. The POST→PUT
+    upsert convergence is scoped to single-record (`/names/…`) paths so a 409
+    on the bulk `/recordsets` endpoint can never auto-convert to a `PUT`
+    there, which would replace the entire zone's record sets.
+  - *TXT and SVCB rdata are escaped per RFC 1035.* A `"` or `\` in a TXT value
+    or SvcParam value previously broke out of the presentation-format quoting
+    and could inject extra character-strings/SvcParams into the record (or
+    corrupt the publish). Values are now backslash-escaped on write and
+    unescaped on read-back.
+  - *Pagination no longer silently truncates.* When a list response omitted
+    pagination metadata, `totalElements` defaulted to `0` and `list_records`/
+    `list_zones` stopped after the first 100 entries. The API's count is still
+    authoritative when present; a short page terminates otherwise.
+  - URL path segments are percent-encoded (defense-in-depth for direct
+    callers), and retry jitter uses `SystemRandom`.
+
 ## [0.26.7] - 2026-07-08
 
 ### Fixed

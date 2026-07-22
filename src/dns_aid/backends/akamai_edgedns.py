@@ -20,10 +20,11 @@ import asyncio
 import contextlib
 import json as json_module
 import os
+import random
 import re
 from collections.abc import AsyncIterator
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 import structlog
@@ -34,6 +35,10 @@ logger = structlog.get_logger(__name__)
 
 # Record types supported by DNS-AID via the Edge DNS API.
 _SUPPORTED_RECORD_TYPES = {"SVCB", "TXT"}
+
+# OS-entropy RNG for retry jitter (satisfies bandit B311; jitter itself is not
+# security-sensitive, but SystemRandom avoids the shared global PRNG state).
+_jitter = random.SystemRandom()
 
 
 class AkamaiEdgeDNSBackend(DNSBackend):
@@ -82,6 +87,12 @@ class AkamaiEdgeDNSBackend(DNSBackend):
     }
     _KEY_NNNNN_RE = re.compile(r"^key[1-9][0-9]{0,4}$")
 
+    # Akamai serializes modifications per zone; a concurrent write to the same
+    # zone returns 409 concurrentZoneModification. Retry the same request up to
+    # this many times with exponential backoff + jitter before surfacing it.
+    _MAX_ZONE_LOCK_RETRIES = 5
+    _ZONE_LOCK_BASE_DELAY = 0.5  # seconds (doubles each attempt, plus jitter)
+
     def __init__(
         self,
         host: str | None = None,
@@ -112,6 +123,8 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         self._client: httpx.AsyncClient | None = None
         self._client_loop_id: int | None = None
         self._zone_cache: dict[str, bool] = {}
+        # Per-zone write locks (lazily created; reset on event-loop change).
+        self._zone_write_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def name(self) -> str:
@@ -192,6 +205,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
                 await self._client.aclose()
             self._client = None
             self._client_loop_id = None
+            self._zone_write_locks.clear()  # locks are bound to the old loop
 
         if self._client is None:
             self._ensure_auth()
@@ -202,6 +216,21 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             self._client_loop_id = current_loop_id
 
         return self._client
+
+    def _zone_write_lock(self, zone: str) -> asyncio.Lock:
+        """Per-zone write lock.
+
+        Akamai serializes modifications per zone, returning 409
+        concurrentZoneModification for overlapping writes. Serialising our own
+        concurrent writes to a zone avoids self-inflicted contention (the retry in
+        ``_request`` then only has to absorb *cross-process* concurrency). Locks
+        are event-loop-bound and reset with the client on loop change.
+        """
+        lock = self._zone_write_locks.get(zone)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._zone_write_locks[zone] = lock
+        return lock
 
     def _sign_request(
         self,
@@ -251,52 +280,79 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             body = json_module.dumps(json_data).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
-        # Sign before sending — EdgeGrid HMAC covers method, URL, and body
-        signed_headers = self._sign_request(method, url, headers, body)
+        # Akamai serializes writes per zone. A fan-out of record-set writes (many
+        # agents, or the two writes per publish_agent) draws 409
+        # concurrentZoneModification — a transient optimistic-lock, not a real
+        # conflict. Retry the SAME request with exponential backoff + jitter. A
+        # genuine "already exists" 409 on POST is converged to PUT (upsert) instead.
+        attempt = 0
+        while True:
+            # Re-sign each attempt: the EdgeGrid HMAC is time-bounded.
+            signed_headers = self._sign_request(method, url, headers, body)
 
-        try:
-            response = await client.request(
-                method,
-                url,
-                content=body,
-                headers=signed_headers,
-            )
-        except httpx.HTTPError as exc:
-            raise ValueError(f"Akamai Edge DNS transport error ({method} {path}): {exc}") from exc
-
-        # 409 on POST - retry as PUT to converge
-        if response.status_code == 409 and method == "POST":
-            return await self._request("PUT", path, json_data=json_data, params=params)
-
-        # 404 on reads/deletes = not found - None; on writes = zone/resource missing - raise
-        if response.status_code == 404:
-            if method in ("POST", "PUT", "PATCH"):
-                raise ValueError(
-                    f"Akamai Edge DNS zone or resource not found ({method} {path}). "
-                    "Ensure the zone exists and credentials have write access."
+            try:
+                response = await client.request(
+                    method,
+                    url,
+                    content=body,
+                    headers=signed_headers,
                 )
-            return None
+            except httpx.HTTPError as exc:
+                raise ValueError(
+                    f"Akamai Edge DNS transport error ({method} {path}): {exc}"
+                ) from exc
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            body_text = exc.response.text[:500]
-            logger.error(
-                "Akamai Edge DNS API error",
-                method=method,
-                path=path,
-                status_code=exc.response.status_code,
-                response_body=body_text,
-            )
-            raise ValueError(
-                f"Akamai Edge DNS API error ({method} {path}): "
-                f"status={exc.response.status_code} body={body_text}"
-            ) from exc
+            if response.status_code == 409:
+                if "concurrentZoneModification" in response.text:
+                    if attempt < self._MAX_ZONE_LOCK_RETRIES:
+                        delay = self._ZONE_LOCK_BASE_DELAY * (2**attempt) + _jitter.uniform(0, 0.25)
+                        logger.debug(
+                            "Akamai zone busy; retrying after concurrentZoneModification",
+                            method=method,
+                            path=path,
+                            attempt=attempt + 1,
+                            delay_s=round(delay, 3),
+                        )
+                        await asyncio.sleep(delay)
+                        attempt += 1
+                        continue
+                    # Retries exhausted — fall through to raise_for_status below.
+                elif method == "POST" and "/names/" in path:
+                    # Genuine "already exists" 409 on a single record set — converge to
+                    # an update. Guarded to single-record paths: never auto-convert a
+                    # bulk ``/recordsets`` POST, because PUT on that path replaces the
+                    # ENTIRE zone's record sets.
+                    return await self._request("PUT", path, json_data=json_data, params=params)
 
-        if not response.content:
-            return {}
+            # 404 on reads/deletes = not found - None; on writes = zone/resource missing - raise
+            if response.status_code == 404:
+                if method in ("POST", "PUT", "PATCH"):
+                    raise ValueError(
+                        f"Akamai Edge DNS zone or resource not found ({method} {path}). "
+                        "Ensure the zone exists and credentials have write access."
+                    )
+                return None
 
-        return response.json()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                body_text = exc.response.text[:500]
+                logger.error(
+                    "Akamai Edge DNS API error",
+                    method=method,
+                    path=path,
+                    status_code=exc.response.status_code,
+                    response_body=body_text,
+                )
+                raise ValueError(
+                    f"Akamai Edge DNS API error ({method} {path}): "
+                    f"status={exc.response.status_code} body={body_text}"
+                ) from exc
+
+            if not response.content:
+                return {}
+
+            return response.json()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -334,6 +390,38 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         normalized = key.strip().lower()
         return cls._NUMERIC_KEY_TO_CUSTOM_PARAM.get(normalized, normalized)
 
+    @staticmethod
+    def _escape_char_string(value: str) -> str:
+        """Escape a value for a DNS presentation-format character-string.
+
+        Backslash and double-quote are backslash-escaped (RFC 1035 §5.1) so a
+        value containing ``"`` cannot break out of its quotes and inject extra
+        rdata elements or SvcParams into the record.
+        """
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    @staticmethod
+    def _unescape_char_string(value: str) -> str:
+        """Decode a presentation-format character-string (inverse of escape).
+
+        Single left-to-right pass so adjacent escapes decode correctly.
+        """
+        out: list[str] = []
+        i, n = 0, len(value)
+        while i < n:
+            if value[i] == "\\" and i + 1 < n:
+                out.append(value[i + 1])
+                i += 2
+            else:
+                out.append(value[i])
+                i += 1
+        return "".join(out)
+
+    @staticmethod
+    def _seg(value: str) -> str:
+        """Percent-encode a single URL path segment (no separators pass through)."""
+        return quote(value, safe="")
+
     @classmethod
     def _format_svcb_rdata(
         cls,
@@ -350,7 +438,8 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         param_parts = []
         for key, value in params.items():
             mapped_key = cls._to_numeric_key(key)
-            param_parts.append(f'{mapped_key}="{value}"')
+            safe_value = cls._escape_char_string(value)
+            param_parts.append(f'{mapped_key}="{safe_value}"')
 
         rdata = f"{priority} {target}"
         if param_parts:
@@ -392,14 +481,17 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             "rdata": [rdata],
         }
 
-        path = f"/config-dns/v2/zones/{zone_clean}/names/{fqdn}/types/SVCB"
+        path = f"/config-dns/v2/zones/{self._seg(zone_clean)}/names/{self._seg(fqdn)}/types/SVCB"
 
-        # Upsert: Edge DNS uses POST for create, PUT for update
-        existing = await self._request("GET", path)
-        if existing is not None:
-            await self._request("PUT", path, json_data=payload)
-        else:
-            await self._request("POST", path, json_data=payload)
+        # Serialise our own writes per zone (Akamai locks the zone during any
+        # modification); cross-process contention is still handled by the retry.
+        async with self._zone_write_lock(zone_clean):
+            # Upsert: Edge DNS uses POST for create, PUT for update
+            existing = await self._request("GET", path)
+            if existing is not None:
+                await self._request("PUT", path, json_data=payload)
+            else:
+                await self._request("POST", path, json_data=payload)
 
         logger.info("SVCB record created", name=fqdn)
         return fqdn
@@ -427,17 +519,18 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             "name": fqdn,
             "type": "TXT",
             "ttl": ttl,
-            "rdata": [f'"{v}"' for v in values],
+            "rdata": [f'"{self._escape_char_string(v)}"' for v in values],
         }
 
-        path = f"/config-dns/v2/zones/{zone_clean}/names/{fqdn}/types/TXT"
+        path = f"/config-dns/v2/zones/{self._seg(zone_clean)}/names/{self._seg(fqdn)}/types/TXT"
 
-        # Upsert: Edge DNS uses POST for create, PUT for update
-        existing = await self._request("GET", path)
-        if existing is not None:
-            await self._request("PUT", path, json_data=payload)
-        else:
-            await self._request("POST", path, json_data=payload)
+        async with self._zone_write_lock(zone_clean):
+            # Upsert: Edge DNS uses POST for create, PUT for update
+            existing = await self._request("GET", path)
+            if existing is not None:
+                await self._request("PUT", path, json_data=payload)
+            else:
+                await self._request("POST", path, json_data=payload)
 
         logger.info("TXT record created", name=fqdn)
         return fqdn
@@ -460,10 +553,11 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             type=rtype,
         )
 
-        path = f"/config-dns/v2/zones/{zone_clean}/names/{fqdn}/types/{rtype}"
+        path = f"/config-dns/v2/zones/{self._seg(zone_clean)}/names/{self._seg(fqdn)}/types/{self._seg(rtype)}"
         try:
             # _request returns None on 404 — record doesn't exist
-            result = await self._request("DELETE", path)
+            async with self._zone_write_lock(zone_clean):
+                result = await self._request("DELETE", path)
         except Exception as exc:
             logger.exception(
                 "Failed to delete record",
@@ -503,7 +597,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         page = 1
         while True:
             params["page"] = str(page)
-            path = f"/config-dns/v2/zones/{zone_clean}/recordsets"
+            path = f"/config-dns/v2/zones/{self._seg(zone_clean)}/recordsets"
             data = await self._request("GET", path, params=params)
 
             if data is None or not isinstance(data, dict):
@@ -528,7 +622,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
                 ttl = int(rs.get("ttl", 0))
                 values = rdata_list if rdata_list else []
                 if rtype == "TXT":
-                    values = [v.strip('"') for v in values]
+                    values = [self._unescape_char_string(v.strip('"')) for v in values]
 
                 yield {
                     "name": self._extract_name_from_fqdn(fqdn, zone_clean),
@@ -539,11 +633,16 @@ class AkamaiEdgeDNSBackend(DNSBackend):
                     "id": f"{zone_clean}/{fqdn}/{rtype}",
                 }
 
-            # Check for more pages
+            # Trust the API's authoritative count when present; otherwise stop on a
+            # short page rather than truncating at the first 100 (the old
+            # metadata-absent "totalElements defaults to 0" bug).
             metadata = data.get("metadata", {})
-            total = metadata.get("totalElements", 0)
+            total = metadata.get("totalElements")
             page_size = metadata.get("pageSize", 100)
-            if page * page_size >= total:
+            if total is not None:
+                if page * page_size >= total:
+                    break
+            elif len(recordsets) < 100:
                 break
             page += 1
 
@@ -558,7 +657,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         zone_clean = zone.rstrip(".")
         rtype = record_type.upper()
 
-        path = f"/config-dns/v2/zones/{zone_clean}/names/{fqdn}/types/{rtype}"
+        path = f"/config-dns/v2/zones/{self._seg(zone_clean)}/names/{self._seg(fqdn)}/types/{self._seg(rtype)}"
         data = await self._request("GET", path)
 
         if data is None or not isinstance(data, dict):
@@ -568,7 +667,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
         ttl = int(data.get("ttl", 0))
 
         if rtype == "TXT":
-            rdata_list = [v.strip('"') for v in rdata_list]
+            rdata_list = [self._unescape_char_string(v.strip('"')) for v in rdata_list]
 
         return {
             "name": self._extract_name_from_fqdn(fqdn, zone_clean),
@@ -592,7 +691,7 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             return self._zone_cache[zone_clean]
 
         try:
-            path = f"/config-dns/v2/zones/{zone_clean}"
+            path = f"/config-dns/v2/zones/{self._seg(zone_clean)}"
             result = await self._request("GET", path)
             exists = result is not None
             self._zone_cache[zone_clean] = exists
@@ -617,7 +716,8 @@ class AkamaiEdgeDNSBackend(DNSBackend):
             if data is None or not isinstance(data, dict):
                 break
 
-            for z in data.get("zones", []):
+            page_zones = data.get("zones", [])
+            for z in page_zones:
                 zones.append(
                     {
                         "id": z.get("zone", ""),
@@ -627,10 +727,15 @@ class AkamaiEdgeDNSBackend(DNSBackend):
                     }
                 )
 
+            # Trust the API's authoritative count when present; otherwise stop on a
+            # short page rather than truncating (metadata-absent safety).
             metadata = data.get("metadata", {})
-            total = metadata.get("totalElements", 0)
+            total = metadata.get("totalElements")
             page_size = metadata.get("pageSize", 100)
-            if page * page_size >= total:
+            if total is not None:
+                if page * page_size >= total:
+                    break
+            elif len(page_zones) < 100:
                 break
             page += 1
 
