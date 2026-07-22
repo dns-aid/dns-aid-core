@@ -54,7 +54,7 @@ cli = [
     "rich>=13.0.0",
 ]
 mcp = [
-    "mcp>=1.0.0",
+    "mcp>=1.28.1",
     "uvicorn>=0.30.0",
     # Direct floors on transitive deps pulled by `mcp` to close Dependabot alerts
     # (mcp's upstream constraints are looser than the patched versions need).
@@ -140,7 +140,7 @@ all = [
     "typer>=0.12.0",
     "rich>=13.0.0",
     # MCP
-    "mcp>=1.0.0",
+    "mcp>=1.28.1",
     "uvicorn>=0.30.0",
     # Transitive floors via mcp (Dependabot)
     "pyjwt>=2.13.0",
