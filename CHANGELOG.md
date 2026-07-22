@@ -16,6 +16,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Supports private-use SVCB keys natively (`supports_private_svcb_keys = True`),
   so all DNS-AID custom SvcParams are written directly on the SVCB record without TXT demotion.
   Install: `pip install dns-aid[akamai-edgedns]`.
+- **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
+  against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
+  private-use SvcParamKeys (`key65280`–`key65534`), so `CloudflareBackend` sets
+  `supports_private_svcb_keys = True`. DNS-AID custom params (cap, cap-sha256, bap,
+  policy, realm, … → `key65400`–`key65409`) are written directly to the SVCB record
+  instead of being demoted to TXT, matching the NS1 and NIOS backends.
+
+### Fixed
+
+- **Cloudflare TXT records now write each value as its own RFC 1035 `<character-string>`**
+  (quoted, with escaping) instead of space-joining all values into a single string.
+  The discoverer iterates character-strings individually, so the previous join
+  corrupted capability parsing and any value containing a space. Read paths parse the
+  presentation-format `content` back into a list. Like the Route 53 backend's
+  per-value quoting, but additionally escaping embedded quotes and backslashes.
+  The read path uses a DNS master-file tokenizer (not `shlex`): it splits
+  quoted/bare `<character-string>` tokens, decodes `\DDD` decimal octet escapes
+  (how Cloudflare returns non-ASCII) back to UTF-8, and never raises on malformed
+  input — fixing a bare apostrophe dumping the whole value back as one string and
+  non-ASCII values reading back mangled.
+  *Migration note:* TXT records written by the previous Cloudflare backend (unquoted,
+  space-joined) now read back split on whitespace. For `key=value` tokens this is the
+  correct recovery, but a single legacy value that legitimately contained spaces
+  (e.g. a free-text description) will read back fragmented until it is re-published.
+- **Cloudflare record writes converge under concurrent-publish races.** A shared
+  `_write_record` helper treats Cloudflare error 81058 ("identical record already
+  exists") as idempotent success **only on a POST**, and recreates via POST when a
+  PUT 404s because the record was deleted between lookup and update. An 81058 on a
+  PUT now raises: Cloudflare allows multiple records at one name, so a PUT colliding
+  with a *different* record there does not apply the update, and reporting success
+  would falsely claim the write took effect.
+- **Cloudflare API traffic honours rate limits.** All requests route through a shared
+  `_request` helper that retries on HTTP 429 (and on a 200 body carrying a rate-limit
+  error), honouring the `Retry-After` header when present and otherwise backing off
+  exponentially, so reads, writes, and deletes all handle throttling uniformly.
+- **`CloudflareBackend.get_record` no longer masks auth/network/server errors as
+  "record not found."** Only an empty result set means not-found; other errors
+  propagate so reconciliation cannot silently recreate or overwrite records.
 
 ### Fixed
 

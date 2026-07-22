@@ -823,7 +823,7 @@ backend = InfobloxNIOSBackend(
 | `NIOS_WAPI_VERSION` | No | `2.13.7` | WAPI version |
 | `NIOS_VERIFY_SSL` | No | `false` | Verify TLS certificate |
 
-**DNS-AID Compliance**: NIOS WAPI supports ServiceMode SVCB records (priority > 0) with full SVC parameters including custom DNS-AID keys (`key65400`–`key65408`). NIOS natively supports private-use SVCB keys via the `supports_private_svcb_keys` property.
+**DNS-AID Compliance**: NIOS WAPI supports ServiceMode SVCB records (priority > 0) with full SVC parameters including custom DNS-AID keys (`key65400`–`key65409`). NIOS natively supports private-use SVCB keys via the `supports_private_svcb_keys` property.
 
 ### NS1Backend
 
@@ -846,7 +846,30 @@ backend = NS1Backend(
 | `NS1_API_KEY` | Yes | - | NS1 API key with DNS read/write permissions |
 | `NS1_BASE_URL` | No | `https://api.nsone.net/v1` | API base URL (for private/dedicated deployments) |
 
-**DNS-AID Compliance**: NS1 supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65408`). NS1 natively accepts private-use SVCB keys — cap_uri, policy_uri, and realm go directly into the SVCB record without TXT demotion.
+**DNS-AID Compliance**: NS1 supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65409`). NS1 natively accepts private-use SVCB keys — cap_uri, policy_uri, and realm go directly into the SVCB record without TXT demotion.
+
+### CloudflareBackend
+
+Cloudflare DNS REST API v4 implementation.
+
+```python
+from dns_aid.backends.cloudflare import CloudflareBackend
+
+backend = CloudflareBackend()  # reads CLOUDFLARE_API_TOKEN from env
+
+# Or with explicit configuration
+backend = CloudflareBackend(
+    api_token="your-api-token",
+    zone_id="optional-zone-id",  # auto-discovered from domain if omitted
+)
+```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CLOUDFLARE_API_TOKEN` | Yes | - | API token with Zone → DNS → Edit (and Read) permissions |
+| `CLOUDFLARE_ZONE_ID` | No | - | Zone ID (auto-discovered by zone name if omitted) |
+
+**DNS-AID Compliance**: Cloudflare supports ServiceMode SVCB records (priority > 0) with full SVC parameters including private-use keys (`key65400`–`key65409`). Cloudflare natively accepts private-use SVCB keys via the `supports_private_svcb_keys` property — cap_uri, cap_sha256, bap, policy_uri, and realm go directly into the SVCB record without TXT demotion. TXT records are still written for human-readable metadata (capabilities, version, description), each value stored as its own RFC 1035 character-string.
 
 ### AkamaiEdgeDNSBackend
 
