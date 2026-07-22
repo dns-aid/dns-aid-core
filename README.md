@@ -1007,6 +1007,8 @@ Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to it
 
 Akamai Edge DNS supports ServiceMode SVCB records with full private-use key support, making it fully compliant with the DNS-AID draft. All custom DNS-AID parameters (`cap`, `bap`, `realm`, etc.) are written directly into SVCB — no TXT demotion.
 
+Writes are safe under concurrency: the backend serializes its own writes per zone and automatically retries Akamai's transient `409 concurrentZoneModification` responses with exponential backoff.
+
 #### Environment Variables
 
 | Variable | Required | Default | Description |

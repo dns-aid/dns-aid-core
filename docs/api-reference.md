@@ -848,6 +848,39 @@ backend = NS1Backend(
 
 **DNS-AID Compliance**: NS1 supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65408`). NS1 natively accepts private-use SVCB keys — cap_uri, policy_uri, and realm go directly into the SVCB record without TXT demotion.
 
+### AkamaiEdgeDNSBackend
+
+Akamai Edge DNS implementation using the Config DNS API v2 with EdgeGrid authentication.
+
+```python
+from dns_aid.backends.akamai_edgedns import AkamaiEdgeDNSBackend
+
+backend = AkamaiEdgeDNSBackend()  # reads AKAMAI_* env vars or ~/.edgerc
+
+# Or with explicit configuration
+backend = AkamaiEdgeDNSBackend(
+    host="akab-xxxx.luna.akamaiapis.net",
+    client_token="...",
+    client_secret="...",
+    access_token="...",
+)
+```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AKAMAI_HOST` | No* | - | EdgeGrid API hostname |
+| `AKAMAI_CLIENT_TOKEN` | No* | - | EdgeGrid client token |
+| `AKAMAI_CLIENT_SECRET` | No* | - | EdgeGrid client secret |
+| `AKAMAI_ACCESS_TOKEN` | No* | - | EdgeGrid access token |
+| `AKAMAI_EDGERC` | No | `~/.edgerc` | Path to `.edgerc` credentials file |
+| `AKAMAI_EDGERC_SECTION` | No | `default` | Section within `.edgerc` |
+
+\* Either all four `AKAMAI_*` credential variables or an `~/.edgerc` file. Partial env credentials raise an error naming the missing variables rather than silently falling back.
+
+**DNS-AID Compliance**: Akamai Edge DNS supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65408`) via the `supports_private_svcb_keys` property — cap_uri, policy_uri, bap, and realm go directly into the SVCB record without TXT demotion.
+
+**Concurrency**: Akamai serializes modifications per zone. The backend serializes its own writes per zone and automatically retries transient `409 concurrentZoneModification` responses with exponential backoff, so concurrent `publish_agent()` calls are safe.
+
 ### DDNSBackend
 
 RFC 2136 Dynamic DNS implementation. Works with BIND, Windows DNS, PowerDNS, Knot DNS, and any RFC 2136 compliant server.
