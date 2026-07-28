@@ -20,3 +20,12 @@ updates:
     labels:
       - "dependencies"
       - "automated"
+    groups:
+      # github/codeql-action's sub-actions (init/autobuild/analyze/upload-sarif)
+      # are one repo pinned by one SHA and REQUIRE lockstep versions: init writes
+      # a config stamped with its version and analyze refuses any other. Without
+      # grouping, Dependabot bumps each subpath as a separate dependency and the
+      # partial bump fails CodeQL deterministically (see #207).
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
