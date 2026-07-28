@@ -7,15 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.27.0] - 2026-07-22
-
 ### Added
 
-- **Akamai Edge DNS backend** (`akamai-edgedns`). New DNS backend using the
-  Akamai Config DNS API v2 with EdgeGrid authentication (`edgegrid-python`).
-  Supports private-use SVCB keys natively (`supports_private_svcb_keys = True`),
-  so all DNS-AID custom SvcParams are written directly on the SVCB record without TXT demotion.
-  Install: `pip install dns-aid[akamai-edgedns]`.
 - **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
   against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
   private-use SvcParamKeys (`key65280`–`key65534`), so `CloudflareBackend` sets
@@ -54,6 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`CloudflareBackend.get_record` no longer masks auth/network/server errors as
   "record not found."** Only an empty result set means not-found; other errors
   propagate so reconciliation cannot silently recreate or overwrite records.
+
+## [0.27.0] - 2026-07-22
+
+### Added
+
+- **Akamai Edge DNS backend** (`akamai-edgedns`). New DNS backend using the
+  Akamai Config DNS API v2 with EdgeGrid authentication (`edgegrid-python`).
+  Supports private-use SVCB keys natively (`supports_private_svcb_keys = True`),
+  so all DNS-AID custom SvcParams are written directly on the SVCB record without TXT demotion.
+  Install: `pip install dns-aid[akamai-edgedns]`.
 
 ### Fixed
 
