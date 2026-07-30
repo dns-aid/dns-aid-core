@@ -39,16 +39,19 @@ jobs:
         run: pip install --require-hashes -r .github/workflows/requirements-release.txt
 
       - name: Build twice with pinned SOURCE_DATE_EPOCH
+        # Build OUT of tree: hatchling pulls every non-gitignored file into the
+        # sdist, so an in-repo dist-a/ would get swallowed into dist-b's archive
+        # and the digests would differ for reasons unrelated to reproducibility.
         run: |
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
-          python -m build --outdir dist-a
-          python -m build --outdir dist-b
+          python -m build --outdir "$RUNNER_TEMP/dist-a"
+          python -m build --outdir "$RUNNER_TEMP/dist-b"
 
       - name: Compare artifacts
         run: |
-          (cd dist-a && sha256sum ./*) | tee sums-a.txt
-          (cd dist-b && sha256sum ./*) | tee sums-b.txt
+          (cd "$RUNNER_TEMP/dist-a" && sha256sum ./*) | tee sums-a.txt
+          (cd "$RUNNER_TEMP/dist-b" && sha256sum ./*) | tee sums-b.txt
           if ! diff sums-a.txt sums-b.txt; then
             echo "::error::Build is not reproducible: artifact digests differ between identical builds."
             exit 1
