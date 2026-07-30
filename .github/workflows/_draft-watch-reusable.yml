@@ -39,6 +39,12 @@ on:
         type: string
         default: ""
 
+# Least-privilege default for the workflow. The single job below overrides this
+# with its own block to add `issues: write` (job-level permissions fully replace
+# the workflow default), so this line does not reduce what the job can do.
+permissions:
+  contents: read
+
 jobs:
   draft-watch:
     name: IETF draft watch

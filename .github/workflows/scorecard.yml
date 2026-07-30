@@ -6,6 +6,8 @@ on:
   schedule:
     # Run weekly on Sundays at 04:00 UTC
     - cron: "0 4 * * 0"
+  # Allow an on-demand run (e.g. after updating the OpenSSF Best Practices badge URL)
+  workflow_dispatch:
 
 permissions: read-all
 
@@ -24,13 +26,13 @@ jobs:
           persist-credentials: false
 
       - name: Run OpenSSF Scorecard
-        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a  # v2.4.3
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc  # v2.4.4
         with:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
 
       - name: Upload SARIF results
-        uses: github/codeql-action/upload-sarif@c54b30b7df092240050e69945842bc67aee0f0f4  # v4.37.3
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81  # v4.37.3
         with:
           sarif_file: results.sarif
