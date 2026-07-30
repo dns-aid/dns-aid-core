@@ -1,0 +1,76 @@
+name: Fuzz
+
+# Weekly coverage-guided fuzzing of the untrusted-input parsers
+# (tests/fuzz/fuzz_parsers.py) with Atheris/libFuzzer. Findings surface as
+# workflow failures with the crashing input uploaded as an artifact.
+# Part of the OpenSSF plan (docs/proposals/openssf-best-practices.md, G5);
+# precursor to the OSS-Fuzz application.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tests/fuzz/**"
+      - ".github/workflows/fuzz.yml"
+      - ".github/workflows/requirements-fuzz.txt"
+  schedule:
+    # Weekly, Mondays 05:00 UTC
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      total_time:
+        description: "Total fuzzing time in seconds"
+        required: false
+        default: "900"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Atheris fuzz (parsers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          # Atheris ships prebuilt wheels up to CPython 3.11.
+          python-version: "3.11"
+
+      - name: Install fuzz dependencies (hash-pinned)
+        # Regenerate after bumps:
+        #   printf 'atheris\ndnspython>=2.6.0\npydantic>=2.5.0\nhttpx>=0.27.0\nstructlog>=24.0.0\npython-dotenv>=1.2.2\ncryptography>=46.0.7\n' | \
+        #     uv pip compile --generate-hashes --python-version 3.11 \
+        #     --python-platform linux -o .github/workflows/requirements-fuzz.txt -
+        run: |
+          pip install --require-hashes -r .github/workflows/requirements-fuzz.txt
+          pip install --no-deps .
+
+      - name: Run fuzzer
+        env:
+          TOTAL_TIME: ${{ github.event.inputs.total_time || '900' }}
+        run: |
+          # PRs get a quick smoke run; scheduled runs fuzz for TOTAL_TIME.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            MAX_TIME=120
+          else
+            MAX_TIME="$TOTAL_TIME"
+          fi
+          mkdir -p fuzz-artifacts
+          python tests/fuzz/fuzz_parsers.py \
+            -max_total_time="$MAX_TIME" \
+            -rss_limit_mb=2560 \
+            -artifact_prefix=fuzz-artifacts/ 2>&1 | tail -50
+        # libFuzzer exits non-zero on a crash/OOM/timeout finding.
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: fuzz-crash-artifacts
+          path: fuzz-artifacts/
+          if-no-files-found: ignore
