@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -95,3 +97,59 @@ class TestCreateBackendErrors:
         ):
             with pytest.raises(ImportError, match="boto3"):
                 create_backend("route53")
+
+
+# ---------------------------------------------------------------------------
+# Eager convenience re-exports — missing optional deps are swallowed
+# ---------------------------------------------------------------------------
+
+_OPTIONAL_BACKEND_MODULES = [
+    ("dns_aid.backends.route53", "Route53Backend"),
+    ("dns_aid.backends.infoblox", "InfobloxBackend"),
+    ("dns_aid.backends.ddns", "DDNSBackend"),
+    ("dns_aid.backends.cloudflare", "CloudflareBackend"),
+    ("dns_aid.backends.cloud_dns", "CloudDNSBackend"),
+    ("dns_aid.backends.ns1", "NS1Backend"),
+    ("dns_aid.backends.akamai_edgedns", "AkamaiEdgeDNSBackend"),
+]
+
+
+class TestOptionalReExports:
+    """The eager re-export block must swallow ImportError for every backend."""
+
+    def test_all_optional_backends_missing(self):
+        """Re-import the package with every optional backend module blocked."""
+        real_pkg = sys.modules["dns_aid.backends"]
+        try:
+            with patch.dict(sys.modules):
+                for module_path, _ in _OPTIONAL_BACKEND_MODULES:
+                    # A None entry makes `import <name>` raise ImportError.
+                    sys.modules[module_path] = None  # type: ignore[assignment]
+                sys.modules.pop("dns_aid.backends", None)
+
+                fresh = importlib.import_module("dns_aid.backends")
+
+                for _, class_name in _OPTIONAL_BACKEND_MODULES:
+                    assert class_name not in fresh.__all__
+                    assert not hasattr(fresh, class_name)
+                # Core exports survive
+                assert "MockBackend" in fresh.__all__
+                assert "DNSBackend" in fresh.__all__
+                assert fresh.VALID_BACKEND_NAMES == VALID_BACKEND_NAMES
+                # Factory still works for backends without optional deps
+                assert fresh.create_backend("mock").name == "mock"
+        finally:
+            # patch.dict restored sys.modules; also restore the attribute on
+            # the parent package, which the fresh import overwrote.
+            sys.modules["dns_aid.backends"] = real_pkg
+            import dns_aid
+
+            dns_aid.backends = real_pkg
+
+    def test_all_optional_backends_present_are_exported(self):
+        """With the full dev environment, every optional backend is re-exported."""
+        pkg = importlib.import_module("dns_aid.backends")
+
+        for _, class_name in _OPTIONAL_BACKEND_MODULES:
+            assert class_name in pkg.__all__
+            assert hasattr(pkg, class_name)
