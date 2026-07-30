@@ -40,7 +40,11 @@ jobs:
         run: uv run pytest tests/unit/ -v --tb=short
 
       - name: Run tests with coverage
-        run: uv run pytest tests/unit/ --cov=dns_aid --cov-report=xml --cov-report=term-missing
+        # Coverage floor policy (OpenSSF Best Practices, docs/proposals/openssf-best-practices.md):
+        # the floor only ratchets UP as the coverage push lands; lowering it requires a
+        # recorded maintainer decision. 78 = measured 79.3% combined statement+branch
+        # (2026-07-29) minus a small platform-variance margin.
+        run: uv run pytest tests/unit/ --cov=dns_aid --cov-report=xml --cov-report=term-missing --cov-fail-under=78
 
       - name: Upload coverage artifact
         if: matrix.python-version == '3.12'

@@ -28,10 +28,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install build cyclonedx-bom
+      - name: Install build tools (hash-pinned)
+        # Pinned with hashes for supply-chain integrity (OpenSSF Scorecard
+        # Pinned-Dependencies). Regenerate after bumps:
+        #   printf 'build\ncyclonedx-bom\n' | uv pip compile --generate-hashes \
+        #     --python-version 3.12 --python-platform linux \
+        #     -o .github/workflows/requirements-release.txt -
+        run: pip install --require-hashes -r .github/workflows/requirements-release.txt
 
       - name: Build wheel and sdist
         run: python -m build
