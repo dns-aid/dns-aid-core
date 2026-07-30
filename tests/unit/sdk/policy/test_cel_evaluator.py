@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 from unittest.mock import Mock, patch
 
 import pytest
@@ -693,14 +694,14 @@ class TestBackendSelection:
         assert isinstance(backend, _RustBackend)
 
     def test_python_fallback_when_rust_unavailable(self) -> None:
-        import dns_aid.sdk.policy.cel_evaluator as mod
+        mod = importlib.import_module("dns_aid.sdk.policy.cel_evaluator")
 
         with patch.object(mod, "_RustBackend", side_effect=ImportError("no cel")):
             backend = mod._select_backend()
         assert isinstance(backend, mod._PythonBackend)
 
     def test_no_backend_available_raises_import_error(self) -> None:
-        import dns_aid.sdk.policy.cel_evaluator as mod
+        mod = importlib.import_module("dns_aid.sdk.policy.cel_evaluator")
 
         with (
             patch.object(mod, "_RustBackend", side_effect=ImportError("no cel")),
@@ -720,7 +721,7 @@ class TestPythonBackend:
     """Exercise the cel-python (celpy) fallback backend directly."""
 
     def _python_evaluator(self):
-        import dns_aid.sdk.policy.cel_evaluator as mod
+        mod = importlib.import_module("dns_aid.sdk.policy.cel_evaluator")
 
         with patch.object(mod, "_RustBackend", side_effect=ImportError("no cel")):
             return mod.CELRuleEvaluator()

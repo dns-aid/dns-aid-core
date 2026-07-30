@@ -148,7 +148,7 @@ class TestOptionalReExports:
 
     def test_all_optional_backends_present_are_exported(self):
         """With the full dev environment, every optional backend is re-exported."""
-        import dns_aid.backends as pkg
+        pkg = importlib.import_module("dns_aid.backends")
 
         for _, class_name in _OPTIONAL_BACKEND_MODULES:
             assert class_name in pkg.__all__

@@ -10,7 +10,6 @@ import types
 
 import pytest
 
-import dns_aid.doctor as doctor_mod
 from dns_aid.cli.backends import BACKEND_REGISTRY
 from dns_aid.doctor import (
     _check_backends,
@@ -89,7 +88,7 @@ class TestCheckCore:
 
     def test_missing_dependency_fails(self, monkeypatch):
         monkeypatch.setattr("httpx.get", _raise_network_error)
-        monkeypatch.setattr(doctor_mod, "_get_module_version", _raise_import_error)
+        monkeypatch.setattr("dns_aid.doctor._get_module_version", _raise_import_error)
         results = _check_core("1.2.3")
         fails = [r for r in results if r.status == "fail"]
         assert len(fails) == 6  # all listed deps
@@ -103,20 +102,20 @@ class TestGetModuleVersion:
     def test_callable_version_attribute(self, monkeypatch):
         fake_mod = types.SimpleNamespace(version=lambda: "9.9.9")
         fake_importlib = types.SimpleNamespace(import_module=lambda name: fake_mod)
-        monkeypatch.setattr(doctor_mod, "importlib", fake_importlib)
+        monkeypatch.setattr("dns_aid.doctor.importlib", fake_importlib)
         assert _get_module_version("whatever") == "9.9.9"
 
     def test_metadata_fallback(self, monkeypatch):
         fake_mod = types.SimpleNamespace()
         fake_importlib = types.SimpleNamespace(import_module=lambda name: fake_mod)
-        monkeypatch.setattr(doctor_mod, "importlib", fake_importlib)
+        monkeypatch.setattr("dns_aid.doctor.importlib", fake_importlib)
         ver = _get_module_version("whatever", "pytest")
         assert ver  # resolved via importlib.metadata
 
     def test_no_version_no_dist_returns_empty(self, monkeypatch):
         fake_mod = types.SimpleNamespace()
         fake_importlib = types.SimpleNamespace(import_module=lambda name: fake_mod)
-        monkeypatch.setattr(doctor_mod, "importlib", fake_importlib)
+        monkeypatch.setattr("dns_aid.doctor.importlib", fake_importlib)
         assert _get_module_version("whatever") == ""
 
 
@@ -229,7 +228,7 @@ class TestCheckBackends:
 
     def test_missing_optional_deps_fail(self, monkeypatch):
         fake_importlib = types.SimpleNamespace(import_module=_raise_import_error)
-        monkeypatch.setattr(doctor_mod, "importlib", fake_importlib)
+        monkeypatch.setattr("dns_aid.doctor.importlib", fake_importlib)
         checks = _by_label(_check_backends())
         for name in ("route53", "cloudflare", "infoblox", "nios", "akamai-edgedns", "ddns"):
             info = BACKEND_REGISTRY[name]
@@ -298,15 +297,15 @@ class TestCheckBackends:
 
 class TestCheckOptional:
     def test_all_available(self, monkeypatch):
-        fake_importlib = types.SimpleNamespace(import_module=lambda n: types.ModuleType(n))
-        monkeypatch.setattr(doctor_mod, "importlib", fake_importlib)
+        fake_importlib = types.SimpleNamespace(import_module=types.ModuleType)
+        monkeypatch.setattr("dns_aid.doctor.importlib", fake_importlib)
         results = _check_optional()
         assert len(results) == 3
         assert all(r.status == "pass" for r in results)
 
     def test_none_available(self, monkeypatch):
         fake_importlib = types.SimpleNamespace(import_module=_raise_import_error)
-        monkeypatch.setattr(doctor_mod, "importlib", fake_importlib)
+        monkeypatch.setattr("dns_aid.doctor.importlib", fake_importlib)
         results = _check_optional()
         assert len(results) == 3
         assert all(r.status == "warn" for r in results)
