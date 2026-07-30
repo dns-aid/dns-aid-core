@@ -1,6 +1,7 @@
 # Proposal: OpenSSF Best Practices — Silver badge, Scorecard fixes, and the road to Gold
 
-- **Status:** Proposed
+- **Status:** Proposed (decisions on review policy, coverage pacing, fuzzing scope,
+  security-review route, and timeline recorded 2026-07-29 — see §Decisions)
 - **Date:** 2026-07-29
 - **Scope:** [OpenSSF Best Practices badge](https://www.bestpractices.dev/projects/12651) (Silver/Gold levels), [OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/dns-aid/dns-aid-core), and the OSPS Security Baseline questionnaire
 
@@ -20,8 +21,27 @@ despite the achieved badge. Fixing that one URL raises the overall Scorecard
 score at zero engineering cost.
 
 This proposal sequences the work into four phases: an immediate metadata fix,
-documentation PRs, CI/process hardening, and Gold-level items that are gated on
-organizational growth rather than engineering.
+documentation PRs, CI/process hardening, and a Gold execution plan targeting
+**Gold-ready within 1–2 release cycles**, with `contributors_unassociated` as
+the sole criterion gated on ecosystem growth.
+
+## Decisions (2026-07-29)
+
+Recorded from maintainer review of the draft; facts verified against the GitHub
+API the same day.
+
+| Topic | Decision / fact |
+| --- | --- |
+| Badge entry access | Held by @iracic82 only; questionnaire edits are coordinated with him (or he adds a co-owner login on the entry) |
+| Org admin | @ivanglabbeek is a dns-aid org owner — settings changes are direct actions, not requests |
+| Org 2FA status | **0 members have 2FA disabled** (verified via API) — `require_2FA` can be enforced with no member ejections |
+| Branch protection on `main` | Already requires 1 approving review with stale-review dismissal + 8 required status checks (strict). Gaps: `enforce_admins` off, last-push approval off |
+| Review policy | 1 approval on **all** PRs (already configured); add `enforce_admins` so it binds admins too |
+| Coverage pacing | **Dedicated push now** to 90% statement / 80% branch, not a slow ratchet |
+| Fuzzing & builds | All three: reproducible-build CI job, Atheris harness in CI, OSS-Fuzz application |
+| Security review | Infoblox internal security team (reviewers independent of the dev team), written report |
+| External contributors | Candidates in pipeline (IETF/ecosystem); tracked as the one open Gold blocker |
+| Timeline | Gold-ready in the next 1–2 release cycles |
 
 ## Current state
 
@@ -105,9 +125,9 @@ Each item below is a small PR; together they close every remaining Silver MUST.
    measured but not gated, and the criterion is already met on the measure it
    uses: statement-only coverage is ≈81% (the 79% figure in CI reports includes
    branch coverage, which is stricter). Add `--cov-fail-under=79` to the ci.yml
-   coverage step so the achieved level cannot silently regress, with a ratchet
-   policy: raise the floor as coverage rises, never lower it without a recorded
-   decision. This same gate is the runway for Gold's 90%/80% targets (Phase 4).
+   coverage step immediately so the achieved level cannot regress while the
+   Gold coverage push (G3 below) is underway; the gate rises with the push and
+   is never lowered without a recorded decision.
 
 5. **`version_tags_signed` — sign release tags.** Release *artifacts* are already
    Sigstore-signed; the git tags themselves are not. Update RELEASE.md to require
@@ -122,47 +142,89 @@ Each item below is a small PR; together they close every remaining Silver MUST.
 These raise the Scorecard score and simultaneously pre-answer Gold and OSPS
 Baseline questions:
 
-1. **Branch protection (currently 4/10) + Code-Review (currently 2/10).** Enable
-   on `main`: require ≥1 approving review, dismiss stale approvals, require
-   status checks (test, lint, typecheck, integration, DCO), and block force
-   pushes. Note: 5/21 recent changesets had approvals — with three maintainers
-   this is now sustainable where it wasn't with one.
+1. **Branch protection (currently 4/10) + Code-Review (currently 2/10).**
+   Verified 2026-07-29: `main` already requires 1 approving review with
+   stale-review dismissal and 8 strict status checks. The remaining gaps are
+   `enforce_admins` (off — admins can currently merge without review, which is
+   also why the Code-Review score is low: 5/21 recent changesets carried
+   approvals) and optionally require-last-push-approval. Action: enable
+   `enforce_admins`; the Code-Review score then recovers on its own as the
+   trailing 30-changeset window fills with reviewed merges.
 2. **Token-Permissions (9/10).** Audit workflows for job-level `permissions`
    blocks (likely one workflow missing an explicit top-level `permissions:
    contents: read`).
-3. **Fuzzing (0/10).** Add a small [Atheris](https://github.com/google/atheris)
-   harness fuzzing the SVCB wire-format parser and record deserializers (the
-   highest-value untrusted-input surface), run weekly in CI. Apply to OSS-Fuzz
-   once the harness is stable.
+3. **Fuzzing (0/10).** Two tracks (decided): a small
+   [Atheris](https://github.com/google/atheris) harness fuzzing the SVCB
+   wire-format parser and record deserializers (the highest-value
+   untrusted-input surface) on a weekly CI schedule, **and** an OSS-Fuzz
+   application once the harness runs clean for a couple of weeks (needs a
+   maintainer contact email and an `oss-fuzz` project directory PR).
 4. **Pinned-Dependencies (8/10).** Workflows already pin actions by SHA; the
    residual findings are `pip install` steps in release.yml — pin
    `build`/`cyclonedx-bom` versions with hashes.
 
-## Phase 4 — Gold: what's achievable now vs. gated
+## Phase 4 — Gold execution plan
 
-Already met (answer with evidence): `copyright_per_file` / `license_per_file`
-(all 86 source files carry SPDX + copyright headers), signed releases,
-`dco`-adjacent provenance.
+Target: **Gold-ready within 1–2 release cycles**, meaning every Gold criterion
+is Met except `contributors_unassociated`, which is tracked as the single open
+blocker and worked via the contributor pipeline.
 
-Achievable with settings/process:
+Already met — answer on the form with evidence, no work:
 
-- `require_2FA` / `secure_2FA` — enable "Require two-factor authentication" on
-  the `dns-aid` GitHub org.
-- `code_review_standards` / `two_person_review` — document review standards in
-  CONTRIBUTING.md; require 2 approvals for changes touching crypto/validation
-  paths (CODEOWNERS already routes these).
-- `small_tasks` — label starter issues (`good first issue`) as part of the
-  LF-graduation contributor-growth push.
-- `build_reproducible` — hatchling builds are reproducible given
-  `SOURCE_DATE_EPOCH`; add a CI job that builds twice and diffs the wheels.
-- `test_statement_coverage90` / `test_branch_coverage80` — continuation of the
-  Phase 2 ratchet.
+- `copyright_per_file` / `license_per_file` — all 86 source files carry SPDX +
+  copyright headers.
+- `repo_distributed`, `test_invocation`, `test_continuous_integration` — carried
+  over from Passing.
+- `crypto_used_network` / `crypto_tls12` / `hardened_site` / `hardening` —
+  HTTPS-only fetches (TLS ≥1.2 via httpx defaults), GitHub-hosted site with
+  HSTS, SSRF/input-validation hardening per SECURITY.md.
+- `dynamic_analysis` — already answered Met at Passing.
 
-Gated on ecosystem growth (not engineering): `contributors_unassociated`
-(requires significant contributors from ≥2 organizations — this is the same
-top-priority goal MAINTAINERS.md already sets for LF graduation) and
-`security_review` (independent security review; candidate for an LF/OSTIF
-review request once onboarded).
+Work items:
+
+- **G1 — Org settings (owner: @ivanglabbeek, immediate).** Enable "Require
+  two-factor authentication" on the dns-aid org (`require_2FA`; verified safe —
+  0 members lack 2FA, so nobody gets ejected). GitHub requires TOTP/security
+  keys rather than SMS-only for org enforcement, covering `secure_2FA`. Enable
+  `enforce_admins` on main's branch protection (see Phase 3.1).
+- **G2 — Review standards (1 small PR).** Add a "Code review" section to
+  CONTRIBUTING.md: what reviewers check (correctness, tests, security-sensitive
+  paths, DCO), who may approve, and the rule that no change merges without a
+  non-author approval (`code_review_standards`). `two_person_review` (≥50% of
+  changes reviewed by a non-author) is then enforced mechanically by G1 +
+  existing branch protection; the criterion evaluates recent history, so it
+  becomes claimable roughly one release cycle after enforcement.
+- **G3 — Coverage push (the main engineering item, this cycle).** Dedicated
+  test-writing effort to reach 90% statement / 80% branch (currently ≈81%
+  statement). The gap is concentrated: `cli/main.py` (443 uncovered statements,
+  50%) and `mcp/server.py` (394, 30%) hold ~41% of all uncovered statements,
+  followed by `backends/infoblox/bloxone.py` (137, 53%), `core/invoke.py`
+  (103, 55%), `backends/infoblox/nios.py` (102, 70%), and
+  `backends/cloud_dns.py` (65, 53%). Approach: typer `CliRunner` tests for the
+  CLI command surface, MCP tool-handler tests against the mock backend, and
+  mocked-HTTP tests for the two Infoblox backends and Cloud DNS (the
+  `test_cloudflare_backend.py` pattern already exists). Raise the
+  `--cov-fail-under` gate as each tranche lands.
+- **G4 — Reproducible builds (1 PR).** CI job that builds the wheel/sdist twice
+  with `SOURCE_DATE_EPOCH` pinned and fails on binary diff
+  (`build_reproducible`; hatchling is reproducible by default, so this is
+  expected to pass immediately and serve as the criterion's evidence URL).
+- **G5 — Fuzzing (1 PR + application).** Atheris harness in weekly CI, then the
+  OSS-Fuzz application (Phase 3.3). Not a Gold criterion, but scheduled here
+  because the harness reuses G3's test fixtures.
+- **G6 — Security review (owner: @ivanglabbeek, external ask).** Request a
+  review from the Infoblox product-security team — reviewers must be
+  independent of the dev team for `security_review` to count. Scope: the
+  assurance case (Phase 2.3), SSRF/input-validation paths, DNSSEC/DANE trust
+  handling, and release pipeline. Deliverable: a written report linked from
+  SECURITY.md, with findings triaged as issues.
+- **G7 — Starter tasks (ongoing).** Label `good first issue` tasks
+  (`small_tasks`) — also feeds the contributor pipeline that G8 depends on.
+- **G8 — Unassociated contributors (open blocker).** Candidates exist in the
+  pipeline (IETF draft co-authors, ARD-ecosystem developers). The criterion
+  needs two *significant* contributors not associated with Infoblox — track
+  candidate progress in the LF-graduation issue and revisit at each release.
+  Everything else in this plan proceeds independently.
 
 ## OSPS Security Baseline
 
@@ -174,15 +236,15 @@ first submission.
 
 ## Sequencing and ownership
 
-| Phase | Items | Effort | Blocked on |
-| --- | --- | --- | --- |
-| 0 | Badge entry URL fix | minutes | badge-entry owner (@iracic82) |
-| 1 | Silver questionnaire pass | ~2h form work | badge-entry edit access |
-| 2 | Roadmap, SECURITY/GOVERNANCE paragraphs, assurance case, coverage gate, signed tags | 3–4 small PRs | — |
-| 3 | Branch protection, token perms, fuzz harness, pip pinning | 2 PRs + org settings | org admin |
-| 4 | Gold: 2FA org setting, review standards, reproducible-build check | 1–2 PRs + org settings | Phase 2–3; external contributors for the gated items |
+| When | Items | Owner |
+| --- | --- | --- |
+| Now (settings, no PR) | G1: org require-2FA, `enforce_admins`; Phase 0 badge-URL fix | @ivanglabbeek; @iracic82 for the badge entry |
+| Release cycle 1 | Phase 2 PRs (roadmap, assurance case, SECURITY/GOVERNANCE paragraphs, `--cov-fail-under=79`, signed tags); G2 review standards; G4 repro-build job; Phase 3 token-perms + pip pins; Silver questionnaire pass | maintainers; @iracic82 for the questionnaire |
+| Release cycle 1–2 | G3 coverage push to 90/80 (CLI → MCP server → Infoblox/Cloud DNS backends); G5 fuzz harness + OSS-Fuzz application; G6 security review request → report | maintainers; Infoblox security team for G6 |
+| After cycle 2 | Claim `two_person_review` (needs a cycle of enforced history); Gold questionnaire pass; OSPS Baseline pass | @iracic82 (form), maintainers (evidence) |
+| Unscheduled | G8 `contributors_unassociated` — pipeline candidates tracked per release | project lead |
 
-Silver is achievable within one release cycle. Gold's engineering items are all
-tractable; its two gated criteria align exactly with the existing LF-graduation
-goals in MAINTAINERS.md, so no new organizational commitments are introduced by
-this proposal.
+Silver is achievable within release cycle 1. Every Gold criterion except
+`contributors_unassociated` is scheduled above; that criterion aligns exactly
+with the existing LF-graduation recruiting goals in MAINTAINERS.md, so no new
+organizational commitments are introduced by this proposal.
