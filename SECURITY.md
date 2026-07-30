@@ -41,6 +41,13 @@ Instead, please report security vulnerabilities using one of these methods:
 - **Status Update**: Within 7 days
 - **Resolution Target**: Within 30 days for critical issues
 
+### Reporter Credit
+
+We credit vulnerability reporters by name (or handle) in the GitHub Security
+Advisory and the release notes of the fix, unless the reporter asks to remain
+anonymous. Tell us in your report how — or whether — you'd like to be
+credited.
+
 ## Security Architecture
 
 ### DNSSEC Validation
