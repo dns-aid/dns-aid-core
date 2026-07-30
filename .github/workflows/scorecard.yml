@@ -6,6 +6,8 @@ on:
   schedule:
     # Run weekly on Sundays at 04:00 UTC
     - cron: "0 4 * * 0"
+  # Allow an on-demand run (e.g. after updating the OpenSSF Best Practices badge URL)
+  workflow_dispatch:
 
 permissions: read-all
 
