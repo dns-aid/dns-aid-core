@@ -434,38 +434,43 @@ class Route53Backend(DNSBackend):
         if not fqdn.endswith("."):
             fqdn = f"{fqdn}."
 
-        try:
-            response = client.list_resource_record_sets(
-                HostedZoneId=zone_id,
-                StartRecordName=fqdn,
-                StartRecordType=record_type,  # type: ignore[arg-type]
-                MaxItems="1",
-            )
+        # A genuinely missing record is NOT an error here: list_resource_record_sets
+        # returns an empty set (or the next record by sort order, which fails the
+        # exact-match check below) rather than raising. Only real failures — auth
+        # (ClientError), throttling, a missing hosted zone, network errors — raise,
+        # and those MUST propagate. Swallowing them to None makes a transient error
+        # indistinguishable from "record absent", which lets callers such as
+        # publisher._unpublish disarm their masked-failure guard and de-index a
+        # still-live agent. Applies the "only the real not-found signal returns
+        # None" contract that CloudflareBackend.get_record also uses.
+        response = client.list_resource_record_sets(
+            HostedZoneId=zone_id,
+            StartRecordName=fqdn,
+            StartRecordType=record_type,  # type: ignore[arg-type]
+            MaxItems="1",
+        )
 
-            record_sets = response.get("ResourceRecordSets", [])
-            if not record_sets:
-                return None
-
-            record = record_sets[0]
-
-            # Verify it's the exact record we want
-            if record["Name"] != fqdn or record["Type"] != record_type:
-                return None
-
-            # Extract values
-            values = [rr["Value"] for rr in record.get("ResourceRecords", [])]
-
-            return {
-                "name": name,
-                "fqdn": fqdn.rstrip("."),
-                "type": record_type,
-                "ttl": record.get("TTL", 0),
-                "values": values,
-            }
-
-        except Exception as e:
-            logger.debug("Record not found", fqdn=fqdn, type=record_type, error=str(e))
+        record_sets = response.get("ResourceRecordSets", [])
+        if not record_sets:
             return None
+
+        record = record_sets[0]
+
+        # Verify it's the exact record we want (the API may return the next record
+        # by sort order when ours is absent).
+        if record["Name"] != fqdn or record["Type"] != record_type:
+            return None
+
+        # Extract values
+        values = [rr["Value"] for rr in record.get("ResourceRecords", [])]
+
+        return {
+            "name": name,
+            "fqdn": fqdn.rstrip("."),
+            "type": record_type,
+            "ttl": record.get("TTL", 0),
+            "values": values,
+        }
 
     async def list_zones(self) -> list[dict]:
         """

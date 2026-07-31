@@ -47,6 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`CloudflareBackend.get_record` no longer masks auth/network/server errors as
   "record not found."** Only an empty result set means not-found; other errors
   propagate so reconciliation cannot silently recreate or overwrite records.
+- **`Route53Backend.get_record` and `NS1Backend.get_record` no longer mask
+  auth/network/server errors as "record not found."** Both previously caught all
+  errors and returned `None` — the same value returned for a genuinely absent
+  record — so a transient failure was indistinguishable from absence. That defeats
+  the masked-failure guard in `publisher._unpublish` (which probes existence with
+  `get_record` before deleting), and could let an unpublish report success while
+  the agent's records are still live in DNS. Now only the real not-found signal
+  (an empty result set for Route 53, a `404` for NS1) returns `None`; every other
+  error propagates — the same "only the real not-found signal returns None"
+  contract used by `CloudflareBackend.get_record`.
 
 ## [0.27.0] - 2026-07-22
 
