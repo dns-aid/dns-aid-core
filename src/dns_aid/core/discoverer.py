@@ -636,6 +636,12 @@ async def _query_single_agent(
             capability_source: CapabilitySource = "none"
             agent_card = None
             cap_sha256_applied = False
+            # Operator-defined cap-document fields (issue #174): opaque,
+            # unverified passthrough of every key beyond the known schema.
+            # Populated whenever a capability document is fetched, even if
+            # it contributed no `capabilities` — the extension surface and
+            # the capabilities list are independent.
+            cap_metadata: dict[str, Any] = {}
 
             effective_descriptor_url: str | None = None
             descriptor_source_label: Literal["cap_uri", "well_known", "none"] = "none"
@@ -749,6 +755,12 @@ async def _query_single_agent(
                         descriptor_url=effective_descriptor_url,
                     )
 
+                # Surface operator-defined cap-document fields regardless of
+                # whether the document also carried `capabilities` — trust is
+                # the caller's judgment via cap_sha256_verified (issue #174).
+                if cap_doc and cap_doc.metadata:
+                    cap_metadata = cap_doc.metadata
+
                 if cap_doc and cap_doc.capabilities:
                     capabilities = cap_doc.capabilities
                     capability_source = descriptor_source_label
@@ -835,6 +847,7 @@ async def _query_single_agent(
                 cap_uri=cap_uri,
                 cap_sha256=cap_sha256,
                 cap_sha256_verified=cap_sha256_applied,
+                cap_metadata=cap_metadata,
                 well_known_path=well_known_path,
                 bap=bap,
                 policy_uri=policy_uri,
