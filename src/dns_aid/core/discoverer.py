@@ -506,6 +506,16 @@ async def _query_single_agent(
         try:
             answers = await _try(fqdn)
         except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+            # Last-resort tier at the flat owner name: TXT-encoded fallback
+            # for DNS providers that can't serve SVCB. Returns a complete
+            # AgentRecord when a v=1 fallback record is present; None when
+            # only metadata TXT (or nothing) lives there. Deliberately tried
+            # BEFORE the legacy -01 shape: a publisher who placed a draft-02
+            # flat TXT record has migrated, and a leftover legacy SVCB
+            # record must not shadow it.
+            txt_agent = await _try_txt_fallback(resolver, fqdn, name, domain, protocol)
+            if txt_agent is not None:
+                return txt_agent
             if legacy_fqdn is None:
                 return None
             try:
@@ -520,7 +530,11 @@ async def _query_single_agent(
                 fqdn = legacy_fqdn
                 resolved_via_legacy = True
             except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
-                return None
+                # Same last-resort TXT tier at the legacy owner name, only
+                # reachable when legacy fallback is active for this call.
+                return await _try_txt_fallback(
+                    resolver, legacy_fqdn, name, domain, protocol, legacy_resolved=True
+                )
 
         for rdata in answers:
             # AliasMode (priority 0): follow alias to canonical name
@@ -896,6 +910,170 @@ def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
             custom_params[key] = value
 
     return custom_params
+
+
+async def _try_txt_fallback(
+    resolver: dns.asyncresolver.Resolver,
+    fqdn: str,
+    name: str,
+    domain: str,
+    protocol: Protocol,
+    *,
+    legacy_resolved: bool = False,
+) -> AgentRecord | None:
+    """Last-resort TXT-encoded fallback when SVCB / HTTPS RR aren't available.
+
+    Used by ``_query_single_agent`` when the authoritative DNS server doesn't
+    expose SVCB (older DNS appliances, smaller hosted providers, self-hosted
+    DNS that hasn't adopted SVCB yet). Looks for a ``v=1`` agent record
+    encoded inside a TXT RR at the same FQDN the SVCB lookup targeted —
+    the draft-02 flat owner name, or the legacy -01 shape when the caller
+    reached this tier via the opt-in legacy fallback (``legacy_resolved=True``
+    is then stamped on the returned record, mirroring the SVCB path).
+
+    Returns a complete :class:`AgentRecord` when a v=1 fallback record is
+    present and parses cleanly. Returns ``None`` when:
+
+    - No TXT records exist at the FQDN
+    - TXT records exist but none carry a v=1 marker (the publisher only
+      writes metadata TXT, no endpoint fallback)
+    - Parsing fails (malformed body, missing required field)
+
+    Coexists with metadata TXT (``capabilities=`` and friends) on the same
+    FQDN: parser ignores RRs that lack ``v=`` so they fall through. When
+    multiple v=1 RRs are present (out-of-spec), the first parses-able one
+    wins and a warning is logged.
+
+    Mitigates the SVCB-less-DNS reach gap; mirrors the SVCB SvcParam set
+    in TXT key=value form so the consumer parser stays symmetric with
+    :func:`_parse_svcb_custom_params`.
+    """
+    from dns_aid.core._txt_fallback import parse_txt_fallback
+
+    try:
+        answers = await resolver.resolve(fqdn, "TXT")
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return None
+    except Exception as exc:  # noqa: BLE001 — fallback is best-effort
+        logger.debug("txt_fallback.resolve_failed", fqdn=fqdn, error=str(exc))
+        return None
+
+    matches: list[Any] = []
+    for rdata in answers:
+        parsed = parse_txt_fallback(rdata.strings)
+        if parsed is not None:
+            matches.append(parsed)
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        logger.warning(
+            "txt_fallback.multiple_records",
+            fqdn=fqdn,
+            count=len(matches),
+            note="using first; spec does not permit multiple v=1 records at one FQDN",
+        )
+    fallback = matches[0]
+
+    # Cross-validate the parsed ``alpn=`` against the protocol probe the
+    # caller queried with. Under draft-02 the flat owner name carries no
+    # protocol, so the probe is only a placeholder — but a disagreement is
+    # still worth surfacing (hand-edited alpn, or a record reached via the
+    # legacy -01 shape whose ``_{protocol}`` label diverged from the body).
+    if fallback.alpn is not None and fallback.alpn != protocol.value:
+        logger.warning(
+            "txt_fallback.alpn_mismatch",
+            fqdn=fqdn,
+            probe_protocol=protocol.value,
+            txt_alpn=fallback.alpn,
+            note="record signal wins after reconciliation (draft-02: protocol lives in the record)",
+        )
+
+    # Mirror the SVCB path exactly: normalize the raw bap value (scalar
+    # draft-02 form; legacy comma lists collapse with a warning) and stamp
+    # the record's true protocol (bap, then alpn) over the query probe so
+    # TXT-sourced records label identically to SVCB-sourced ones and the
+    # JWS binding check (payload.alpn == agent.protocol.value) holds.
+    from dns_aid.core.bap import normalize_bap
+
+    bap = normalize_bap(fallback.bap)
+    protocol = _reconcile_protocol(protocol, bap, fallback.alpn)
+
+    # Tier 1: cap URI (mirrors the SVCB-success path's tier 1)
+    capabilities: list[str] = []
+    capability_source: Literal["cap_uri", "agent_card", "http_index", "txt_fallback", "none"] = (
+        "none"
+    )
+    agent_card = None
+    if fallback.cap:
+        cap_doc = await fetch_cap_document(fallback.cap, expected_sha256=fallback.cap_sha256)
+        if cap_doc and cap_doc.capabilities:
+            capabilities = cap_doc.capabilities
+            capability_source = "cap_uri"
+        if cap_doc and cap_doc.raw_data:
+            try:
+                agent_card = A2AAgentCard.from_dict(cap_doc.raw_data)
+            except Exception:  # nosec B110 — not an agent card; that's fine
+                agent_card = None
+
+    # Tier 4: TXT capabilities — same TXT records may carry both the v=1
+    # fallback record and a separate ``capabilities=`` metadata string.
+    # _query_capabilities already filters for ``capabilities=`` so it
+    # ignores the v=1 record itself.
+    if not capabilities:
+        capabilities = await _query_capabilities(fqdn)
+        if capabilities:
+            capability_source = "txt_fallback"
+
+    logger.info(
+        "Resolved agent via TXT fallback (SVCB unavailable)",
+        fqdn=fqdn,
+        target=fallback.target,
+        port=fallback.port,
+    )
+
+    # TXT bodies are attacker-shapable free text: a record can pass the
+    # wire-format parser yet still trip an AgentRecord field validator
+    # (underscore target, oversized connect-meta, ...). Catch that case
+    # HERE with a specific event so operators can tell "TXT present but
+    # model-invalid" apart from a plain DNS miss — the outer
+    # _query_single_agent handler would otherwise swallow it at debug as
+    # a generic query failure.
+    from pydantic import ValidationError as PydanticValidationError
+
+    try:
+        return AgentRecord(
+            name=name,
+            domain=domain,
+            protocol=protocol,
+            target_host=fallback.target,
+            port=fallback.port,
+            ipv4_hint=fallback.ipv4hint,
+            ipv6_hint=fallback.ipv6hint,
+            capabilities=capabilities,
+            legacy_resolved=legacy_resolved,
+            cap_uri=fallback.cap,
+            cap_sha256=fallback.cap_sha256,
+            bap=bap,
+            policy_uri=fallback.policy,
+            realm=fallback.realm,
+            sig=fallback.sig,
+            connect_class=fallback.connect_class,
+            connect_meta=fallback.connect_meta,
+            enroll_uri=fallback.enroll_uri,
+            capability_source=capability_source,
+            endpoint_source="dns_txt_fallback",
+            agent_card=agent_card,
+        )
+    except PydanticValidationError as exc:
+        logger.warning(
+            "txt_fallback.model_rejected",
+            fqdn=fqdn,
+            target=fallback.target,
+            error=str(exc),
+            note="TXT v=1 record parsed but failed AgentRecord validation; skipping",
+        )
+        return None
 
 
 async def _query_capabilities(fqdn: str) -> list[str]:

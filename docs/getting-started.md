@@ -1794,6 +1794,60 @@ python examples/demo_full.py
 | `NIOS_WAPI_VERSION` | nios | WAPI version (default: `2.13.7`) |
 | `NIOS_VERIFY_SSL` | nios | Verify TLS certificate (default: `false`) |
 
+## TXT-Fallback Discovery (For SVCB-less DNS)
+
+Every backend bundled with dns-aid-core (Route53, Cloudflare, Google Cloud
+DNS, NS1, NIOS, UDDI) exposes SVCB through its API. If you operate against a
+DNS system that doesn't — an older managed-DNS appliance, a smaller hosted
+provider, or self-hosted DNS that hasn't adopted SVCB yet — the SDK can still
+discover agents at your zone via a TXT-encoded fallback record.
+
+### Consuming TXT-fallback zones (no opt-in needed)
+
+`discover()` automatically falls back to a `v=1` TXT record when SVCB and
+HTTPS RR both return NoAnswer. The returned `AgentRecord` carries
+`endpoint_source="dns_txt_fallback"`; otherwise the API is identical:
+
+```python
+import dns_aid
+
+# Works against SVCB-publishing zones AND against TXT-fallback-publishing zones.
+result = await dns_aid.discover("legacy.example.com", protocol="mcp", name="chat")
+for agent in result.agents:
+    print(agent.name, agent.endpoint_url, agent.endpoint_source)
+```
+
+### Publishing TXT-fallback records (experimental, opt-in)
+
+If you write your own backend for a DNS system that can't write SVCB,
+override `supports_svcb` to return `False`:
+
+```python
+from dns_aid.backends.base import DNSBackend
+
+class MyLegacyBackend(DNSBackend):
+    @property
+    def supports_svcb(self) -> bool:
+        return False
+    # ... rest of the backend ...
+```
+
+Then publish with the env flag set:
+
+```bash
+export DNS_AID_EXPERIMENTAL_TXT_FALLBACK=1
+dns-aid publish --name chat --domain example.com --protocol mcp \
+    --endpoint mcp.example.com --backend my-legacy
+```
+
+The publisher emits a single TXT RR with a `v=1` body carrying the same
+target / port / cap / policy / realm information SVCB would carry, plus the
+companion metadata TXT (`capabilities=...`, `version=...`) so downstream
+readers and `dig` debugging still work. SVCB is not attempted.
+
+Wire-format grammar: [`docs/rfc/wire-format.abnf`](rfc/wire-format.abnf)
+under `dns-aid-txt-fallback`.
+
 ## Experimental Models
 
 The following modules define forward-looking data models for `.well-known/agent-card.json`

@@ -172,6 +172,8 @@ that round-trip the same inputs through every surface.
 2. For each agent: Query SVCB {name}.{domain} (draft-02 flat primary owner)
    → extract endpoint, port, ALPN + DNS-AID custom params (cap, bap,
    policy, realm, well-known)
+   On SVCB NoAnswer → try HTTPS RR (RFC 9460 type 65)
+   On HTTPS miss → try TXT v=1 fallback at the same owner name (see below)
 3. For each agent: If cap URI present → fetch capability document (primary).
    Otherwise, if well-known is set, construct
    https://<svcb-target>/.well-known/<well-known-value> and fetch
@@ -187,6 +189,47 @@ publishers MAY additionally publish a walkable AliasMode record at
 Consumers MUST try the flat form first. Older publishers using the
 legacy `-01` form `_{name}._{protocol}._agents.{domain}` are
 resolvable when consumers set `DNS_AID_LEGACY_01_FALLBACK=1`.
+
+#### SVCB → HTTPS → TXT fallback ladder
+
+For DNS deployments that don't expose SVCB records (older managed-DNS
+appliances, smaller hosted providers, self-hosted DNS that hasn't adopted
+SVCB yet), the discoverer falls back to a TXT-encoded representation of the
+same agent endpoint information. The TXT body mirrors the SVCB SvcParam
+names as `key=value` pairs and is distinguished from the existing
+capabilities/metadata TXT by a leading `v=1` discriminator:
+
+```
+chat.example.com. 3600 IN TXT (
+    "v=1 target=mcp.example.com port=443 alpn=mcp "
+    "cap=https://example.com/cap/chat-v1.json cap-sha256=..."
+)
+```
+
+Resolution order inside `_query_single_agent` — the full ladder runs at
+each owner name before the next owner name is tried:
+
+1. SVCB at the flat FQDN `{name}.{domain}` — primary, preserves existing
+   behaviour
+2. HTTPS RR (type 65, same SVCB family) at the flat FQDN
+3. **TXT `v=1` fallback** at the flat FQDN — for SVCB-less zones; produces
+   a complete `AgentRecord` with `endpoint_source="dns_txt_fallback"`.
+   Coexists with metadata TXT (`capabilities=...`) on the same owner name
+4. Only when legacy fallback is active (`allow_legacy=True` or
+   `DNS_AID_LEGACY_01_FALLBACK=1`): the same SVCB → HTTPS → TXT ladder at
+   the legacy `-01` owner name, with `legacy_resolved=True` stamped on the
+   result
+
+A flat TXT `v=1` record therefore takes precedence over a leftover legacy
+SVCB record: a publisher who deliberately placed a draft-02 flat TXT
+record has migrated, and stale `-01` records must not shadow it.
+
+The publisher side is opt-in: a backend declaring `supports_svcb=False`
+combined with `DNS_AID_EXPERIMENTAL_TXT_FALLBACK=1` writes the fallback
+TXT instead of SVCB. Backends that do support SVCB (every bundled
+backend today) are unaffected. Full grammar in
+[`docs/rfc/wire-format.abnf`](rfc/wire-format.abnf) under
+`dns-aid-txt-fallback`.
 
 ### HTTP Index Discovery
 
