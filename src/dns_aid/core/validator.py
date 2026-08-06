@@ -200,9 +200,37 @@ async def _check_svcb_record(fqdn: str) -> dict | None:
     return None
 
 
+def _response_carries_rrsig(response) -> bool:
+    """Whether the answer section carried RRSIG records.
+
+    Diagnostic only, never a trust signal. Seeing an RRSIG proves the zone
+    signs its records; it proves nothing about whether *this* answer is
+    authentic, because an attacker able to spoof the answer can spoof an RRSIG
+    beside it. Only a validating resolver's AD flag (or full chain validation)
+    can speak to authenticity.
+
+    Its value is telling two very different situations apart when the AD flag
+    is absent: a genuinely unsigned zone, versus a signed zone behind a
+    resolver that does not validate. The first is the zone owner's problem, the
+    second is the caller's, and reporting both as "unvalidated" left an
+    operator no way to know which one they had.
+    """
+    try:
+        for rrset in getattr(response, "answer", []) or []:
+            if rrset.rdtype == dns.rdatatype.RRSIG or getattr(rrset, "covers", None):
+                return True
+    except Exception:  # nosec B110 — diagnostic only; never gates a trust decision
+        pass
+    return False
+
+
 async def _check_dnssec(fqdn: str) -> bool:
     """
     Check if DNSSEC is validated for the FQDN.
+
+    Thin wrapper over :func:`_check_dnssec_with_evidence`, kept so the existing
+    contract (a single bool driving ``require_dnssec`` and ``min_dnssec``) is
+    unchanged.
 
     Limitation: This only checks the AD (Authenticated Data) flag in the DNS
     response from the configured recursive resolver. It does NOT perform
@@ -213,6 +241,22 @@ async def _check_dnssec(fqdn: str) -> bool:
 
     Returns True if DNSSEC AD (Authenticated Data) flag is set.
     """
+    validated, _signed = await _check_dnssec_with_evidence(fqdn)
+    return validated
+
+
+async def _check_dnssec_with_evidence(fqdn: str) -> tuple[bool, bool]:
+    """Check DNSSEC and report what evidence was seen.
+
+    Returns ``(validated, zone_signs_records)``. The first is the AD flag and
+    is the only value any trust decision may use. The second records whether
+    RRSIGs appeared in the response, which distinguishes an unsigned zone from
+    a signed zone behind a non-validating resolver.
+
+    Both come from one query: the DO bit is already set, so the RRSIGs are in
+    the response we fetch regardless.
+    """
+    signed = False
     try:
         resolver = dns.asyncresolver.Resolver()
 
@@ -222,23 +266,25 @@ async def _check_dnssec(fqdn: str) -> bool:
         # Query with DNSSEC
         try:
             answer = await resolver.resolve(fqdn, "SVCB")
+            signed = _response_carries_rrsig(answer.response)
 
             # Check AD (Authenticated Data) flag in response
             if hasattr(answer.response, "flags"):
                 ad_flag = answer.response.flags & dns.flags.AD
                 if ad_flag:
                     logger.debug("DNSSEC validated", fqdn=fqdn)
-                    return True
+                    return True, signed
 
         except dns.resolver.NoAnswer:
             # Try TXT as fallback for DNSSEC check
             try:
                 answer = await resolver.resolve(fqdn, "TXT")
+                signed = signed or _response_carries_rrsig(answer.response)
                 if hasattr(answer.response, "flags"):
                     ad_flag = answer.response.flags & dns.flags.AD
                     if ad_flag:
                         logger.debug("DNSSEC validated via TXT", fqdn=fqdn)
-                        return True
+                        return True, signed
             except Exception:
                 pass
 
@@ -247,8 +293,8 @@ async def _check_dnssec(fqdn: str) -> bool:
 
     # Note: Many domains don't have DNSSEC enabled
     # This is not necessarily an error
-    logger.debug("DNSSEC not validated", fqdn=fqdn)
-    return False
+    logger.debug("DNSSEC not validated", fqdn=fqdn, zone_signs_records=signed)
+    return False, signed
 
 
 # DNSSEC algorithm number → name mapping (RFC 8624)

@@ -285,3 +285,80 @@ class TestTrustReporting:
 
         assert "unvalidated" in result.output
         assert "resolver" in result.output
+
+
+class TestDnssecEvidence:
+    """RRSIG evidence separates an unsigned zone from a non-validating resolver.
+
+    ``dnssec_validated=False`` alone cannot say whether the zone owner never
+    signed, or the caller's own resolver refuses to validate a zone that is
+    signed. Those have opposite owners and opposite fixes.
+
+    The safety property matters more than the feature: seeing an RRSIG proves
+    the zone signs records, never that *this* answer is authentic, since an
+    attacker able to spoof an answer can spoof an RRSIG beside it. So it must
+    stay strictly diagnostic.
+    """
+
+    def _agent_with(self, validated, signed):
+        a = _agent(None, None, sig=None)
+        a.dnssec_validated = validated
+        a.dnssec_signed = signed
+        return a
+
+    def test_signed_zone_behind_a_lazy_resolver_says_so(self):
+        rendered = _format_dnssec(False, signed=True)
+
+        assert "unvalidated" in rendered
+        assert "resolver" in rendered
+
+    def test_genuinely_unsigned_zone_says_so(self):
+        rendered = _format_dnssec(False, signed=False)
+
+        assert "unvalidated" in rendered
+        assert "unsigned" in rendered
+
+    def test_the_two_causes_do_not_render_alike(self):
+        assert _format_dnssec(False, signed=True) != _format_dnssec(False, signed=False)
+
+    def test_no_evidence_falls_back_to_the_plain_label(self):
+        assert _format_dnssec(False, signed=None) == "[yellow]unvalidated[/yellow]"
+
+    def test_validated_is_unaffected_by_the_evidence(self):
+        assert "validated" in _format_dnssec(True, signed=False)
+        assert "unvalidated" not in _format_dnssec(True, signed=False)
+
+    def test_evidence_never_relaxes_the_trust_gate(self):
+        """A signed-but-unvalidated zone must still fail require_dnssec.
+
+        This is the property that keeps the signal safe: if dnssec_signed ever
+        fed the trust decision, an attacker could spoof an RRSIG and be treated
+        as validated.
+        """
+        from dns_aid.core.filters import apply_filters
+
+        agent = self._agent_with(validated=False, signed=True)
+
+        assert apply_filters([agent], min_dnssec=True) == []
+
+    def test_json_and_mcp_agree_on_the_evidence(self):
+        agent = self._agent_with(validated=False, signed=True)
+
+        cli = json.loads(
+            _run_discover(agent, "--verify-dane", "--json").output[
+                _run_discover(agent, "--verify-dane", "--json").output.index("{") :
+            ]
+        )["agents"][0]
+
+        from dns_aid.mcp.server import discover_agents_via_dns
+
+        fn = getattr(discover_agents_via_dns, "fn", discover_agents_via_dns)
+        with patch(
+            "dns_aid.core.discoverer.discover",
+            new=AsyncMock(return_value=_result(agent)),
+        ):
+            mcp = fn(domain="agents.example.com", verify_dane=True)["agents"][0]
+
+        assert cli["dnssec_signed"] is True
+        assert mcp["dnssec_signed"] is True
+        assert cli["dnssec_validated"] == mcp["dnssec_validated"] is False

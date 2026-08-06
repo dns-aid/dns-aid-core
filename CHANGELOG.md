@@ -65,6 +65,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The CLI renders an unvalidated DNSSEC result as `unvalidated`, not `no`. The flag follows
   the AD bit, which a non-validating resolver never sets, so `no` asserted that a zone was
   unsigned when the more common cause is the caller's own resolver.
+- **`AgentRecord.dnssec_signed` separates an unsigned zone from a non-validating resolver.**
+  `dnssec_validated=False` could not distinguish "the zone owner never signed" from "the zone
+  is signed and your resolver will not validate it", which have opposite owners and opposite
+  fixes. RRSIG presence is now recorded from the response the DNSSEC check already fetches
+  (the DO bit is set, so no extra query), and the CLI reports `unvalidated (signed; resolver)`
+  or `unvalidated (zone unsigned)`. **Diagnostic only** — an attacker who can spoof an answer
+  can spoof an RRSIG beside it, so only `dnssec_validated` may inform a trust decision, and
+  `require_dnssec` / `min_dnssec` are unaffected.
 - **Key rollovers can overlap.** `sign_record(..., kid=...)` publishes a key identifier in
   the JWS protected header, verification selects the matching key from the JWKS, and
   `export_jwks_multi()` emits several keys in one document so the outgoing and incoming

@@ -822,6 +822,15 @@ class AgentRecord(BaseModel):
         "successful signature verification. None when verification did not succeed or was "
         "not attempted.",
     )
+    dnssec_signed: bool | None = Field(
+        default=None,
+        description="True when RRSIG records were seen on the response, meaning the zone "
+        "signs its records. DIAGNOSTIC ONLY -- never a trust signal: an attacker who can "
+        "spoof an answer can spoof an RRSIG beside it, so only dnssec_validated (the AD "
+        "flag) speaks to authenticity. Its purpose is to separate a genuinely unsigned zone "
+        "from a signed zone behind a non-validating resolver, which dnssec_validated=False "
+        "alone cannot do. None when the DNSSEC check did not run.",
+    )
     signature_status: str | None = Field(
         default=None,
         description="Why signature verification reached its answer: 'verified', 'invalid' "

@@ -715,6 +715,11 @@ def discover_agents_via_dns(
                         else {}
                     ),
                     **(
+                        {"dnssec_signed": agent.dnssec_signed}
+                        if agent.dnssec_signed is not None
+                        else {}
+                    ),
+                    **(
                         {"dane_verified": agent.dane_verified}
                         if (verify_dane or agent.dane_verified is not None)
                         else {}

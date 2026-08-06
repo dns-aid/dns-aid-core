@@ -158,7 +158,9 @@ class TestApplyPostDiscoveryScope:
 
     async def test_ard_only_require_dnssec_does_not_raise_or_call_check(self) -> None:
         ard = _ard_agent("chat")
-        with patch("dns_aid.core.validator._check_dnssec", new_callable=AsyncMock) as mock_check:
+        with patch(
+            "dns_aid.core.validator._check_dnssec_with_evidence", new_callable=AsyncMock
+        ) as mock_check:
             result = await self._run([ard], require_dnssec=True)
         assert result is False
         assert ard.dnssec_validated is False
@@ -167,9 +169,9 @@ class TestApplyPostDiscoveryScope:
     async def test_dns_all_validated_returns_true_and_stamps(self) -> None:
         a, b = _dns_agent("chat", validated=False), _dns_agent("search", validated=False)
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=True,
+            return_value=(True, True),
         ):
             result = await self._run([a, b], require_dnssec=True)
         assert result is True
@@ -178,9 +180,9 @@ class TestApplyPostDiscoveryScope:
     async def test_dns_unvalidated_raises(self) -> None:
         a = _dns_agent("chat", validated=False)
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=(False, False),
         ):
             with pytest.raises(DNSSECError):
                 await self._run([a], require_dnssec=True)
@@ -189,10 +191,10 @@ class TestApplyPostDiscoveryScope:
         dns_bad = _dns_agent("dnsbad", validated=False)
         ard = _ard_agent("ardagent")
 
-        async def selective(fqdn: str) -> bool:
-            return False  # the only in-scope agent (dns) fails
+        async def selective(fqdn: str) -> tuple[bool, bool]:
+            return False, False  # the only in-scope agent (dns) fails
 
-        with patch("dns_aid.core.validator._check_dnssec", new=selective):
+        with patch("dns_aid.core.validator._check_dnssec_with_evidence", new=selective):
             with pytest.raises(DNSSECError) as exc:
                 await self._run([dns_bad, ard], require_dnssec=True)
         msg = str(exc.value)
@@ -206,9 +208,9 @@ class TestApplyPostDiscoveryScope:
         # min_dnssec must STAMP (so the filter has real data) but never raise.
         a = _dns_agent("chat", validated=False)
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=(False, False),
         ) as mock_check:
             result = await self._run([a], min_dnssec=True)  # require_dnssec=False
         assert result is False
@@ -218,9 +220,9 @@ class TestApplyPostDiscoveryScope:
     async def test_min_dnssec_stamps_true_when_validated(self) -> None:
         a = _dns_agent("chat", validated=False)
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=True,
+            return_value=(True, True),
         ):
             await self._run([a], min_dnssec=True)
         assert a.dnssec_validated is True
@@ -229,9 +231,9 @@ class TestApplyPostDiscoveryScope:
         a = _dns_agent("chat", validated=False)
         with (
             patch(
-                "dns_aid.core.validator._check_dnssec",
+                "dns_aid.core.validator._check_dnssec_with_evidence",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=(True, True),
             ) as mock_dnssec,
             patch(
                 "dns_aid.core.discoverer._verify_agents_dane", new_callable=AsyncMock
@@ -469,9 +471,9 @@ class TestDiscoverVerifyDaneEndToEnd:
                 new=AsyncMock(),
             ),
             patch(
-                "dns_aid.core.validator._check_dnssec",
+                "dns_aid.core.validator._check_dnssec_with_evidence",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=(True, True),
             ),
             patch(
                 "dns_aid.core.validator._check_dane",

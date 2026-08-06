@@ -131,16 +131,20 @@ async def _apply_post_discovery(
 
     dnssec_scope = [a for a in agents if a.endpoint_source not in CATALOG_ENDPOINT_SOURCES]
     if dnssec_scope and (require_dnssec or min_dnssec or verify_dane):
-        from dns_aid.core.validator import _check_dnssec
+        from dns_aid.core.validator import _check_dnssec_with_evidence
 
         results = await asyncio.gather(
-            *[_check_dnssec(a.fqdn) for a in dnssec_scope],
+            *[_check_dnssec_with_evidence(a.fqdn) for a in dnssec_scope],
             return_exceptions=True,
         )
         for agent, outcome in zip(dnssec_scope, results, strict=True):
-            ok = outcome is True
+            # Only the AD flag feeds the trust decision. The RRSIG observation
+            # is recorded alongside it so an unvalidated result can say whether
+            # the zone is signed at all, but it never influences `ok`.
+            ok = isinstance(outcome, tuple) and outcome[0] is True
             per_agent_dnssec[agent.fqdn] = ok
             agent.dnssec_validated = ok
+            agent.dnssec_signed = outcome[1] if isinstance(outcome, tuple) else None
 
         if require_dnssec and not all(per_agent_dnssec.values()):
             failed = sorted(f for f, ok in per_agent_dnssec.items() if not ok)

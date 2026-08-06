@@ -526,6 +526,7 @@ def discover(
                         if (require_dnssec or min_dnssec or verify_dane)
                         else {}
                     ),
+                    **({"dnssec_signed": a.dnssec_signed} if a.dnssec_signed is not None else {}),
                     **(
                         {"dane_verified": a.dane_verified}
                         if (verify_dane or a.dane_verified is not None)
@@ -616,7 +617,7 @@ def discover(
         if show_signature:
             row.append(_format_signature(agent))
         if show_dnssec:
-            row.append(_format_dnssec(agent.dnssec_validated))
+            row.append(_format_dnssec(agent.dnssec_validated, agent.dnssec_signed))
         if verify_dane:
             row.append(_format_dane(agent.dane_verified))
         table.add_row(*row)
@@ -624,9 +625,9 @@ def discover(
     console.print(table)
     if show_dnssec and any(a.dnssec_validated is False for a in result.agents):
         console.print(
-            "\n[dim]Some records are unvalidated. The AD flag is only set by a validating "
-            "resolver, so this means either the zone is unsigned or your resolver does not "
-            "validate DNSSEC.[/dim]"
+            "\n[dim]Some records are unvalidated. 'signed; resolver' means the zone does "
+            "sign its records but your resolver is not validating them -- use a validating "
+            "resolver. 'zone unsigned' means the zone owner has not enabled DNSSEC.[/dim]"
         )
     console.print(f"\n[dim]Query: {result.query}[/dim]")
     console.print(f"[dim]Time: {result.query_time_ms:.2f}ms[/dim]")
@@ -643,7 +644,7 @@ _EXIT_AUTH = 77  # EX_NOPERM — directory rejected credentials (401/403)
 _EXIT_CONFIG = 78  # EX_CONFIG — directory_api_url not set
 
 
-def _format_dnssec(value: bool | None) -> str:
+def _format_dnssec(value: bool | None, signed: bool | None = None) -> str:
     """Render the DNSSEC outcome.
 
     False is deliberately NOT rendered as "no". The flag follows the AD bit,
@@ -656,6 +657,13 @@ def _format_dnssec(value: bool | None) -> str:
     if value is True:
         return "[green]validated[/green]"
     if value is False:
+        # RRSIG evidence turns one ambiguous answer into two actionable ones:
+        # the zone owner has not signed, or the caller's resolver will not
+        # validate. Same flag value, opposite owner.
+        if signed is True:
+            return "[yellow]unvalidated[/yellow]\n[dim](signed; resolver)[/dim]"
+        if signed is False:
+            return "[yellow]unvalidated[/yellow]\n[dim](zone unsigned)[/dim]"
         return "[yellow]unvalidated[/yellow]"
     return "[dim]not checked[/dim]"
 

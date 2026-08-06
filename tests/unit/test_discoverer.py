@@ -1690,9 +1690,9 @@ class TestPerAgentDnssec:
         )
 
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=True,
+            return_value=(True, True),
         ):
             result_level = await _apply_post_discovery(
                 [agent_a, agent_b],
@@ -1726,10 +1726,11 @@ class TestPerAgentDnssec:
         )
 
         async def selective_check(fqdn):
-            return fqdn == "chat.example.com"
+            validated = fqdn == "chat.example.com"
+            return validated, validated
 
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new=selective_check,
         ):
             with pytest.raises(DNSSECError) as excinfo:
