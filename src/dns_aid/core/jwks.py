@@ -28,6 +28,7 @@ import base64
 import json
 import time
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 import structlog
@@ -67,6 +68,29 @@ JWKS_WELL_KNOWN_PATH = "/.well-known/dns-aid-jwks.json"
 # fetched over HTTPS. (`_agents` is DNS-only, so it correctly keeps its
 # underscore; this host cannot.)
 JWKS_HOST_PREFIX = "dns-aid"
+
+
+class SignatureStatus(StrEnum):
+    """Why signature verification reached the answer it did.
+
+    ``signature_verified`` is deliberately tri-state, and the distinction it
+    cannot express on its own is why this exists: a JWKS that could not be
+    fetched is *unknown*, not *forged*. Reporting an unreachable key document
+    as a failed signature turns a CDN blip into an apparent attack, and --
+    worse -- turns a genuine attack into something operators learn to ignore.
+
+    The operationally important pair is EXPIRED versus INVALID. Both mean "do
+    not trust this record", but the first is answered by re-publishing and the
+    second by investigating; collapsing them into one boolean leaves the
+    operator no way to tell which they are looking at.
+    """
+
+    VERIFIED = "verified"  # signature valid AND bound to this record
+    INVALID = "invalid"  # a key was retrieved; the signature did not verify
+    UNBOUND = "unbound"  # signature valid but describes a different record
+    EXPIRED = "expired"  # signature lapsed; re-publish
+    NO_KEY = "no_key"  # no JWKS reachable / no key matched -- unknown
+    NOT_SIGNED = "not_signed"  # record carries no sig parameter
 
 
 def jwks_urls(zone: str) -> list[str]:
@@ -211,6 +235,28 @@ def export_jwks(
     }
 
 
+def export_jwks_multi(
+    keys: list[tuple[EllipticCurvePublicKey, str]],
+) -> dict[str, Any]:
+    """Export several public keys as one JWKS document.
+
+    A rollover needs the outgoing and incoming keys published together: records
+    signed before the roll still name the old ``kid`` and must keep verifying
+    until they are re-signed. Emitting a single key made every rotation a flag
+    day, so this is what makes staged key changes possible at all.
+
+    Args:
+        keys: (public key, kid) pairs, in any order.
+
+    Returns:
+        JWKS document containing every supplied key.
+    """
+    merged: list[dict[str, Any]] = []
+    for public_key, kid in keys:
+        merged.extend(export_jwks(public_key, kid=kid)["keys"])
+    return {"keys": merged}
+
+
 def import_public_key_from_jwk(jwk: dict[str, Any]) -> EllipticCurvePublicKey:
     """
     Import a public key from a JWK dict.
@@ -270,6 +316,7 @@ def import_public_key_from_jwk(jwk: dict[str, Any]) -> EllipticCurvePublicKey:
 def sign_record(
     payload: RecordPayload,
     private_key: EllipticCurvePrivateKey,
+    kid: str | None = None,
 ) -> str:
     """
     Sign a record payload with the private key.
@@ -280,12 +327,20 @@ def sign_record(
     Args:
         payload: The record payload to sign
         private_key: EC private key for signing
+        kid: Optional key identifier, published in the protected header so
+            verifiers can select the matching key during a rollover.
 
     Returns:
         Compact JWS string (base64url encoded)
     """
-    # JWS Header
-    header = {"alg": "ES256", "typ": "JWT"}
+    # JWS Header. `kid` names the key that produced this signature so a
+    # verifier can select it from a multi-key JWKS instead of trying every
+    # key -- the difference between a rollover that overlaps cleanly and one
+    # that is indistinguishable from a mismatch. Omitted when not supplied so
+    # the header stays byte-identical to previously published signatures.
+    header: dict[str, str] = {"alg": "ES256", "typ": "JWT"}
+    if kid is not None:
+        header["kid"] = kid
     header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")))
 
     # JWS Payload
@@ -318,10 +373,33 @@ def verify_signature(
     Returns:
         Tuple of (is_valid, payload or None)
     """
+    is_valid, payload, _status = verify_signature_detailed(jws, public_key)
+    return is_valid, payload
+
+
+def verify_signature_detailed(
+    jws: str,
+    public_key: EllipticCurvePublicKey,
+) -> tuple[bool, RecordPayload | None, SignatureStatus]:
+    """
+    Verify a JWS signature, reporting why it reached its answer.
+
+    Same checks as :func:`verify_signature`, but distinguishes a lapsed
+    signature from a cryptographically bad one. Both are "do not trust", yet
+    one is fixed by re-publishing and the other warrants investigation -- a
+    bare boolean cannot tell an operator which they have.
+
+    Args:
+        jws: Compact JWS string
+        public_key: EC public key for verification
+
+    Returns:
+        Tuple of (is_valid, payload or None, status)
+    """
     try:
         parts = jws.split(".")
         if len(parts) != 3:
-            return False, None
+            return False, None, SignatureStatus.INVALID
 
         header_b64, payload_b64, signature_b64 = parts
 
@@ -334,7 +412,7 @@ def verify_signature(
                 "Unsupported or missing JWS alg",
                 alg=header.get("alg") if isinstance(header, dict) else None,
             )
-            return False, None
+            return False, None, SignatureStatus.INVALID
 
         # Reconstruct signing input
         signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
@@ -352,8 +430,10 @@ def verify_signature(
 
         # Check expiration
         if payload_dict.get("exp", 0) < time.time():
+            # Lapsed, not forged: the publisher must re-sign. Reported
+            # separately so an operator is not sent hunting for an attacker.
             logger.warning("Signature expired", exp=payload_dict.get("exp"))
-            return False, None
+            return False, None, SignatureStatus.EXPIRED
 
         payload = RecordPayload(
             fqdn=payload_dict["fqdn"],
@@ -364,11 +444,11 @@ def verify_signature(
             exp=payload_dict["exp"],
         )
 
-        return True, payload
+        return True, payload, SignatureStatus.VERIFIED
 
     except Exception as e:
         logger.debug("Signature verification failed", error=str(e))
-        return False, None
+        return False, None, SignatureStatus.INVALID
 
 
 async def fetch_jwks(domain: str) -> dict[str, Any] | None:
@@ -485,33 +565,125 @@ async def verify_record_signature(
     Returns:
         Tuple of (is_valid, payload or None)
     """
-    # Fetch JWKS
+    is_valid, payload, _status = await verify_record_signature_detailed(domain, jws)
+    return is_valid, payload
+
+
+def _jws_kid(jws: str) -> str | None:
+    """Read the key identifier out of a compact JWS protected header."""
+    try:
+        header = json.loads(_b64url_decode(jws.split(".")[0]))
+    except Exception:
+        return None
+    kid = header.get("kid") if isinstance(header, dict) else None
+    return kid if isinstance(kid, str) else None
+
+
+def _candidate_keys(jwks: dict[str, Any], kid: str | None) -> list[dict[str, Any]]:
+    """Order the key set for verification, preferring an exact ``kid`` match.
+
+    Selecting by ``kid`` is what makes an overlapping key rollover possible:
+    the outgoing and incoming keys sit in the document together and each
+    signature names the one that produced it. Without it every signature is
+    tried against every key, so a rollover is indistinguishable from a
+    mismatch and nothing can be attributed to a signer.
+
+    Signatures published before ``kid`` was emitted carry no identifier, so the
+    unfiltered set is still tried -- older records keep verifying.
+    """
+    keys = [k for k in jwks.get("keys", []) if isinstance(k, dict)]
+    if kid is None:
+        return keys
+    # Strict when a kid is named: an empty result is the signal that this key
+    # is absent from the document we hold, which is what distinguishes "rolled
+    # in since we cached" from "this signature is bad". Falling back to the
+    # whole set here would hide that difference and defeat the refresh.
+    return [k for k in keys if k.get("kid") == kid]
+
+
+async def verify_record_signature_detailed(
+    domain: str,
+    jws: str,
+) -> tuple[bool, RecordPayload | None, SignatureStatus]:
+    """
+    Verify a record signature against the zone's JWKS, reporting why.
+
+    Distinguishes an unreachable key document (``NO_KEY`` -- unknown) from a
+    signature that was actually checked and rejected (``INVALID``) and from one
+    that simply lapsed (``EXPIRED``). Collapsing these into a single ``False``
+    made a network fault look identical to an attack.
+
+    Args:
+        domain: Publishing zone whose JWKS authenticates the record.
+        jws: The compact JWS carried in the record's ``sig`` parameter.
+
+    Returns:
+        Tuple of (is_valid, payload or None, status)
+    """
+    kid = _jws_kid(jws)
+
     jwks = await fetch_jwks(domain)
     if not jwks or "keys" not in jwks:
-        logger.warning("No JWKS available", domain=domain)
-        return False, None
+        # Nothing was verified. This is not evidence against the record.
+        logger.warning("No JWKS available", domain=domain, kid=kid)
+        return False, None, SignatureStatus.NO_KEY
 
-    # Try each key in the JWKS
-    for jwk in jwks["keys"]:
+    result = _verify_against(jwks, jws, kid, domain)
+
+    # A signature naming a key absent from the cached document is the
+    # signature of a rollover that happened inside the cache window. Refetch
+    # once rather than making the publisher wait out JWKS_CACHE_TTL.
+    if result is None and kid is not None:
+        logger.debug("kid not present in cached JWKS; refreshing once", domain=domain, kid=kid)
+        _jwks_cache.pop(domain, None)
+        refreshed = await fetch_jwks(domain)
+        if refreshed and "keys" in refreshed:
+            jwks = refreshed
+            result = _verify_against(jwks, jws, kid, domain)
+
+    if result is None:
+        # Either the signature named no key, or it named one this publisher
+        # does not list. Try the whole set: signatures published before kid was
+        # emitted carry no identifier, and a publisher may serve a JWKS whose
+        # entries omit kid entirely. Both must keep verifying.
+        result = _verify_against(jwks, jws, None, domain)
+
+    if result is None:
+        return False, None, SignatureStatus.NO_KEY
+    return result
+
+
+def _verify_against(
+    jwks: dict[str, Any],
+    jws: str,
+    kid: str | None,
+    domain: str,
+) -> tuple[bool, RecordPayload | None, SignatureStatus] | None:
+    """Try the key set. ``None`` means no key was usable at all."""
+    tried_any = False
+    last_status = SignatureStatus.INVALID
+
+    for jwk in _candidate_keys(jwks, kid):
         try:
             public_key = import_public_key_from_jwk(jwk)
-            is_valid, payload = verify_signature(jws, public_key)
-            if is_valid:
-                logger.info(
-                    "Signature verified successfully",
-                    domain=domain,
-                    kid=jwk.get("kid"),
-                )
-                return True, payload
         except Exception as e:
-            logger.debug(
-                "Key verification failed, trying next",
-                kid=jwk.get("kid"),
-                error=str(e),
-            )
+            logger.debug("Unusable JWK, trying next", kid=jwk.get("kid"), error=str(e))
             continue
 
-    return False, None
+        tried_any = True
+        is_valid, payload, status = verify_signature_detailed(jws, public_key)
+        if is_valid:
+            logger.info("Signature verified successfully", domain=domain, kid=jwk.get("kid"))
+            return True, payload, status
+        # An expired signature is expired regardless of which key is tried;
+        # keep that reason rather than reporting the last key's INVALID.
+        if status is SignatureStatus.EXPIRED:
+            return False, None, status
+        last_status = status
+
+    if not tried_any:
+        return None
+    return False, None, last_status
 
 
 # ============================================================================

@@ -1887,6 +1887,12 @@ async def _verify_agent_signatures(
     # Find agents with signatures to verify AND no DNSSEC pass.
     agents_with_sig = [a for a in agents if a.sig and not dnssec_validated.get(a.fqdn, False)]
 
+    from dns_aid.core.jwks import SignatureStatus as _Status
+
+    for _a in agents:
+        if _a.sig is None and _a.signature_status is None:
+            _a.signature_status = str(_Status.NOT_SIGNED)
+
     if not agents_with_sig:
         logger.debug("No agents with JWS signatures to verify")
         return
@@ -1897,7 +1903,7 @@ async def _verify_agent_signatures(
         domain=domain,
     )
 
-    from dns_aid.core.jwks import verify_record_signature
+    from dns_aid.core.jwks import SignatureStatus, verify_record_signature_detailed
 
     for agent in agents_with_sig:
         if agent.sig is None:
@@ -1910,7 +1916,7 @@ async def _verify_agent_signatures(
             # publisher would have to host the document at every name a
             # consumer might use.
             sig_zone = agent.domain or domain
-            is_valid, payload = await verify_record_signature(sig_zone, agent.sig)
+            is_valid, payload, status = await verify_record_signature_detailed(sig_zone, agent.sig)
 
             # A valid signature alone is insufficient. The signed payload
             # binds to a specific (fqdn, target, port, alpn) tuple — we
@@ -1936,7 +1942,22 @@ async def _verify_agent_signatures(
                 and payload.alpn == agent.protocol.value
             )
 
-            agent.signature_verified = payload_matches
+            if status is SignatureStatus.NO_KEY:
+                # No key document was reachable, so nothing was verified. This
+                # is unknown, not forged: a CDN blip or DNS outage must not be
+                # reported as a failed signature. require_signed still rejects
+                # the record (it demands `is True`), so this stays fail-closed
+                # while remaining honest about what was actually observed.
+                agent.signature_verified = None
+            elif is_valid and not payload_matches:
+                # Cryptographically sound but describing a different record --
+                # a lifted signature pasted onto a spoofed one.
+                agent.signature_verified = False
+                status = SignatureStatus.UNBOUND
+            else:
+                agent.signature_verified = payload_matches
+
+            agent.signature_status = str(status)
             agent.signature_algorithm = (
                 _extract_jws_algorithm(agent.sig) if payload_matches else None
             )
@@ -1968,7 +1989,11 @@ async def _verify_agent_signatures(
                     fqdn=agent.fqdn,
                 )
         except Exception as e:
-            agent.signature_verified = False
+            # Verification did not complete, so nothing was learned about the
+            # signature. None (not False) keeps "unknown" distinct from
+            # "rejected"; require_signed still drops the record.
+            agent.signature_verified = None
+            agent.signature_status = str(SignatureStatus.NO_KEY)
             agent.signature_algorithm = None
             logger.warning(
                 "JWS verification error",

@@ -822,6 +822,16 @@ class AgentRecord(BaseModel):
         "successful signature verification. None when verification did not succeed or was "
         "not attempted.",
     )
+    signature_status: str | None = Field(
+        default=None,
+        description="Why signature verification reached its answer: 'verified', 'invalid' "
+        "(a key was retrieved and the signature was rejected), 'unbound' (valid signature "
+        "describing a different record), 'expired' (lapsed; re-publish), 'no_key' (no JWKS "
+        "reachable, so nothing was verified), or 'not_signed'. Consumers should prefer this "
+        "over signature_verified when reporting to an operator: 'expired' and 'invalid' are "
+        "both False but call for different responses. None when verification was not "
+        "attempted. See dns_aid.core.jwks.SignatureStatus.",
+    )
 
     # ARD trust manifest (populated when this agent was discovered from — or
     # enriched by — an ARD ai-catalog entry carrying a trustManifest).

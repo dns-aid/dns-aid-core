@@ -115,12 +115,14 @@ class TestZoneAnchoring:
 
         zones_asked = []
 
+        from dns_aid.core.jwks import SignatureStatus
+
         async def fake_verify(zone, jws):
             zones_asked.append(zone)
-            return False, None
+            return False, None, SignatureStatus.INVALID
 
         with patch(
-            "dns_aid.core.jwks.verify_record_signature",
+            "dns_aid.core.jwks.verify_record_signature_detailed",
             new=AsyncMock(side_effect=fake_verify),
         ):
             # Entry point A: the caller queried the zone.

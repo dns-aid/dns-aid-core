@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `sig` SvcParam (`key65405`) is now read off DNS records.** It was parsed out of
+  the SVCB correctly and then discarded: the extraction below the parser handled nine of
+  the ten keys in `DNS_AID_KEY_MAP` and omitted `sig`, so `AgentRecord.sig` was always
+  `None` on the DNS discovery path, JWS verification never executed, and
+  `require_signed=True` returned no agents regardless of what had been published.
+  `publish --sign` wrote a signature no consumer could read back. A completeness test now
+  asserts every key in the map reaches a field on a discovered record.
+  *Behavior note:* `require_signed=True` now returns verified agents where it previously
+  returned an empty result.
+- **JWS signature validity is no longer derived from the DNS record TTL.** The publisher
+  passed `ttl` straight into the JWS `exp`, so a signature expired at the resolver
+  cache-refresh interval — one hour with the default TTL, thirty seconds at the floor —
+  while the record itself remained in DNS indefinitely. The relationship was inverted from
+  intent: the shorter the TTL chosen for fast propagation, the faster signatures broke.
+  Validity is now set by `publish(sig_validity_seconds=...)`, default 90 days, bounded to
+  1 hour–13 months. **Records signed by earlier versions should be re-published.**
+- **DANE verification tries every association in the TLSA RRset.** `_check_dane` returned
+  on the first association it examined, so an RRset with more than one record was decided
+  by RRset order. Because a certificate rollover is staged by publishing the outgoing and
+  incoming pins together (RFC 7671 §8.1) and a certificate is valid if it matches any
+  association (RFC 6698; RFC 7671 §5.1), rollovers could not overlap. The failure was
+  closed — a valid certificate rejected, never an invalid one accepted. A non-match now
+  advances to the next association and `False` is returned only after all were compared.
+- **An unverifiable result is no longer reported as a failed one.** A JWKS that could not
+  be fetched, and a TLSA association whose comparison raised, both returned `False` —
+  presenting a CDN blip or connection reset as a forged signature or a failed certificate
+  binding. Both now return `None` (unknown). `require_signed=True` remains fail-closed: it
+  requires `is True`, so `None` is still rejected.
+  *Behavior note:* `AgentRecord.signature_verified` may now be `None` where it was
+  previously `False`. Consumers testing `is True` are unaffected; consumers testing
+  `== False` to mean "rejected" should migrate to `signature_status`.
+
+### Added
+
+- **`AgentRecord.signature_status`** reports why verification reached its answer:
+  `verified`, `invalid`, `unbound` (a valid signature describing a different record),
+  `expired`, `no_key`, or `not_signed`. `expired` and `invalid` are both `False` but call
+  for different responses — re-publish versus investigate — which a boolean cannot express.
+  See `dns_aid.core.jwks.SignatureStatus`.
+- **Key rollovers can overlap.** `sign_record(..., kid=...)` publishes a key identifier in
+  the JWS protected header, verification selects the matching key from the JWKS, and
+  `export_jwks_multi()` emits several keys in one document so the outgoing and incoming
+  keys coexist while records are re-signed. A signature naming a key absent from the cached
+  document triggers exactly one forced refresh, so a key rolled in mid-cache-window is
+  picked up immediately rather than after `JWKS_CACHE_TTL`. Signatures published without a
+  `kid` still verify against the whole key set, and the header is byte-identical to before
+  when no `kid` is supplied.
+
+### Changed
+
+- **The JWKS document is fetched from `https://dns-aid.<zone>/.well-known/dns-aid-jwks.json`**,
+  derived from the record's own publishing zone rather than the name passed to `discover()`.
+  The previous zone-apex location remains supported as a deprecated fallback, so existing
+  deployments continue to verify (with a warning). Two reasons: a zone that exists only to
+  carry agent records has no web presence at its apex, and a `dns-aid.` host — unlike an
+  apex — may be `CNAME`d to a gateway, CDN, or bucket. The location is derived rather than
+  advertised in the record because this path runs when the DNS answer is unauthenticated,
+  so a pointer could be forged alongside the record it is meant to authenticate. Same shape
+  as MTA-STS (RFC 8461 §3.1).
+  *Migration:* publishers should serve the document at `dns-aid.<zone>`; the apex location
+  costs one extra failed lookup per verification until they do.
+
 ### Added
 
 - **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
