@@ -25,7 +25,13 @@ import os
 import dns.asyncresolver
 import pytest
 
-from dns_aid.core.discoverer import _parse_svcb_custom_params, discover
+from dns_aid.core.discoverer import (
+    _parse_svcb_custom_params,
+    _verify_agent_signatures,
+    discover,
+    discover_at_fqdn,
+)
+from dns_aid.core.jwks import SignatureStatus, jwks_urls
 
 pytestmark = [
     pytest.mark.live,  # excluded by CI's `-m "not live"`; run explicitly with the env flag
@@ -39,6 +45,11 @@ pytestmark = [
 # DNSSEC branch and JWS verification is correctly skipped.
 SIGNED_ZONE = "ai.infoblox.com"
 SIGNED_ZONE_AGENT = "ddi-agent"
+
+# An UNSIGNED zone carrying a signed record. Required as a separate fixture:
+# the JWS path only runs where DNSSEC does not, so it cannot be exercised on
+# the signed zone above.
+SIGNED_RECORD_FQDN = "ddi-agent.agents.ai.infoblox.com"
 
 VALIDATING_RESOLVER = "8.8.8.8"
 
@@ -140,6 +151,75 @@ class TestLiveSignedZone:
                 "system resolver is non-validating (expected on many hosts) — "
                 "pinned resolver validated correctly, which is the assertion that matters"
             )
+
+
+class TestLiveSignedRecordOnUnsignedZone:
+    """agents.ai.infoblox.com — unsigned, so the JWS path actually executes.
+
+    The signed zone above is the wrong place to exercise JWS: DNSSEC validates
+    there, so verification is skipped by design. Only an unsigned zone reaches
+    this code, which is also the only situation the JWS path exists to serve.
+    """
+
+    @pytest.mark.asyncio
+    async def test_signature_is_read_off_the_record(self, pinned_resolver):
+        """The blocker: a published key65405 must reach AgentRecord.sig."""
+        agent = await discover_at_fqdn(SIGNED_RECORD_FQDN)
+
+        assert agent is not None, f"{SIGNED_RECORD_FQDN} did not resolve"
+        assert agent.sig, "key65405 is published but was not read off the record"
+        assert agent.sig.count(".") == 2, "sig is not a compact JWS"
+
+    @pytest.mark.asyncio
+    async def test_verification_reports_an_actionable_reason(self, pinned_resolver):
+        """Whatever the outcome, it must say why -- not just True/False.
+
+        Deliberately not asserting a fixed status: the record's signature
+        lapses and is re-published over time. What must hold is that the status
+        is meaningful and consistent with signature_verified, and that an
+        unreachable key document is never reported as a rejection.
+        """
+        agent = await discover_at_fqdn(SIGNED_RECORD_FQDN)
+        await _verify_agent_signatures([agent], agent.domain, dnssec_validated=False)
+
+        assert agent.signature_status in {
+            SignatureStatus.VERIFIED,
+            SignatureStatus.EXPIRED,
+            SignatureStatus.INVALID,
+            SignatureStatus.UNBOUND,
+            SignatureStatus.NO_KEY,
+        }, f"unexpected status {agent.signature_status!r}"
+
+        if agent.signature_status == SignatureStatus.VERIFIED:
+            assert agent.signature_verified is True
+            assert agent.signature_algorithm == "ES256"
+        elif agent.signature_status == SignatureStatus.NO_KEY:
+            # Nothing was verified -- unknown, never a rejection.
+            assert agent.signature_verified is None
+        else:
+            assert agent.signature_verified is False
+
+    @pytest.mark.asyncio
+    async def test_require_signed_is_fail_closed(self, pinned_resolver):
+        """An unverified record never passes the trust gate."""
+        from dns_aid.core.filters import _matches_signed
+
+        agent = await discover_at_fqdn(SIGNED_RECORD_FQDN)
+        await _verify_agent_signatures([agent], agent.domain, dnssec_validated=False)
+
+        passes = _matches_signed(agent, require=True, allowed_algorithms=None)
+        assert passes is (agent.signature_verified is True)
+
+    @pytest.mark.asyncio
+    async def test_jwks_is_located_from_the_record_zone(self, pinned_resolver):
+        """Derived host first, apex fallback -- both anchored on the record."""
+        agent = await discover_at_fqdn(SIGNED_RECORD_FQDN)
+        candidates = jwks_urls(agent.domain)
+
+        assert candidates[0].startswith(f"https://dns-aid.{agent.domain}/")
+        assert candidates[1].startswith(f"https://{agent.domain}/")
+        # The zone must come from the record, not the FQDN that was queried.
+        assert agent.domain != SIGNED_RECORD_FQDN
 
 
 class TestLiveRecordParsesSig:
