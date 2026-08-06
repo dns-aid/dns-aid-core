@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import typing as t
 from typing import Any
 
 import structlog
@@ -58,6 +59,7 @@ def otel_trace_processor(
 def configure_logging(
     level: str = "INFO",
     json_output: bool = False,
+    stream: t.TextIO | None = None,
 ) -> None:
     """
     Configure logging for DNS-AID.
@@ -65,14 +67,23 @@ def configure_logging(
     Args:
         level: Log level (DEBUG, INFO, WARNING, ERROR)
         json_output: If True, output logs as JSON
+        stream: Where diagnostics go. Defaults to stderr so machine-readable
+            stdout stays parseable; ``DNS_AID_LOG_STREAM=stdout`` overrides.
+            Structlog previously wrote to stdout while the stdlib half of this
+            same function wrote to stderr, so `discover --json` emitted log
+            lines ahead of the document. Embedders shipping stdout under the
+            twelve-factor convention can opt back in rather than losing every
+            line silently.
     """
+    if stream is None:
+        stream = sys.stdout if os.environ.get("DNS_AID_LOG_STREAM") == "stdout" else sys.stderr
     # Get level from environment or parameter
     level = os.environ.get("DNS_AID_LOG_LEVEL", level).upper()
 
     # Configure standard logging
     logging.basicConfig(
         format="%(message)s",
-        stream=sys.stderr,
+        stream=stream,
         level=getattr(logging, level, logging.INFO),
     )
 
@@ -94,7 +105,11 @@ def configure_logging(
         processors=processors,  # type: ignore[arg-type]
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level, logging.INFO)),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        # stderr, matching the basicConfig stream above and mcp/server.py. Diagnostics
+        # on stdout corrupt every machine-readable surface the CLI has: `discover
+        # --json` emitted log lines ahead of the document, so piping it to a parser
+        # failed. The MCP server already had to route around this for JSON-RPC.
+        logger_factory=structlog.PrintLoggerFactory(file=stream),
         cache_logger_on_first_use=True,
     )
 

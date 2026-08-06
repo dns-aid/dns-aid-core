@@ -31,11 +31,17 @@ JWKS_DOC = {"keys": [{"kty": "EC", "crv": "P-256", "kid": "k1", "x": "eA", "y": 
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    from dns_aid.core.jwks import _jwks_cache
+    from dns_aid.core.jwks import _jwks_cache, _jwks_forced_refresh, _jwks_negative
 
+    # _jwks_forced_refresh is process-global and keyed on the shared test zone.
+    # Leaving it set made the kid-refresh tests pass or fail on collection order.
     _jwks_cache.clear()
+    _jwks_forced_refresh.clear()
+    _jwks_negative.clear()
     yield
     _jwks_cache.clear()
+    _jwks_forced_refresh.clear()
+    _jwks_negative.clear()
 
 
 class TestDerivedLocation:

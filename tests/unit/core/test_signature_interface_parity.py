@@ -92,13 +92,25 @@ class TestMcpSurface:
         ):
             return fn(domain="agents.example.com", verify_signatures=True)
 
-    def test_payload_carries_every_signature_field(self):
+    def test_payload_carries_the_signature_outcome(self):
         entry = self._payload(_agent("verified", True))["agents"][0]
 
-        for field in ("sig", "signature_verified", "signature_status", "signature_algorithm"):
+        for field in ("signature_verified", "signature_status", "signature_algorithm"):
             assert field in entry, f"{field} never reaches the MCP caller"
         assert entry["signature_status"] == "verified"
         assert entry["signature_verified"] is True
+
+    def test_payload_omits_the_raw_jws(self):
+        """The blob costs context and carries nothing a model can act on.
+
+        ``signature_status`` already reports the outcome, and re-verifying the
+        JWS would mean re-fetching the JWKS the server just checked. The CLI
+        ``--json`` payload still carries it, where a script may want the
+        artefact itself.
+        """
+        entry = self._payload(_agent("verified", True))["agents"][0]
+
+        assert "sig" not in entry
 
     def test_payload_distinguishes_unknown_from_rejected(self):
         entry = self._payload(_agent("no_key", None))["agents"][0]
@@ -367,19 +379,29 @@ class TestDnssecEvidence:
 class TestDnssecSkipIsNotAFailure:
     """Asking for both strong guarantees at once must not return nothing.
 
-    JWS verification is skipped for a DNSSEC-validated record, because the DNS
-    chain already authenticates it and JWS exists as the fallback for zones
-    that cannot sign. Skipping is right. The trust gate treating that skip as a
-    failure was not: --require-signed together with DNSSEC returned zero agents.
+    JWS verification is skipped for a DNSSEC-validated record: the DNS chain
+    already authenticates it and JWS exists as the fallback for zones that
+    cannot sign. Skipping is right, and --require-signed together with DNSSEC
+    returning zero agents was not.
+
+    The first fix let the skip satisfy the gate. That was wrong in both
+    directions. DNSSEC here is the AD flag with no chain validation, so an
+    attacker forging answers for an unsigned zone could set AD=1, attach a
+    garbage sig, and pass with no cryptography performed. And a skip carries no
+    algorithm, so require_signature_algorithm dropped every agent.
+
+    The skip is an optimisation, never a substitute. When the caller demands a
+    signature, discovery verifies it, and the record passes on its own merits.
     """
 
     def _signed(self, dnssec: bool, with_sig: bool = True):
         from dns_aid.core.jwks import RecordPayload, generate_keypair, sign_record
 
-        priv, _ = generate_keypair()
+        priv, pub = generate_keypair()
+        self._pub = pub
         sig = sign_record(
             RecordPayload.from_agent_record(
-                "a.example.com", "t.example.com", 443, "mcp", ttl_seconds=90 * 86400
+                "a.example.com", "t.example.com", 443, "mcp", validity_seconds=90 * 86400
             ),
             priv,
         )
@@ -402,6 +424,24 @@ class TestDnssecSkipIsNotAFailure:
         )
         return agent
 
+    async def _verify(self, agent, *, skip: bool):
+        """skip=False is what discovery does when the caller demanded a signature."""
+        from unittest.mock import AsyncMock, patch
+
+        from dns_aid.core.discoverer import _verify_agent_signatures
+        from dns_aid.core.jwks import export_jwks
+
+        with patch(
+            "dns_aid.core.jwks.fetch_jwks",
+            new=AsyncMock(return_value=export_jwks(self._pub)),
+        ):
+            await _verify_agent_signatures(
+                [agent],
+                "example.com",
+                dnssec_validated=(agent.dnssec_validated if skip else {}),
+            )
+        return agent
+
     @pytest.mark.asyncio
     async def test_skip_is_labelled_not_left_blank(self):
         agent = await self._verified(self._signed(dnssec=True))
@@ -409,46 +449,56 @@ class TestDnssecSkipIsNotAFailure:
         assert agent.signature_status == SignatureStatus.SKIPPED_DNSSEC
 
     @pytest.mark.asyncio
-    async def test_require_signed_keeps_a_dnssec_validated_signed_record(self):
-        """The reported bug: two strong guarantees together returned nothing."""
-        from dns_aid.core.filters import apply_filters
+    async def test_require_signed_verifies_rather_than_trusting_the_skip(self):
+        """The record passes because its signature verified, not because it skipped."""
+        from dns_aid.core.filters import _matches_signed
 
-        agent = await self._verified(self._signed(dnssec=True))
+        agent = self._signed(dnssec=True)
+        # require_signature=True is what discovery passes when the caller asked
+        # for a signature: the skip map is empty, so JWS runs.
+        await self._verify(agent, skip=False)
 
-        assert apply_filters([agent], require_signed=True) == [agent]
+        assert agent.signature_status == SignatureStatus.VERIFIED
+        assert agent.signature_verified is True
+        assert agent.signature_algorithm == "ES256"
+        assert _matches_signed(agent, require=True, allowed_algorithms=None) is True
 
     @pytest.mark.asyncio
-    async def test_require_signed_still_means_signed(self):
-        """A record with no signature is not signed, however it was validated.
+    async def test_require_signature_algorithm_survives_a_dnssec_zone(self):
+        """A skip populates no algorithm, so this returned nothing on a signed zone."""
+        from dns_aid.core.filters import _matches_signed
 
-        Deliberately narrow. Callers wanting to filter on the DNS chain have
-        min_dnssec for that.
+        agent = self._signed(dnssec=True)
+        await self._verify(agent, skip=False)
+
+        assert _matches_signed(agent, require=True, allowed_algorithms=["ES256"]) is True
+
+    @pytest.mark.asyncio
+    async def test_a_skip_alone_never_satisfies_the_gate(self):
+        """The security half: a spoofable AD bit is not a signature.
+
+        DNSSEC validation here is the AD flag with no chain validation. If a skip
+        could satisfy require_signed, an attacker who can forge DNS for an
+        unsigned zone -- exactly the adversary JWS defends against -- would set
+        AD=1, attach anything at all, and pass.
         """
-        from dns_aid.core.filters import apply_filters
+        from dns_aid.core.filters import _matches_signed
 
-        agent = await self._verified(self._signed(dnssec=True, with_sig=False))
+        agent = self._signed(dnssec=True)
+        await self._verify(agent, skip=True)
 
-        assert apply_filters([agent], require_signed=True) == []
-
-    @pytest.mark.asyncio
-    async def test_an_explicit_algorithm_demand_still_needs_a_real_jws(self):
-        """Only a verified signature carries an algorithm to match against."""
-        from dns_aid.core.filters import apply_filters
-
-        agent = await self._verified(self._signed(dnssec=True))
-
-        assert (
-            apply_filters([agent], require_signed=True, require_signature_algorithm=["ES256"]) == []
-        )
+        assert agent.signature_status == SignatureStatus.SKIPPED_DNSSEC
+        assert agent.signature_verified is None
+        assert _matches_signed(agent, require=True, allowed_algorithms=None) is False
 
     @pytest.mark.asyncio
-    async def test_unverified_without_dnssec_is_still_dropped(self):
-        """Fail-closed is unchanged where nothing authenticated the record."""
-        from dns_aid.core.filters import apply_filters
+    async def test_an_unsigned_record_on_a_signed_zone_is_still_not_signed(self):
+        from dns_aid.core.filters import _matches_signed
 
-        agent = await self._verified(self._signed(dnssec=False))
+        agent = self._signed(dnssec=True, with_sig=False)
+        await self._verify(agent, skip=True)
 
-        assert apply_filters([agent], require_signed=True) == []
+        assert _matches_signed(agent, require=True, allowed_algorithms=None) is False
 
 
 class TestExpiryIsSurfacedBeforeItBites:
@@ -486,3 +536,136 @@ class TestExpiryIsSurfacedBeforeItBites:
         entry = json.loads(out[out.index("{") :])["agents"][0]
 
         assert entry["signature_expires_at"] == agent.signature_expires_at
+
+
+class TestEveryEmittedFieldIsDocumented:
+    """For an MCP tool the docstring is the schema a model sees.
+
+    A field the tool emits but never documents is invisible to the consumer,
+    which is the same failure mode as a field that is documented but never
+    emitted. Both halves are hand-maintained here, so they are diffed rather
+    than trusted -- the same tripwire DNS_AID_KEY_MAP has in
+    test_svcb_param_coverage.
+    """
+
+    def _documented_agent_fields(self) -> set[str]:
+        import inspect
+        import re
+
+        from dns_aid.mcp.server import discover_agents_via_dns
+
+        fn = getattr(discover_agents_via_dns, "fn", discover_agents_via_dns)
+        doc = inspect.getdoc(fn) or ""
+        returns = doc.split("Returns:", 1)[-1]
+        # Agent fields are the deeper-indented bullets under "agents:".
+        agents_block = returns.split("- agents:", 1)[-1].split("- count:", 1)[0]
+        return set(re.findall(r"^\s+- (\w+):", agents_block, re.M))
+
+    def _emitted_agent_fields(self) -> set[str]:
+        from dns_aid.mcp.server import discover_agents_via_dns
+
+        fn = getattr(discover_agents_via_dns, "fn", discover_agents_via_dns)
+        agent = _agent("verified", True)
+        agent.dnssec_validated = True
+        agent.dnssec_signed = True
+        agent.dane_verified = True
+        agent.signature_expires_at = 1_900_000_000
+        agent.cap_uri = "https://example.com/cap.json"
+        agent.cap_sha256 = "abc"
+        agent.well_known_path = "agent-card.json"
+        agent.bap = "mcp"
+        agent.policy_uri = "https://example.com/policy.json"
+        agent.realm = "production"
+        agent.description = "an agent"
+
+        with patch(
+            "dns_aid.core.discoverer.discover",
+            new=AsyncMock(return_value=_result(agent)),
+        ):
+            payload = fn(
+                domain="agents.example.com",
+                verify_signatures=True,
+                verify_dane=True,
+                min_dnssec=True,
+            )
+        return set(payload["agents"][0].keys())
+
+    def test_no_emitted_field_is_undocumented(self):
+        undocumented = self._emitted_agent_fields() - self._documented_agent_fields()
+
+        assert not undocumented, f"emitted but invisible to the model: {sorted(undocumented)}"
+
+    def test_the_raw_jws_stays_out_of_the_payload(self):
+        assert "sig" not in self._emitted_agent_fields()
+
+
+class TestCliSigValidityIsRejectedAtTheBoundary:
+    """Reject in the CLI rather than letting the library raise a bare ValueError."""
+
+    def _publish(self, *args):
+        return runner.invoke(
+            app,
+            [
+                "publish",
+                "--name",
+                "x",
+                "--domain",
+                "example.com",
+                "--protocol",
+                "mcp",
+                "--endpoint",
+                "e.example.com",
+                *args,
+            ],
+            env={"DNS_AID_BACKEND": "mock"},
+        )
+
+    def test_sig_validity_without_sign_is_rejected(self):
+        result = self._publish("--sig-validity", "7776000")
+
+        assert result.exit_code == 1
+        assert "--sig-validity requires --sign" in result.output
+
+    def test_below_the_minimum_is_rejected_with_the_range(self):
+        result = self._publish("--sign", "--private-key", "/tmp/k.pem", "--sig-validity", "60")
+
+        assert result.exit_code == 1
+        assert "3600" in result.output and "34128000" in result.output
+
+    def test_above_the_maximum_is_rejected(self):
+        result = self._publish(
+            "--sign", "--private-key", "/tmp/k.pem", "--sig-validity", "99999999"
+        )
+
+        assert result.exit_code == 1
+        assert "must be between" in result.output
+
+
+class TestExpiryRenderingEdges:
+    """Verification is binary until it is not, so the window must read honestly."""
+
+    def _at(self, days: float):
+        import time as _t
+
+        a = _agent("verified", True)
+        a.signature_expires_at = int(_t.time() + days * 86400)
+        return a
+
+    def test_a_comfortable_window_is_green(self):
+        assert "green" in _format_signature(self._at(60))
+
+    def test_inside_the_warning_threshold_is_amber(self):
+        assert "re-publish" in _format_signature(self._at(10))
+
+    def test_a_lapsed_window_never_reads_as_valid(self):
+        """A negative countdown previously rendered as verified in amber."""
+        rendered = _format_signature(self._at(-1))
+
+        assert "expired" in rendered
+        assert "left" not in rendered
+
+    def test_epoch_zero_is_not_silently_dropped(self):
+        a = _agent("verified", True)
+        a.signature_expires_at = 0
+
+        assert "expired" in _format_signature(a)

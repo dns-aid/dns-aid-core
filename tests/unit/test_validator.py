@@ -3,6 +3,7 @@
 
 """Tests for DNS-AID validator module."""
 
+import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import dns.flags
@@ -48,13 +49,17 @@ def mock_svcb_rdata_with_port():
     return rdata
 
 
+_DANE_PEER_CERT = b"peer-certificate-der-bytes"
+
+
 @pytest.fixture
 def mock_tlsa_rdata():
     """Create a mock TLSA rdata object."""
     rdata = MagicMock()
     rdata.usage = 3  # DANE-EE
-    rdata.selector = 1  # SPKI
+    rdata.selector = 0  # full certificate DER, so no x509 parsing is needed
     rdata.mtype = 1  # SHA-256
+    rdata.cert = hashlib.sha256(_DANE_PEER_CERT).digest()
     return rdata
 
 
@@ -588,9 +593,9 @@ class TestCheckDaneVerifyCert:
         with (
             patch("dns_aid.core.validator.dns.asyncresolver.Resolver") as mock_resolver,
             patch(
-                "dns_aid.core.validator._match_dane_cert",
+                "dns_aid.core.validator._fetch_peer_cert",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=_DANE_PEER_CERT,
             ),
         ):
             resolver_instance = MagicMock()
@@ -609,9 +614,9 @@ class TestCheckDaneVerifyCert:
         with (
             patch("dns_aid.core.validator.dns.asyncresolver.Resolver") as mock_resolver,
             patch(
-                "dns_aid.core.validator._match_dane_cert",
+                "dns_aid.core.validator._fetch_peer_cert",
                 new_callable=AsyncMock,
-                return_value=False,
+                return_value=b"a-different-certificate",
             ),
         ):
             resolver_instance = MagicMock()

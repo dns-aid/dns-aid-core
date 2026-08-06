@@ -7,6 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`AgentRecord.signature_status`** reports why verification reached its answer:
+  `verified`, `invalid`, `unbound` (a valid signature describing a different record),
+  `expired`, `no_key`, or `not_signed`. `expired` and `invalid` are both `False` but call
+  for different responses — re-publish versus investigate — which a boolean cannot express.
+  See `dns_aid.core.jwks.SignatureStatus`.
+- **The signature outcome is now visible from every interface.** `dns-aid discover` gains a
+  Signature column (shown when `--verify-signatures` or `--require-signed` is set) and emits
+  `sig`, `signature_verified`, `signature_status` and `signature_algorithm` in `--json`. An
+  empty result under `--require-signed` now says the agents were dropped by the trust gate
+  rather than reading as "nothing published". `dns-aid publish` gains `--sig-validity`. The
+  MCP `discover_agents_via_dns` tool gains `verify_signatures`, so an agent can ask for the
+  status without also filtering on it, and returns `signature_verified`, `signature_status`
+  and `signature_algorithm` in its agent payload; the raw JWS is deliberately omitted from
+  the MCP payload and kept in CLI `--json`.
+  Output for unsigned records is unchanged on every interface.
+- **DNSSEC and DANE outcomes are reportable from the CLI and MCP.** `dnssec_validated` was
+  never emitted by either, and `dane_verified` only when non-null, so a caller could see a
+  verified signature and nothing about the two anchors beneath it. Both are now reported once
+  the check has run, and `dane_verified` is emitted even when null, because null is the
+  meaningful answer: without a DNSSEC-validated chain a TLSA match is demoted to unknown
+  (RFC 6698 section 10.1), and omitting it made a demotion look like no TLSA record at all.
+  The CLI renders an unvalidated DNSSEC result as `unvalidated`, not `no`. The flag follows
+  the AD bit, which a non-validating resolver never sets, so `no` asserted that a zone was
+  unsigned when the more common cause is the caller's own resolver.
+- **`--require-signed` no longer cancels out DNSSEC.** JWS verification used to be skipped
+  for a DNSSEC-validated record, and the trust gate treated that skip as a failure, so asking
+  for both of the strongest guarantees at once returned zero agents. `verify_signatures` now
+  always verifies, and the gate requires a real verified JWS. The skip is gone rather than
+  whitelisted: DNSSEC here is the AD flag with no chain validation, so accepting a skip as
+  proof would let an attacker who can forge answers for an unsigned zone set AD=1, attach any
+  `sig`, and pass `require_signed` with no cryptography performed. Cost is one JWKS fetch per
+  zone (cached), not one per agent. A record with no signature at all is still not "signed"
+  (use `min_dnssec` to filter on the DNS chain).
+- **Diagnostics moved from stdout to stderr.** `configure_logging()` sent structlog output to
+  stdout while sending stdlib logging to stderr, so `discover --json` emitted log lines ahead
+  of the document and piping it to a parser failed on the first byte. BREAKING for embedders
+  who capture stdout: pass `configure_logging(stream=...)`, or set `DNS_AID_LOG_STREAM=stdout`
+  to restore the old behaviour.
+- **`RecordPayload.from_agent_record(ttl_seconds=)` is deprecated in favour of
+  `validity_seconds=`.** BREAKING for callers passing it positionally. The old keyword still
+  works and warns, is removed in 0.30.0, and passing both now raises `TypeError` rather than
+  letting the deprecated name win silently. Signature validity is independent of the DNS TTL.
+- **The record signature now covers every DNS-AID SvcParam, not just the endpoint tuple.** A
+  new optional `svcb` claim binds `cap`, `cap-sha256`, `bap`, `policy`, `realm`,
+  `connect-class`, `connect-meta`, `enroll-uri` and `well-known`. Without it a genuine
+  signature could be replayed onto a record whose capability pointer and digest had been
+  swapped, and still report `verified`. Records signed before the claim existed keep
+  verifying and report the new `signature_covers_params` field as `False`; the claim is
+  omitted rather than nulled so their payloads serialise byte-identically. Opt in to refusing
+  reduced coverage with `require_signed_params=True`, planned to become the default in 0.30.0.
+- **DANE now authenticates the TLSA RRset itself** (RFC 6698 Section 4.1) instead of relying
+  solely on the agent's SVCB owner name, which is a different zone whenever the target is
+  off-zone. Both checks are applied: the first proves the pin was not forged, the second that
+  the name dialled was not. The endpoint dial is also SSRF-guarded, matching every other
+  network sink in the package.
+- **TLSA usages 0 and 2 are now reported as unevaluable (`null`) rather than compared against
+  the end-entity certificate** (RFC 7671 Section 5.1). Deployments publishing only `2 1 1`
+  where the trust anchor is the leaf move from `dane_verified: true` to `null`; publish an
+  additional `3 1 1` association to keep a definite verdict.
+- **DANE runs concurrently** (up to 8 at a time) under a 60s aggregate budget, so a wide zone
+  cannot outlive the MCP server's per-call cap. Endpoints not reached keep `dane_verified:
+  null` and the cap is logged rather than passing silently.
+- **An unmatched `kid` whose signature is rejected by every key the publisher serves now
+  reports `invalid` rather than `no_key`.** `no_key` is reserved for "nothing could be
+  checked". Consumers alerting on `invalid` will see new alerts. The verdict no longer depends
+  on whether a network refetch succeeded, which an attacker could influence.
+- **`--sig-validity` without `--sign` now exits 1** instead of being accepted and ignored.
+- **`mcp` is bounded below 2.** `mcp>=1.28.1` had no upper bound and resolved to 2.0.0, which
+  removed `mcp.server.fastmcp`, so `from mcp.server.fastmcp import FastMCP` failed at import
+  and `pip install 'dns-aid[mcp]'` produced a broken MCP server. Present in 0.27.0 as well.
+- **`AgentRecord.signature_expires_at`** exposes when a verified signature lapses. Verification
+  is binary right up to the moment it flips to expired, so the remaining window was the one
+  signal nobody had. The CLI shows the days left and turns amber inside two weeks.
+- **`AgentRecord.dnssec_signed` separates an unsigned zone from a non-validating resolver.**
+  `dnssec_validated=False` could not distinguish "the zone owner never signed" from "the zone
+  is signed and your resolver will not validate it", which have opposite owners and opposite
+  fixes. RRSIG presence is now recorded from the response the DNSSEC check already fetches
+  (the DO bit is set, so no extra query), and the CLI reports `unvalidated (signed; resolver)`
+  or `unvalidated (zone unsigned)`. **Diagnostic only** — an attacker who can spoof an answer
+  can spoof an RRSIG beside it, so only `dnssec_validated` may inform a trust decision, and
+  `require_dnssec` / `min_dnssec` are unaffected.
+- **Key rollovers can overlap.** `sign_record(..., kid=...)` publishes a key identifier in
+  the JWS protected header, verification selects the matching key from the JWKS, and
+  `export_jwks_multi()` emits several keys in one document so the outgoing and incoming
+  keys coexist while records are re-signed. A signature naming a key absent from the cached
+  document triggers at most one forced refresh per domain per cache window, so a key rolled
+  in mid-cache-window is picked up without waiting for `JWKS_CACHE_TTL`. Because `kid` comes
+  off an unauthenticated DNS record the budget is keyed by domain rather than by `kid`; the
+  cost is that a bogus `kid` may delay a genuine rollover by up to one window, which is
+  bounded and self-healing. The refetch bypasses the cache rather than evicting it, so one
+  unmatched `kid` no longer degrades concurrent lookups for the same domain. Signatures published without a
+  `kid` still verify against the whole key set, and the header is byte-identical to before
+  when no `kid` is supplied.
+
+
+- **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
+  against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
+  private-use SvcParamKeys (`key65280`–`key65534`), so `CloudflareBackend` sets
+  `supports_private_svcb_keys = True`. DNS-AID custom params (cap, cap-sha256, bap,
+  policy, realm, … → `key65400`–`key65409`) are written directly to the SVCB record
+  instead of being demoted to TXT, matching the NS1 and NIOS backends.
+
+### Changed
+
+- **The JWKS document is fetched from `https://dns-aid.<zone>/.well-known/dns-aid-jwks.json`**,
+  derived from the record's own publishing zone rather than the name passed to `discover()`.
+  The previous zone-apex location remains supported as a deprecated fallback, so existing
+  deployments continue to verify (with a warning). Two reasons: a zone that exists only to
+  carry agent records has no web presence at its apex, and a `dns-aid.` host — unlike an
+  apex — may be `CNAME`d to a gateway, CDN, or bucket. The location is derived rather than
+  advertised in the record because this path runs when the DNS answer is unauthenticated,
+  so a pointer could be forged alongside the record it is meant to authenticate. Same shape
+  as MTA-STS (RFC 8461 §3.1).
+  *Migration:* publishers should serve the document at `dns-aid.<zone>`; the apex location
+  costs one extra failed lookup per verification until they do.
+
 ### Fixed
 
 - **The `sig` SvcParam (`key65405`) is now read off DNS records.** It was parsed out of
@@ -41,84 +159,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously `False`. Consumers testing `is True` are unaffected; consumers testing
   `== False` to mean "rejected" should migrate to `signature_status`.
 
-### Added
-
-- **`AgentRecord.signature_status`** reports why verification reached its answer:
-  `verified`, `invalid`, `unbound` (a valid signature describing a different record),
-  `expired`, `no_key`, or `not_signed`. `expired` and `invalid` are both `False` but call
-  for different responses — re-publish versus investigate — which a boolean cannot express.
-  See `dns_aid.core.jwks.SignatureStatus`.
-- **The signature outcome is now visible from every interface.** `dns-aid discover` gains a
-  Signature column (shown when `--verify-signatures` or `--require-signed` is set) and emits
-  `sig`, `signature_verified`, `signature_status` and `signature_algorithm` in `--json`. An
-  empty result under `--require-signed` now says the agents were dropped by the trust gate
-  rather than reading as "nothing published". `dns-aid publish` gains `--sig-validity`. The
-  MCP `discover_agents_via_dns` tool gains `verify_signatures`, so an agent can ask for the
-  status without also filtering on it, and returns the same four fields in its agent payload.
-  Output for unsigned records is unchanged on every interface.
-- **DNSSEC and DANE outcomes are reportable from the CLI and MCP.** `dnssec_validated` was
-  never emitted by either, and `dane_verified` only when non-null, so a caller could see a
-  verified signature and nothing about the two anchors beneath it. Both are now reported once
-  the check has run, and `dane_verified` is emitted even when null, because null is the
-  meaningful answer: without a DNSSEC-validated chain a TLSA match is demoted to unknown
-  (RFC 6698 section 10.1), and omitting it made a demotion look like no TLSA record at all.
-  The CLI renders an unvalidated DNSSEC result as `unvalidated`, not `no`. The flag follows
-  the AD bit, which a non-validating resolver never sets, so `no` asserted that a zone was
-  unsigned when the more common cause is the caller's own resolver.
-- **`--require-signed` no longer cancels out DNSSEC.** JWS verification is skipped for a
-  DNSSEC-validated record, because the DNS chain already authenticates it and JWS exists as
-  the fallback for zones that cannot sign. The trust gate treated that skip as a failure, so
-  asking for both of the strongest guarantees at once returned zero agents. The skip is now
-  labelled `skipped_dnssec` and passes `require_signed`. Deliberately narrow: a record with
-  no signature at all is still not "signed" (use `min_dnssec` to filter on the DNS chain),
-  and an explicit `require_signature_algorithm` still needs a real verified JWS.
-- **`mcp` is bounded below 2.** `mcp>=1.28.1` had no upper bound and resolved to 2.0.0, which
-  removed `mcp.server.fastmcp`, so `from mcp.server.fastmcp import FastMCP` failed at import
-  and `pip install 'dns-aid[mcp]'` produced a broken MCP server. Present in 0.27.0 as well.
-- **`AgentRecord.signature_expires_at`** exposes when a verified signature lapses. Verification
-  is binary right up to the moment it flips to expired, so the remaining window was the one
-  signal nobody had. The CLI shows the days left and turns amber inside two weeks.
-- **`AgentRecord.dnssec_signed` separates an unsigned zone from a non-validating resolver.**
-  `dnssec_validated=False` could not distinguish "the zone owner never signed" from "the zone
-  is signed and your resolver will not validate it", which have opposite owners and opposite
-  fixes. RRSIG presence is now recorded from the response the DNSSEC check already fetches
-  (the DO bit is set, so no extra query), and the CLI reports `unvalidated (signed; resolver)`
-  or `unvalidated (zone unsigned)`. **Diagnostic only** — an attacker who can spoof an answer
-  can spoof an RRSIG beside it, so only `dnssec_validated` may inform a trust decision, and
-  `require_dnssec` / `min_dnssec` are unaffected.
-- **Key rollovers can overlap.** `sign_record(..., kid=...)` publishes a key identifier in
-  the JWS protected header, verification selects the matching key from the JWKS, and
-  `export_jwks_multi()` emits several keys in one document so the outgoing and incoming
-  keys coexist while records are re-signed. A signature naming a key absent from the cached
-  document triggers exactly one forced refresh, so a key rolled in mid-cache-window is
-  picked up immediately rather than after `JWKS_CACHE_TTL`. Signatures published without a
-  `kid` still verify against the whole key set, and the header is byte-identical to before
-  when no `kid` is supplied.
-
-### Changed
-
-- **The JWKS document is fetched from `https://dns-aid.<zone>/.well-known/dns-aid-jwks.json`**,
-  derived from the record's own publishing zone rather than the name passed to `discover()`.
-  The previous zone-apex location remains supported as a deprecated fallback, so existing
-  deployments continue to verify (with a warning). Two reasons: a zone that exists only to
-  carry agent records has no web presence at its apex, and a `dns-aid.` host — unlike an
-  apex — may be `CNAME`d to a gateway, CDN, or bucket. The location is derived rather than
-  advertised in the record because this path runs when the DNS answer is unauthenticated,
-  so a pointer could be forged alongside the record it is meant to authenticate. Same shape
-  as MTA-STS (RFC 8461 §3.1).
-  *Migration:* publishers should serve the document at `dns-aid.<zone>`; the apex location
-  costs one extra failed lookup per verification until they do.
-
-### Added
-
-- **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
-  against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
-  private-use SvcParamKeys (`key65280`–`key65534`), so `CloudflareBackend` sets
-  `supports_private_svcb_keys = True`. DNS-AID custom params (cap, cap-sha256, bap,
-  policy, realm, … → `key65400`–`key65409`) are written directly to the SVCB record
-  instead of being demoted to TXT, matching the NS1 and NIOS backends.
-
-### Fixed
 
 - **Cloudflare TXT records now write each value as its own RFC 1035 `<character-string>`**
   (quoted, with escaping) instead of space-joining all values into a single string.

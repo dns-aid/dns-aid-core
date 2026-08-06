@@ -45,6 +45,19 @@ def redact_url_for_log(url: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc))
 
 
+# The address each URL was vetted at, so a caller can dial the literal instead of
+# re-resolving. Validating a NAME and then connecting to the same NAME resolves
+# twice, and only the first is checked: a hostile authoritative server with a
+# one-second TTL answers public, then loopback. Measured retrieving an internal
+# service's certificate through the DANE path.
+_last_vetted_ip: dict[str, str | None] = {}
+
+
+def vetted_ip_for(url: str) -> str | None:
+    """The address ``validate_fetch_url`` approved for this URL, if any."""
+    return _last_vetted_ip.get(url)
+
+
 def validate_fetch_url(url: str) -> str:
     """
     Validate that a URL is safe to fetch.
@@ -98,6 +111,7 @@ def validate_fetch_url(url: str) -> str:
     except socket.gaierror as e:
         raise UnsafeURLError(f"Cannot resolve hostname '{hostname}': {e}") from e
 
+    vetted: str | None = None
     for _family, _type, _proto, _canonname, sockaddr in addrinfos:
         ip_str = sockaddr[0]
         try:
@@ -105,11 +119,19 @@ def validate_fetch_url(url: str) -> str:
         except ValueError:
             continue
 
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        # Allow-list the globally routable space rather than enumerating the
+        # bad ranges. The enumeration missed RFC 6598 shared address space
+        # (100.64.0.0/10 -- Alibaba Cloud metadata at 100.100.100.200, Tailscale
+        # tailnets, carrier-grade NAT, some k8s fabrics) and multicast, both of
+        # which a forgeable SVCB target could name.
+        if not ip.is_global or ip.is_multicast or ip.is_unspecified:
             raise UnsafeURLError(
                 f"URL resolves to non-public IP {ip_str} (hostname '{hostname}'): {url}"
             )
+        if vetted is None:
+            vetted = str(ip_str)
 
+    _last_vetted_ip[url] = vetted
     return url
 
 

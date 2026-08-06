@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hmac
 import json
 import os
 import shlex
@@ -101,6 +102,40 @@ async def _execute_discovery(
     return []
 
 
+# DANE runs one TLS handshake per agent. Bounded so a wide zone cannot open a
+# socket per agent at once, and so discovery cannot outlive the MCP server's
+# 120s per-call cap on a zone that publishes many endpoints.
+MAX_CONCURRENT_DANE = 8
+# The signature phase is bounded the same way. Its unit of work is a cached JWKS
+# fetch per zone rather than a TLS handshake per agent, so it can run wider.
+MAX_CONCURRENT_SIG_VERIFY = 16
+SIG_VERIFY_BUDGET_SECONDS = 45.0
+DANE_TOTAL_BUDGET_SECONDS = 60.0
+
+
+def _dnssec_check_runs(
+    *,
+    require_dnssec: bool = False,
+    min_dnssec: bool = False,
+    verify_dane: bool = False,
+    verify_signatures: bool = False,
+) -> bool:
+    """Whether discovery computes a per-agent DNSSEC verdict for these options.
+
+    One predicate, three callers. ``_apply_post_discovery`` uses it to decide
+    whether to run the check; the CLI and the MCP server use it to decide whether
+    ``dnssec_validated`` carries a real answer or should be omitted as "not
+    checked". The field is a plain bool defaulting to False, so emitting it when
+    no check ran reports "not checked" as "failed validation".
+
+    It lives here because the same boolean written out three times drifts the
+    moment one copy changes: adding ``verify_signatures`` to the computation gate
+    without touching the other two silently dropped a real verdict from both
+    machine-readable surfaces.
+    """
+    return bool(require_dnssec or min_dnssec or verify_dane or verify_signatures)
+
+
 async def _apply_post_discovery(
     agents: list[AgentRecord],
     require_dnssec: bool,
@@ -120,17 +155,35 @@ async def _apply_post_discovery(
     stays at its default. Every other agent (a real ``dns_svcb`` record, or an
     explicit ``direct`` / ``directory`` endpoint) IS checked, fail-safe.
 
-    The per-agent DNSSEC check runs when ``require_dnssec``, ``min_dnssec``, or
-    ``verify_dane`` is set (so the ``min_dnssec`` filter has real data and DANE can
-    be DNSSEC-anchored); ``require_dnssec`` additionally raises when an in-scope
-    agent is unvalidated.
+    The per-agent DNSSEC check runs when ``require_dnssec``, ``min_dnssec``,
+    ``verify_dane``, or ``verify_signatures`` is set; ``require_dnssec``
+    additionally raises when an in-scope agent is unvalidated.
+
+    ``verify_signatures`` belongs in that list because the JWS branch consumes the
+    verdict: a DNSSEC-validated record skips JWS, and without the check every agent
+    reads as unvalidated. Omitting it made the same record on the same zone through
+    the same resolver report ``dnssec_validated=False`` and ``VERIFIED`` on its own,
+    but ``True`` and ``SKIPPED_DNSSEC`` once an unrelated flag like ``verify_dane``
+    was added. It cost nothing while the field was internal, and became a false
+    statement about a zone's posture once discovery started reporting it.
+
+    Query cost: one DNSSEC lookup per agent. This used to be offset by skipping
+    the JWKS fetch on a signed zone, but the skip was removed -- an AD flag with
+    no chain validation must not suppress cryptography a caller asked for -- so
+    the lookup is now a straight addition. The JWKS itself is fetched once per
+    zone, single-flighted and cached.
 
     Returns whether DNSSEC was validated across all in-scope (non-catalog) agents.
     """
     per_agent_dnssec: dict[str, bool] = {}
 
     dnssec_scope = [a for a in agents if a.endpoint_source not in CATALOG_ENDPOINT_SOURCES]
-    if dnssec_scope and (require_dnssec or min_dnssec or verify_dane):
+    if dnssec_scope and _dnssec_check_runs(
+        require_dnssec=require_dnssec,
+        min_dnssec=min_dnssec,
+        verify_dane=verify_dane,
+        verify_signatures=verify_signatures,
+    ):
         from dns_aid.core.validator import _check_dnssec_with_evidence
 
         results = await asyncio.gather(
@@ -160,7 +213,33 @@ async def _apply_post_discovery(
             logger.debug("Endpoint enrichment failed (non-fatal)", exc_info=True)
 
     if verify_signatures and agents:
-        await _verify_agent_signatures(agents, domain, dnssec_validated=per_agent_dnssec)
+        # A DNSSEC-validated record normally skips JWS: the DNS chain already
+        # authenticates it and JWS is the fallback for zones that cannot sign.
+        # That is an optimisation, never a substitute. When the caller demanded a
+        # signature, verify it.
+        #
+        # Letting the skip satisfy the demand broke it in both directions at once.
+        # Too permissive: DNSSEC here is the AD flag with no chain validation, so
+        # an attacker who can forge answers for an unsigned zone -- precisely the
+        # adversary JWS exists to stop -- sets AD=1, attaches any garbage sig, and
+        # require_signed passes with no cryptography performed. Too strict: a skip
+        # populates no signature_algorithm, so require_signature_algorithm dropped
+        # every agent on a validating resolver while returning them all on a
+        # non-validating one.
+        # Always verify. verify_signatures means verify signatures.
+        #
+        # The skip existed because a DNSSEC-validated record is already
+        # authenticated, so the JWS is redundant. But DNSSEC here is the AD flag
+        # with no chain validation, and an on-path attacker or a hostile resolver
+        # sets that bit at will -- which is the exact adversary the JWS fallback
+        # exists to stop. Letting it suppress the check meant a forged record
+        # reported skipped_dnssec, documented to consumers as "not checked
+        # because DNSSEC already authenticated it, the stronger guarantee". A
+        # reassuring sentence produced entirely from attacker-controlled input,
+        # on a record whose signature would have failed.
+        #
+        # The JWKS is cached per zone, so the cost is one fetch, not one per agent.
+        await _verify_agent_signatures(agents, domain, dnssec_validated={})
 
     if verify_dane and agents:
         await _verify_agents_dane(agents)
@@ -179,19 +258,91 @@ async def _verify_agents_dane(agents: list[AgentRecord]) -> None:
     """
     from dns_aid.core.validator import _check_dane
 
-    for agent in agents:
-        target = agent.target_host
-        if not target:
+    targets = [a for a in agents if a.target_host]
+    if not targets:
+        return
+
+    # Bounded concurrency, bounded total. This ran strictly sequentially, and each
+    # check opens a TLS connection worth up to DANE_CONNECT_TIMEOUT plus teardown,
+    # so a zone with twenty agents blocked discovery for minutes. The MCP server
+    # caps a tool call at 120s, so a large zone lost every result rather than just
+    # its DANE column. The semaphore also keeps a wide zone from opening one socket
+    # per agent at once.
+    sem = asyncio.Semaphore(MAX_CONCURRENT_DANE)
+
+    async def _one(agent: AgentRecord) -> None:
+        # Gate BEFORE dialling. The demotion below discards the result for an
+        # unauthenticated record anyway, so opening the connection bought
+        # nothing and left an attacker-chosen host:port reachable with strictly
+        # less capability than a DANE verdict requires.
+        if not agent.dnssec_validated:
+            agent.dane_verified = None
+            return
+        async with sem:
+            try:
+                dane = await _check_dane(agent.target_host, agent.port, verify_cert=True)
+            except Exception:  # noqa: BLE001 — DANE is best-effort defense-in-depth
+                logger.debug("DANE verification failed", agent=agent.name, exc_info=True)
+                dane = None
+            # TWO gates, neither replacing the other. _check_dane requires AD on
+            # the TLSA RRset's own owner name (RFC 6698 Section 4.1); this one
+            # requires it on the record that named the target.
+            #
+            # LIMIT, stated plainly because the code cannot enforce it: both are
+            # AD-flag-only. validator.py does not build or verify a DNSSEC chain,
+            # so both gates rest on trusting the resolver and the path to it. An
+            # attacker who can set AD on answers this client sees defeats both at
+            # once. What is proven is "the resolver asserted AD on both RRsets",
+            # not "both RRsets are authentic". Full chain validation is the fix
+            # and is not implemented here. Without it an
+            # attacker who can forge the SVCB answer for an unsigned zone points
+            # target at a zone they own and legitimately DNSSEC-sign, publishes a
+            # real TLSA pinning their own certificate, and collects
+            # dane_verified=True: every signature checks out, on a host they
+            # chose. RFC 6698 Section 10.1 requires the whole chain to the name
+            # dialled, not just the leaf data at the end of it.
+            if dane is not None and not agent.dnssec_validated:
+                dane = None
+            agent.dane_verified = dane
+
+    tasks = [asyncio.create_task(_one(a)) for a in targets]
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=DANE_TOTAL_BUDGET_SECONDS)
+    except BaseException:
+        # asyncio.wait propagates cancellation to its caller WITHOUT cancelling
+        # the awaitables it was given. Without this, a consumer wrapping
+        # discover() in wait_for left every task alive with no one holding a
+        # reference: sockets open, AgentRecords the caller already discarded
+        # still being mutated, and "Task was destroyed but it is pending" at
+        # loop close.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    # _one swallows _check_dane failures, but the assignment after it is a
+    # Pydantic model write that can raise. Unretrieved, that surfaces later as a
+    # GC warning with the agent silently holding a stale value.
+    for task in done:
+        if task.cancelled():
             continue
-        try:
-            dane = await _check_dane(target, agent.port, verify_cert=True)
-        except Exception:  # noqa: BLE001 — DANE is best-effort defense-in-depth
-            logger.debug("DANE verification failed", agent=agent.name, exc_info=True)
-            dane = None
-        # DANE without a DNSSEC-validated chain carries no integrity guarantee.
-        if dane is not None and not agent.dnssec_validated:
-            dane = None
-        agent.dane_verified = dane
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("DANE task failed", error=str(exc))
+
+    if pending:
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        # Unchecked agents keep dane_verified=None, which reads as unknown rather
+        # than as a failed binding. Logged rather than dropped silently: a capped
+        # run that says nothing is indistinguishable from full coverage.
+        logger.warning(
+            "DANE budget exhausted; remaining endpoints left unverified",
+            checked=len(done),
+            unchecked=len(pending),
+            budget_seconds=DANE_TOTAL_BUDGET_SECONDS,
+        )
 
 
 def _drop_unverified_off_domain(agents: list[AgentRecord], domain: str) -> list[AgentRecord]:
@@ -240,6 +391,7 @@ async def discover(
     min_dnssec: bool = False,
     text_match: str | None = None,
     require_signed: bool = False,
+    require_signed_params: bool = False,
     require_signature_algorithm: list[str] | None = None,
     allow_legacy: bool | None = None,
 ) -> DiscoveryResult:
@@ -392,6 +544,26 @@ async def discover(
     # sole trust anchor — drop any that did not verify even when require_signed
     # is off, so verify_signatures alone can't surface an unverified off-domain
     # record.
+    # Reduced coverage is reported loudly even when not filtered on. Every record
+    # published before the svcb claim binds only the endpoint tuple, so its
+    # capability pointer can be swapped while the signature still verifies.
+    # require_signed_params refuses those, but it defaults off so that existing
+    # records keep matching -- which means without this warning the exposure is
+    # silent for exactly the population that has it.
+    unattested = [
+        a.fqdn
+        for a in agents
+        if a.signature_verified is True and a.signature_covers_params is not True
+    ]
+    if unattested:
+        logger.warning(
+            "signature verified but does not cover the record parameters; "
+            "the capability pointer on these records is not attested. "
+            "Ask the publisher to re-sign, or set require_signed_params=True to refuse them",
+            count=len(unattested),
+            fqdns=unattested[:10],
+        )
+
     agents = _drop_unverified_off_domain(agents, domain)
 
     # Apply Path A in-memory filters (FR-002, FR-021..FR-023). When no filter kwargs are
@@ -408,6 +580,7 @@ async def discover(
         min_dnssec=min_dnssec,
         text_match=text_match,
         require_signed=require_signed,
+        require_signed_params=require_signed_params,
         require_signature_algorithm=require_signature_algorithm,
     )
     if len(agents) != pre_filter_count:
@@ -1917,9 +2090,9 @@ async def _verify_agent_signatures(
 
     from dns_aid.core.jwks import SignatureStatus, verify_record_signature_detailed
 
-    for agent in agents_with_sig:
+    async def _verify_one(agent: AgentRecord) -> None:
         if agent.sig is None:
-            continue
+            return
         try:
             # Anchor the JWKS lookup to the record's own publishing zone, not
             # to the string the caller passed to discover(). Otherwise the same
@@ -1945,6 +2118,7 @@ async def _verify_agent_signatures(
             # case-insensitive and may carry a trailing dot, so a
             # legitimately-signed record must not be rejected over those
             # cosmetic differences.
+            agent.signature_covers_params = False
             payload_matches = (
                 is_valid
                 and payload is not None
@@ -1953,6 +2127,38 @@ async def _verify_agent_signatures(
                 and payload.port == agent.port
                 and payload.alpn == agent.protocol.value
             )
+
+            # The four fields above pin the endpoint. Everything else the record
+            # carries -- cap, cap-sha256, policy, realm, well-known -- is covered
+            # only by the svcb claim. Without it a genuine signature could be
+            # replayed verbatim onto a record whose capability document had been
+            # swapped, and still report verified.
+            # Enforced for every record that carries the claim, catalog entries
+            # included. Exempting CATALOG_ENDPOINT_SOURCES switched the binding
+            # off in the one place JWS is the SOLE trust anchor: an off-domain
+            # catalog could republish a publisher's signature verbatim with cap
+            # and cap-sha256 swapped for its own, keep the endpoint tuple
+            # identical, and be reported verified. The premise was wrong too --
+            # those records carry cap_uri and cap_sha256 populated from the
+            # catalog JSON, and _enrich_from_http_index rewrites a genuine DNS
+            # record's endpoint_source, so a publisher shipping both signed SVCB
+            # records and a .well-known index lost enforcement on both.
+            #
+            # A publisher whose catalog omits a param it signed now reads as
+            # unbound. That is the publisher's inconsistency, and failing closed
+            # is the right direction for a trust anchor.
+            if payload_matches and payload is not None and payload.svcb is not None:
+                from dns_aid.core.jwks import params_from_record, svcb_digest
+
+                if not hmac.compare_digest(payload.svcb, svcb_digest(params_from_record(agent))):
+                    logger.warning(
+                        "signed parameter digest does not match the record",
+                        agent=agent.name,
+                        fqdn=agent.fqdn,
+                    )
+                    payload_matches = False
+                else:
+                    agent.signature_covers_params = True
 
             if status is SignatureStatus.NO_KEY:
                 # No key document was reachable, so nothing was verified. This
@@ -1974,6 +2180,14 @@ async def _verify_agent_signatures(
             # up to the moment it is not, so the remaining window is the only
             # warning a publisher gets before records start failing.
             if payload_matches and payload is not None:
+                # Only for a signature that verified AND bound to this record.
+                # Relaxing this to `payload is not None` did not achieve its aim
+                # -- an EXPIRED verdict carries payload=None, so it still gets no
+                # timestamp -- and the only branch it newly reached was UNBOUND,
+                # where it stamped the publisher's genuine exp onto a record an
+                # attacker had pasted the signature on. A consumer reading the
+                # field without also checking signature_status would take an
+                # attacker-chosen value.
                 agent.signature_expires_at = payload.exp
             agent.signature_algorithm = (
                 _extract_jws_algorithm(agent.sig) if payload_matches else None
@@ -2017,6 +2231,58 @@ async def _verify_agent_signatures(
                 agent=agent.name,
                 error=str(e),
             )
+
+    # Bounded and budgeted, the same treatment the DANE phase gets. This ran
+    # strictly sequentially, so a zone publishing N signed agents against an
+    # unreachable JWKS host paid the fetch timeout N times over -- six agents
+    # already exceeded the MCP server's 120s per-call cap, and the caller lost
+    # every result rather than just the signature column. The negative cache in
+    # fetch_jwks removes most of that cost; this removes the rest, and keeps a
+    # wide zone from opening one connection per agent at once.
+    sem = asyncio.Semaphore(MAX_CONCURRENT_SIG_VERIFY)
+
+    async def _bounded(agent: AgentRecord) -> None:
+        async with sem:
+            await _verify_one(agent)
+
+    tasks = [asyncio.create_task(_bounded(a)) for a in agents_with_sig]
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=SIG_VERIFY_BUDGET_SECONDS)
+    except BaseException:
+        # asyncio.wait does not cancel the awaitables it was given.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    for task in done:
+        # .exception() re-raises CancelledError for a cancelled task, which would
+        # escape this loop and abort discovery over a task we already gave up on.
+        if task.cancelled():
+            continue
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("signature verification task failed", error=str(exc))
+
+    if pending:
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        # Stamped, not just logged. signature_status=None was indistinguishable
+        # from "this record was never in scope for checking", so a caller who
+        # asked for verification and received nothing had no per-record signal --
+        # the MCP payload omits every signature field when status is None.
+        for agent in agents_with_sig:
+            if agent.signature_status is None:
+                agent.signature_status = str(SignatureStatus.NOT_CHECKED)
+        # signature_verified stays None: unknown, never a rejection, and
+        # require_signed still drops them.
+        logger.warning(
+            "signature verification budget exhausted; remaining records unverified",
+            checked=len(done),
+            unchecked=len(pending),
+            budget_seconds=SIG_VERIFY_BUDGET_SECONDS,
+        )
 
 
 def _extract_jws_algorithm(jws: str) -> str | None:

@@ -14,10 +14,11 @@ the exact seam where the defect lived. These tests drive real DNS answers
 through the real parser.
 
 Resolver pinning is deliberate. ``dnssec_validated`` follows the AD flag, which
-only a validating resolver sets. Against ai.infoblox.com the system resolver
-reports False (unvalidated) while 8.8.8.8 reports True for the same signed zone,
-and that flag decides whether an agent takes the DNSSEC branch or the JWS
-branch. An unpinned live test is therefore not reproducible.
+only a validating resolver sets, so a non-validating resolver reports False for
+the same signed zone that 8.8.8.8 reports True for. Whether the host running
+these tests validates is not knowable in advance and changes with the network,
+so an unpinned live test is not reproducible. Pin, and assert the difference
+rather than leaving it to be rediscovered.
 """
 
 import os

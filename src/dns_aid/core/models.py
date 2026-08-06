@@ -838,6 +838,16 @@ class AgentRecord(BaseModel):
         "signature stops verifying with no prior signal, so consumers should surface the "
         "remaining window rather than waiting for it to turn into a failure.",
     )
+    signature_covers_params: bool = Field(
+        default=False,
+        description=(
+            "Whether the verified signature covers the DNS-AID SvcParams (cap, "
+            "cap-sha256, policy, realm, well-known) and not only the endpoint "
+            "tuple. False on records signed before the svcb claim existed: those "
+            "verify, but their capability pointer is not attested."
+        ),
+    )
+
     signature_status: str | None = Field(
         default=None,
         description="Why signature verification reached its answer: 'verified', 'invalid' "

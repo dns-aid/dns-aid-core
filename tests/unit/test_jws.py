@@ -157,7 +157,7 @@ class TestRecordPayload:
             target="payment.example.com",
             port=443,
             protocol="mcp",
-            ttl_seconds=3600,
+            validity_seconds=3600,
         )
 
         assert payload.fqdn == "_payment._mcp._agents.example.com"

@@ -82,7 +82,9 @@ def get_default_backend() -> DNSBackend:
 # broke.
 #
 # 90 days matches the ACME renewal rhythm deployments already automate.
-DEFAULT_SIG_VALIDITY_SECONDS = 7_776_000  # 90 days
+# Re-exported from jwks so the payload and the publisher cannot disagree.
+from dns_aid.core.jwks import DEFAULT_SIG_VALIDITY_SECONDS  # noqa: E402
+
 MIN_SIG_VALIDITY_SECONDS = 3_600  # 1 hour
 MAX_SIG_VALIDITY_SECONDS = 34_128_000  # ~13 months, the maximum certificate lifetime
 
@@ -277,7 +279,22 @@ async def publish(
             target=endpoint,
             port=port,
             protocol=protocol.value,
-            ttl_seconds=sig_validity_seconds,
+            validity_seconds=sig_validity_seconds,
+            # Cover every DNS-AID SvcParam, not just the endpoint tuple. Binding
+            # only fqdn/target/port/alpn let a genuine signature be replayed onto
+            # a record whose cap and cap-sha256 had been swapped for an
+            # attacker's document, and still report verified.
+            params={
+                "cap": cap_uri,
+                "cap-sha256": cap_sha256,
+                "bap": bap,
+                "policy": policy_uri,
+                "realm": realm,
+                "connect-class": connect_class,
+                "connect-meta": connect_meta,
+                "enroll-uri": enroll_uri,
+                "well-known": well_known_path,
+            },
         )
         sig = sign_record(payload, private_key)
         logger.info("Record signed successfully", fqdn=fqdn)

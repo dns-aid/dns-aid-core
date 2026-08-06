@@ -98,6 +98,37 @@ _CATALOG_SOURCES = ("ard_card", "ard_inline", "http_index", "http_index_fallback
 # --------------------------------------------------------------------------- #
 # Fix 1 (filter side): min_dnssec exempts catalog/ARD agents, filters the rest
 # --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_hosts():
+    """_fetch_peer_cert SSRF-guards the dial, which resolves the host for real.
+
+    These tests use reserved example.com names and mock the socket, so the guard
+    would reject before any mocked behaviour is reached. Neutralised here rather
+    than per test: the guard has its own coverage, and what is under test is what
+    happens after the dial is permitted.
+    """
+    # These tests run a real TLS server on 127.0.0.1 at an ephemeral port, so
+    # both new guards correctly refuse it: the SSRF check rejects loopback and
+    # the port allow-list rejects the ephemeral port. Both have their own
+    # coverage; what is under test here is the certificate comparison.
+    import os
+
+    prev = os.environ.get("DNS_AID_DANE_ALLOWED_PORTS")
+    os.environ["DNS_AID_DANE_ALLOWED_PORTS"] = "any"
+    try:
+        with patch(
+            "dns_aid.utils.url_safety.validate_fetch_url_async", new=AsyncMock(return_value="")
+        ):
+            yield
+    finally:
+        if prev is None:
+            os.environ.pop("DNS_AID_DANE_ALLOWED_PORTS", None)
+        else:
+            os.environ["DNS_AID_DANE_ALLOWED_PORTS"] = prev
+
+
 class TestMinDnssecCatalogExemption:
     def test_dns_validated_kept(self) -> None:
         a = _dns_agent("v", validated=True)
@@ -411,6 +442,12 @@ class TestVerifyAgentsDane:
         assert agent.dane_verified is True
 
     async def test_dane_true_without_dnssec_demoted_to_none(self) -> None:
+        """The original control. Do not delete: it caught a real regression.
+
+        A TLSA-RRset DNSSEC gate was added in _check_dane and this demotion was
+        removed as redundant. It is not. The two gates authenticate different
+        things -- the pin, and the name the pin was fetched for.
+        """
         agent = _dns_agent("chat", validated=False)
         with patch(
             "dns_aid.core.validator._check_dane",
@@ -419,6 +456,25 @@ class TestVerifyAgentsDane:
         ):
             await _verify_agents_dane([agent])
         assert agent.dane_verified is None  # DANE without DNSSEC carries no guarantee
+
+    async def test_an_attacker_signed_target_does_not_earn_a_pass(self) -> None:
+        """The concrete attack the demotion stops.
+
+        The SVCB answer is forged, so target points at edge.attacker.net. That
+        zone is genuinely DNSSEC-signed by its owner and publishes a real TLSA
+        pinning their certificate, so the TLSA gate in _check_dane is satisfied.
+        Only the unauthenticated SVCB answer stands between the attacker and a
+        green DANE verdict.
+        """
+        agent = _dns_agent("chat", validated=False)
+        agent.target_host = "edge.attacker.net"
+        with patch(
+            "dns_aid.core.validator._check_dane",
+            new_callable=AsyncMock,
+            return_value=True,  # authentic TLSA, in the ATTACKER's signed zone
+        ):
+            await _verify_agents_dane([agent])
+        assert agent.dane_verified is None
 
     async def test_dane_false_with_dnssec_stays_false(self) -> None:
         agent = _dns_agent("chat", validated=True)

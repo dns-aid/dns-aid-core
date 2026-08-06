@@ -142,7 +142,7 @@ class TestSignatureValidityIsIndependentOfTTL:
             target="mcp.example.com",
             port=443,
             protocol="mcp",
-            ttl_seconds=MIN_SIG_VALIDITY_SECONDS,
+            validity_seconds=MIN_SIG_VALIDITY_SECONDS,
         )
         sig = sign_record(payload, private_key)
 
