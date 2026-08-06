@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from dns_aid.cli.main import _format_signature, app
+from dns_aid.cli.main import _format_dane, _format_dnssec, _format_signature, app
 from dns_aid.core.jwks import SignatureStatus
 from dns_aid.core.models import AgentRecord, DiscoveryResult, Protocol
 
@@ -214,3 +214,74 @@ class TestSignatureFormatting:
 
     def test_unverified_record_renders_without_error(self):
         assert _format_signature(_agent(None, None, sig=None)) == "[dim]-[/dim]"
+
+
+class TestTrustReporting:
+    """DNSSEC and DANE must be reportable, and must not overclaim.
+
+    Both were previously invisible on the CLI: ``dnssec_validated`` was never
+    emitted at all and ``dane_verified`` only when non-None. A caller could see
+    a verified signature and nothing about the two anchors underneath it.
+    """
+
+    def _agent_with(self, dnssec, dane):
+        a = _agent(None, None, sig=None)
+        a.dnssec_validated = dnssec
+        a.dane_verified = dane
+        return a
+
+    def test_fields_absent_when_the_check_did_not_run(self):
+        """Absence means not checked, so it can never read as a failure."""
+        result = _run_discover(self._agent_with(False, None), "--json")
+        entry = json.loads(result.output[result.output.index("{") :])["agents"][0]
+
+        assert "dnssec_validated" not in entry
+        assert "dane_verified" not in entry
+
+    def test_fields_present_once_the_check_ran(self):
+        result = _run_discover(self._agent_with(True, True), "--verify-dane", "--json")
+        entry = json.loads(result.output[result.output.index("{") :])["agents"][0]
+
+        assert entry["dnssec_validated"] is True
+        assert entry["dane_verified"] is True
+
+    def test_demoted_dane_is_reported_as_null_not_omitted(self):
+        """None is the meaningful answer, not a reason to stay silent.
+
+        Without a DNSSEC-validated chain a TLSA match is demoted to unknown
+        (RFC 6698 section 10.1). Omitting the field made that indistinguishable
+        from no TLSA record existing.
+        """
+        result = _run_discover(self._agent_with(False, None), "--verify-dane", "--json")
+        entry = json.loads(result.output[result.output.index("{") :])["agents"][0]
+
+        assert "dane_verified" in entry
+        assert entry["dane_verified"] is None
+
+    def test_unvalidated_dnssec_does_not_claim_the_zone_is_unsigned(self):
+        """False follows the AD bit, which a non-validating resolver never sets.
+
+        Rendering it as "no" asserted the zone was unsigned when the far more
+        common cause is the caller's own resolver.
+        """
+        rendered = _format_dnssec(False)
+
+        assert "unvalidated" in rendered
+        assert "no" not in rendered.replace("unvalidated", "")
+
+    def test_dnssec_states_are_distinct(self):
+        assert "validated" in _format_dnssec(True)
+        assert _format_dnssec(True) != _format_dnssec(False)
+        assert "not checked" in _format_dnssec(None)
+
+    def test_dane_false_is_a_real_negative(self):
+        """Unlike DNSSEC, a False DANE means a TLSA existed and did not match."""
+        assert "no match" in _format_dane(False)
+        assert "unknown" in _format_dane(None)
+        assert "verified" in _format_dane(True)
+
+    def test_table_explains_why_records_are_unvalidated(self):
+        result = _run_discover(self._agent_with(False, None), "--verify-dane")
+
+        assert "unvalidated" in result.output
+        assert "resolver" in result.output

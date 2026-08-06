@@ -701,9 +701,22 @@ def discover_agents_via_dns(
                         if agent.catalog_trust is not None
                         else {}
                     ),
+                    # Reported only when the check actually ran, so absence
+                    # means "not checked" rather than "failed". dnssec_validated
+                    # is a plain bool defaulting to False, so emitting it
+                    # unconditionally would report an unchecked agent as having
+                    # failed validation. DANE is emitted even when None: without
+                    # a DNSSEC-validated chain a TLSA match is demoted to
+                    # unknown (RFC 6698 section 10.1), and omitting that made a
+                    # demotion indistinguishable from no TLSA record at all.
+                    **(
+                        {"dnssec_validated": agent.dnssec_validated}
+                        if (require_dnssec or min_dnssec or verify_dane)
+                        else {}
+                    ),
                     **(
                         {"dane_verified": agent.dane_verified}
-                        if agent.dane_verified is not None
+                        if (verify_dane or agent.dane_verified is not None)
                         else {}
                     ),
                     **(

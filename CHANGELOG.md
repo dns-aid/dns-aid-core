@@ -56,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MCP `discover_agents_via_dns` tool gains `verify_signatures`, so an agent can ask for the
   status without also filtering on it, and returns the same four fields in its agent payload.
   Output for unsigned records is unchanged on every interface.
+- **DNSSEC and DANE outcomes are reportable from the CLI and MCP.** `dnssec_validated` was
+  never emitted by either, and `dane_verified` only when non-null, so a caller could see a
+  verified signature and nothing about the two anchors beneath it. Both are now reported once
+  the check has run, and `dane_verified` is emitted even when null, because null is the
+  meaningful answer: without a DNSSEC-validated chain a TLSA match is demoted to unknown
+  (RFC 6698 section 10.1), and omitting it made a demotion look like no TLSA record at all.
+  The CLI renders an unvalidated DNSSEC result as `unvalidated`, not `no`. The flag follows
+  the AD bit, which a non-validating resolver never sets, so `no` asserted that a zone was
+  unsigned when the more common cause is the caller's own resolver.
 - **Key rollovers can overlap.** `sign_record(..., kid=...)` publishes a key identifier in
   the JWS protected header, verification selects the matching key from the JWKS, and
   `export_jwks_multi()` emits several keys in one document so the outgoing and incoming

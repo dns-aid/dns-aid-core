@@ -511,7 +511,26 @@ def discover(
                     # ARD-sourced / opt-in keys only — omitted otherwise so legacy
                     # output stays byte-identical.
                     **({"catalog_trust": a.catalog_trust} if a.catalog_trust is not None else {}),
-                    **({"dane_verified": a.dane_verified} if a.dane_verified is not None else {}),
+                    # DNSSEC and DANE are reported only when the check actually
+                    # ran, so absence means "not checked" and a present value is
+                    # a real result. dnssec_validated is a plain bool that
+                    # defaults to False, so emitting it unconditionally would
+                    # report "not checked" as "failed validation". DANE is
+                    # emitted even when None, because None is the meaningful
+                    # answer here: RFC 6698 section 10.1 demotes a TLSA match to
+                    # unknown without a DNSSEC-validated chain, and silently
+                    # omitting it made a demotion look identical to no TLSA
+                    # record at all.
+                    **(
+                        {"dnssec_validated": a.dnssec_validated}
+                        if (require_dnssec or min_dnssec or verify_dane)
+                        else {}
+                    ),
+                    **(
+                        {"dane_verified": a.dane_verified}
+                        if (verify_dane or a.dane_verified is not None)
+                        else {}
+                    ),
                     # Signature outcome. Emitted only when the record carries a
                     # sig or verification actually ran, so output for unsigned
                     # records stays byte-identical to previous releases.
@@ -578,6 +597,13 @@ def discover(
     show_signature = verify_signatures or require_signed
     if show_signature:
         table.add_column("Signature")
+    # Same rule as the JSON payload: only shown when the check ran, so a blank
+    # column can never be mistaken for a failed validation.
+    show_dnssec = require_dnssec or min_dnssec or verify_dane
+    if show_dnssec:
+        table.add_column("DNSSEC")
+    if verify_dane:
+        table.add_column("DANE")
 
     for agent in result.agents:
         row = [
@@ -589,9 +615,19 @@ def discover(
         ]
         if show_signature:
             row.append(_format_signature(agent))
+        if show_dnssec:
+            row.append(_format_dnssec(agent.dnssec_validated))
+        if verify_dane:
+            row.append(_format_dane(agent.dane_verified))
         table.add_row(*row)
 
     console.print(table)
+    if show_dnssec and any(a.dnssec_validated is False for a in result.agents):
+        console.print(
+            "\n[dim]Some records are unvalidated. The AD flag is only set by a validating "
+            "resolver, so this means either the zone is unsigned or your resolver does not "
+            "validate DNSSEC.[/dim]"
+        )
     console.print(f"\n[dim]Query: {result.query}[/dim]")
     console.print(f"[dim]Time: {result.query_time_ms:.2f}ms[/dim]")
 
@@ -605,6 +641,38 @@ def discover(
 _EXIT_TRANSIENT = 75  # EX_TEMPFAIL — directory unreachable / 5xx / timeout / 429
 _EXIT_AUTH = 77  # EX_NOPERM — directory rejected credentials (401/403)
 _EXIT_CONFIG = 78  # EX_CONFIG — directory_api_url not set
+
+
+def _format_dnssec(value: bool | None) -> str:
+    """Render the DNSSEC outcome.
+
+    False is deliberately NOT rendered as "no". The flag follows the AD bit,
+    which a resolver only sets when it validates, so False covers two very
+    different situations: the zone is genuinely unsigned, or the zone is signed
+    and the caller's resolver simply does not validate. Rendering it as "no"
+    asserted the first when it is frequently the second. "unvalidated" is true
+    in both cases and points at the right question.
+    """
+    if value is True:
+        return "[green]validated[/green]"
+    if value is False:
+        return "[yellow]unvalidated[/yellow]"
+    return "[dim]not checked[/dim]"
+
+
+def _format_dane(value: bool | None) -> str:
+    """Render the DANE outcome.
+
+    Unlike DNSSEC, False here is a real negative: a TLSA record was published
+    and no association matched the presented certificate. None means the result
+    was demoted to unknown for want of a DNSSEC-validated chain (RFC 6698
+    section 10.1), or no TLSA record exists.
+    """
+    if value is True:
+        return "[green]verified[/green]"
+    if value is False:
+        return "[red]no match[/red]"
+    return "[yellow]unknown[/yellow]"
 
 
 def _format_signature(agent) -> str:
