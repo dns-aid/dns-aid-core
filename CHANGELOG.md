@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `expired`, `no_key`, or `not_signed`. `expired` and `invalid` are both `False` but call
   for different responses — re-publish versus investigate — which a boolean cannot express.
   See `dns_aid.core.jwks.SignatureStatus`.
+- **The signature outcome is now visible from every interface.** `dns-aid discover` gains a
+  Signature column (shown when `--verify-signatures` or `--require-signed` is set) and emits
+  `sig`, `signature_verified`, `signature_status` and `signature_algorithm` in `--json`. An
+  empty result under `--require-signed` now says the agents were dropped by the trust gate
+  rather than reading as "nothing published". `dns-aid publish` gains `--sig-validity`. The
+  MCP `discover_agents_via_dns` tool gains `verify_signatures`, so an agent can ask for the
+  status without also filtering on it. Output for unsigned records is unchanged.
 - **Key rollovers can overlap.** `sign_record(..., kid=...)` publishes a key identifier in
   the JWS protected header, verification selects the matching key from the JWKS, and
   `export_jwks_multi()` emits several keys in one document so the outgoing and incoming

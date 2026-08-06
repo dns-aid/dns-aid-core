@@ -174,6 +174,15 @@ def publish(
         str | None,
         typer.Option("--private-key", help="Path to EC P-256 private key PEM for signing"),
     ] = None,
+    sig_validity: Annotated[
+        int | None,
+        typer.Option(
+            "--sig-validity",
+            help="How long the JWS signature stays valid, in seconds (default 90 days). "
+            "Independent of --ttl, which only governs resolver caching. Re-publish "
+            "before this elapses or the signature verifies as expired.",
+        ),
+    ] = None,
     allow_underscore_target: Annotated[
         bool,
         typer.Option(
@@ -269,6 +278,7 @@ def publish(
             ipv6_hint=",".join(ipv6hint) if ipv6hint else None,
             sign=sign,
             private_key_path=private_key,
+            **({"sig_validity_seconds": sig_validity} if sig_validity is not None else {}),
             allow_underscore_target=allow_underscore_target,
             publish_walkable_alias=walkable,
         )
@@ -502,6 +512,29 @@ def discover(
                     # output stays byte-identical.
                     **({"catalog_trust": a.catalog_trust} if a.catalog_trust is not None else {}),
                     **({"dane_verified": a.dane_verified} if a.dane_verified is not None else {}),
+                    # Signature outcome. Emitted only when the record carries a
+                    # sig or verification actually ran, so output for unsigned
+                    # records stays byte-identical to previous releases.
+                    # ``signature_status`` is the actionable field: "expired"
+                    # and "invalid" are both a False ``signature_verified`` but
+                    # call for different responses, and "no_key" means nothing
+                    # was verified rather than that the record was rejected.
+                    **({"sig": a.sig} if a.sig is not None else {}),
+                    **(
+                        {"signature_verified": a.signature_verified}
+                        if a.signature_status is not None
+                        else {}
+                    ),
+                    **(
+                        {"signature_status": a.signature_status}
+                        if a.signature_status is not None
+                        else {}
+                    ),
+                    **(
+                        {"signature_algorithm": a.signature_algorithm}
+                        if a.signature_algorithm is not None
+                        else {}
+                    ),
                     **(
                         {"trust_manifest": a.trust_manifest.model_dump()}
                         if a.trust_manifest is not None
@@ -518,6 +551,14 @@ def discover(
 
     if result.count == 0:
         console.print(f"[yellow]No agents found at {domain}[/yellow]")
+        if require_signed:
+            # The most confusing empty result: records were found and then
+            # dropped by the trust gate. Say so, rather than letting it read
+            # as "nothing published here".
+            console.print(
+                "[dim]--require-signed was set, so any agent whose signature did not "
+                "verify was dropped. Re-run without it to see the reason.[/dim]"
+            )
         console.print(f"\n[dim]Query: {result.query}[/dim]")
         console.print(f"[dim]Time: {result.query_time_ms:.2f}ms[/dim]")
         return
@@ -530,15 +571,25 @@ def discover(
     table.add_column("Endpoint")
     table.add_column("Capabilities")
     table.add_column("Cap Source")
+    # Only shown when signature verification actually ran. Without this the
+    # outcome was invisible: --require-signed could drop every agent and the
+    # operator had no way to see whether the signatures had merely expired or
+    # had genuinely failed.
+    show_signature = verify_signatures or require_signed
+    if show_signature:
+        table.add_column("Signature")
 
     for agent in result.agents:
-        table.add_row(
+        row = [
             agent.name,
             agent.protocol.value,
             agent.endpoint_url,
             ", ".join(agent.capabilities) if agent.capabilities else "-",
             agent.capability_source or "-",
-        )
+        ]
+        if show_signature:
+            row.append(_format_signature(agent))
+        table.add_row(*row)
 
     console.print(table)
     console.print(f"\n[dim]Query: {result.query}[/dim]")
@@ -554,6 +605,31 @@ def discover(
 _EXIT_TRANSIENT = 75  # EX_TEMPFAIL — directory unreachable / 5xx / timeout / 429
 _EXIT_AUTH = 77  # EX_NOPERM — directory rejected credentials (401/403)
 _EXIT_CONFIG = 78  # EX_CONFIG — directory_api_url not set
+
+
+def _format_signature(agent) -> str:
+    """Render the signature outcome for the discover table.
+
+    Keyed on ``signature_status`` rather than ``signature_verified`` because
+    the boolean cannot separate the two cases an operator responds to
+    differently: an expired signature is fixed by re-publishing, a genuinely
+    invalid one warrants investigation. ``no_key`` is neither -- nothing was
+    verified, so it is reported as unknown rather than as a rejection.
+    """
+    status = agent.signature_status
+    if status is None:
+        return "[dim]-[/dim]"
+
+    rendering = {
+        "verified": ("green", f"verified ({agent.signature_algorithm or 'ES256'})"),
+        "expired": ("yellow", "expired (re-publish)"),
+        "invalid": ("red", "invalid"),
+        "unbound": ("red", "does not match record"),
+        "no_key": ("yellow", "no JWKS reachable"),
+        "not_signed": ("dim", "unsigned"),
+    }
+    colour, label = rendering.get(status, ("dim", str(status)))
+    return f"[{colour}]{label}[/{colour}]"
 
 
 @app.command()
