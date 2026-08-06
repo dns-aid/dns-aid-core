@@ -44,6 +44,45 @@ logger = structlog.get_logger(__name__)
 # JWKS well-known endpoint path
 JWKS_WELL_KNOWN_PATH = "/.well-known/dns-aid-jwks.json"
 
+# The JWKS is served from a dedicated host derived from the publishing zone,
+# not from the zone apex.
+#
+# Deriving the location rather than accepting a pointer is deliberate. This
+# path runs precisely when the DNS answer is NOT authenticated, so a pointer
+# carried in the record could not be trusted to name the key: an attacker able
+# to forge the record could forge the pointer, serve their own JWKS, and sign
+# with their own key -- and signing the pointer would not help, because the
+# attacker controls both halves. A derived name cannot be steered at all, and
+# it is inside the publisher's registrable domain by construction, so no
+# public-suffix check is needed.
+#
+# A dedicated host (rather than the apex) is what keeps this deployable: it is
+# a fresh name that may CNAME to a gateway, CDN, or bucket, whereas a zone apex
+# may not. Zones that exist only to carry agent records need no web presence.
+# Same reasoning and shape as MTA-STS (RFC 8461 Section 3.1), which requires
+# mta-sts.<domain> rather than the apex.
+#
+# An underscore label is not an option here: CA/Browser Forum baseline
+# requirements bar underscores from certificate dNSName SANs, and this host is
+# fetched over HTTPS. (`_agents` is DNS-only, so it correctly keeps its
+# underscore; this host cannot.)
+JWKS_HOST_PREFIX = "dns-aid"
+
+
+def jwks_urls(zone: str) -> list[str]:
+    """Candidate JWKS locations for a publishing zone, in preference order.
+
+    The derived host is authoritative. The zone apex is retained as a
+    deprecated fallback so deployments that published a JWKS before the host
+    was introduced keep verifying.
+    """
+    zone = zone.rstrip(".")
+    return [
+        f"https://{JWKS_HOST_PREFIX}.{zone}{JWKS_WELL_KNOWN_PATH}",
+        f"https://{zone}{JWKS_WELL_KNOWN_PATH}",  # deprecated
+    ]
+
+
 # Cache for JWKS documents (domain -> (jwks, expiry))
 _jwks_cache: dict[str, tuple[dict[str, Any], float]] = {}
 JWKS_CACHE_TTL = 3600  # 1 hour
@@ -353,12 +392,42 @@ async def fetch_jwks(domain: str) -> dict[str, Any] | None:
             return jwks
         _jwks_cache.pop(domain, None)  # expired — drop it
 
-    # Fetch from well-known endpoint. This input stamps trust
-    # (signature_verified), so it goes through the same SSRF guard and
-    # streaming size cap as every other untrusted fetch — no raw httpx.get,
-    # no unbounded .json(), and no cross-host redirects.
-    url = f"https://{domain}{JWKS_WELL_KNOWN_PATH}"
+    # Fetch from the derived host, falling back to the deprecated apex
+    # location. This input stamps trust (signature_verified), so every
+    # candidate goes through the same SSRF guard and streaming size cap as any
+    # other untrusted fetch — no raw httpx.get, no unbounded .json(), and no
+    # cross-host redirects.
+    candidates = jwks_urls(domain)
 
+    for index, url in enumerate(candidates):
+        is_deprecated = index > 0
+        jwks = await _fetch_jwks_from(url, domain)
+        if jwks is None:
+            continue
+
+        if is_deprecated:
+            logger.warning(
+                "JWKS served from the deprecated zone-apex location; "
+                "publish it at the derived host instead",
+                domain=domain,
+                url=url,
+                expected=candidates[0],
+            )
+
+        # Bound cache growth: evict oldest entries (FIFO) before insert.
+        while len(_jwks_cache) >= _JWKS_CACHE_MAX:
+            _jwks_cache.pop(next(iter(_jwks_cache)), None)
+        _jwks_cache[domain] = (jwks, now + JWKS_CACHE_TTL)
+
+        logger.info("JWKS fetched successfully", domain=domain, url=url)
+        return jwks
+
+    logger.warning("No JWKS available at any known location", domain=domain, tried=candidates)
+    return None
+
+
+async def _fetch_jwks_from(url: str, domain: str) -> dict[str, Any] | None:
+    """Fetch and parse a JWKS document from one candidate URL."""
     logger.debug("Fetching JWKS", url=url)
 
     from dns_aid.utils.url_safety import (
@@ -371,7 +440,7 @@ async def fetch_jwks(domain: str) -> dict[str, Any] | None:
     try:
         await validate_fetch_url_async(url)
     except UnsafeURLError as e:
-        logger.warning("JWKS URL blocked by SSRF protection", domain=domain, error=str(e))
+        logger.warning("JWKS URL blocked by SSRF protection", url=url, error=str(e))
         return None
 
     try:
@@ -382,27 +451,21 @@ async def fetch_jwks(domain: str) -> dict[str, Any] | None:
             follow_redirects=False,
         )
         if body is None:
-            logger.warning("JWKS fetch failed (non-200)", domain=domain)
+            logger.debug("JWKS fetch failed (non-200)", url=url)
             return None
 
         jwks = json.loads(body)
         if not isinstance(jwks, dict):
-            logger.warning("JWKS document is not a JSON object", domain=domain)
+            logger.warning("JWKS document is not a JSON object", url=url)
             return None
 
-        # Bound cache growth: evict oldest entries (FIFO) before insert.
-        while len(_jwks_cache) >= _JWKS_CACHE_MAX:
-            _jwks_cache.pop(next(iter(_jwks_cache)), None)
-        _jwks_cache[domain] = (jwks, now + JWKS_CACHE_TTL)
-
-        logger.info("JWKS fetched successfully", domain=domain)
         return jwks
 
     except ResponseTooLargeError as e:
-        logger.warning("JWKS document too large", domain=domain, error=str(e))
+        logger.warning("JWKS document too large", url=url, error=str(e))
         return None
     except Exception as e:
-        logger.warning("Failed to fetch JWKS", domain=domain, error=str(e))
+        logger.debug("Failed to fetch JWKS", url=url, error=str(e))
         return None
 
 

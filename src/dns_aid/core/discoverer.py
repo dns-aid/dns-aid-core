@@ -624,6 +624,15 @@ async def _query_single_agent(
             connect_class = custom_params.get("connect-class")
             connect_meta = custom_params.get("connect-meta")
             enroll_uri = custom_params.get("enroll-uri")
+            # The JWS record signature (`sig`, key65405). Parsing is
+            # unconditional and independent of DNSSEC: the value is carried on
+            # the record whether or not it will later be verified. Whether JWS
+            # verification actually runs is decided in _verify_agent_signatures,
+            # which skips agents whose owner name validated under DNSSEC.
+            # Every name in DNS_AID_KEY_MAP must be extracted here; the
+            # completeness test in tests/unit/core/test_svcb_param_coverage.py
+            # fails if a key is added to the map without being wired up.
+            sig = custom_params.get("sig")
 
             # Descriptor-fetch precedence (local dns-aid-core convention,
             # NOT spec-mandated — draft §6.1 names only well-known as the
@@ -842,6 +851,7 @@ async def _query_single_agent(
                 connect_class=connect_class,
                 connect_meta=connect_meta,
                 enroll_uri=enroll_uri,
+                sig=sig,
                 capability_source=capability_source,
                 endpoint_source="dns_svcb",  # Endpoint resolved via DNS SVCB lookup
                 agent_card=agent_card,
@@ -1893,7 +1903,14 @@ async def _verify_agent_signatures(
         if agent.sig is None:
             continue
         try:
-            is_valid, payload = await verify_record_signature(domain, agent.sig)
+            # Anchor the JWKS lookup to the record's own publishing zone, not
+            # to the string the caller passed to discover(). Otherwise the same
+            # record resolves to a different JWKS depending on the entry point
+            # (querying the zone vs. querying the agent FQDN directly), and a
+            # publisher would have to host the document at every name a
+            # consumer might use.
+            sig_zone = agent.domain or domain
+            is_valid, payload = await verify_record_signature(sig_zone, agent.sig)
 
             # A valid signature alone is insufficient. The signed payload
             # binds to a specific (fqdn, target, port, alpn) tuple — we

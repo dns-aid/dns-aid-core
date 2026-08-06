@@ -70,6 +70,23 @@ def get_default_backend() -> DNSBackend:
     return _default_backend
 
 
+# How long a JWS record signature asserts the binding it covers, in seconds.
+#
+# This is deliberately NOT the DNS record TTL. The TTL states how long a
+# resolver may cache the answer and is tuned for propagation speed; the JWS
+# `exp` states how long the assertion holds and is tuned for re-signing
+# cadence. Deriving one from the other made every signature expire at the
+# cache-refresh interval -- a 3600s TTL produced a signature that was dead an
+# hour after publication while the record itself stayed in DNS for months, and
+# the more aggressively an operator tuned the TTL the faster their signatures
+# broke.
+#
+# 90 days matches the ACME renewal rhythm deployments already automate.
+DEFAULT_SIG_VALIDITY_SECONDS = 7_776_000  # 90 days
+MIN_SIG_VALIDITY_SECONDS = 3_600  # 1 hour
+MAX_SIG_VALIDITY_SECONDS = 34_128_000  # ~13 months, the maximum certificate lifetime
+
+
 async def publish(
     name: str,
     domain: str,
@@ -96,6 +113,7 @@ async def publish(
     ipv6_hint: str | None = None,
     sign: bool = False,
     private_key_path: str | None = None,
+    sig_validity_seconds: int = DEFAULT_SIG_VALIDITY_SECONDS,
     allow_underscore_target: bool = False,
     publish_walkable_alias: bool = False,
 ) -> PublishResult:
@@ -116,7 +134,13 @@ async def publish(
         description: Human-readable description
         use_cases: List of use cases for this agent
         category: Agent category (e.g., "network", "security")
-        ttl: DNS record TTL in seconds
+        ttl: DNS record TTL in seconds. Governs resolver caching only; it does
+            NOT affect how long a JWS signature remains valid (see
+            sig_validity_seconds).
+        sig_validity_seconds: How long a JWS signature asserts its binding, in
+            seconds (default 90 days, bounds 1 hour to ~13 months). Only used
+            when sign=True. Re-publish before this elapses; a lapsed signature
+            verifies as expired.
         backend: DNS backend to use (defaults to global backend)
         cap_uri: URI, URN, or compact JSON-Ref locator for the capability
             descriptor (DNS-AID draft-02 'cap' SvcParamKey)
@@ -230,17 +254,30 @@ async def publish(
             sign_record,
         )
 
-        logger.info("Signing record with JWS", private_key_path=private_key_path)
+        if not (MIN_SIG_VALIDITY_SECONDS <= sig_validity_seconds <= MAX_SIG_VALIDITY_SECONDS):
+            raise ValueError(
+                f"sig_validity_seconds must be between {MIN_SIG_VALIDITY_SECONDS} and "
+                f"{MAX_SIG_VALIDITY_SECONDS}, got {sig_validity_seconds}"
+            )
+
+        logger.info(
+            "Signing record with JWS",
+            private_key_path=private_key_path,
+            sig_validity_seconds=sig_validity_seconds,
+        )
         private_key = load_private_key_from_pem(private_key_path)
         # JWS payload binds to the flat draft-02 FQDN ({name}.{domain}).
         # Verifiers reconstruct the same FQDN before validating the signature.
         fqdn = f"{name}.{domain}"
+        # Signature validity is independent of `ttl`: the DNS TTL governs
+        # caching, not how long the signed assertion is true. See
+        # DEFAULT_SIG_VALIDITY_SECONDS.
         payload = RecordPayload.from_agent_record(
             fqdn=fqdn,
             target=endpoint,
             port=port,
             protocol=protocol.value,
-            ttl_seconds=ttl,
+            ttl_seconds=sig_validity_seconds,
         )
         sig = sign_record(payload, private_key)
         logger.info("Record signed successfully", fqdn=fqdn)
