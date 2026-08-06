@@ -362,3 +362,127 @@ class TestDnssecEvidence:
         assert cli["dnssec_signed"] is True
         assert mcp["dnssec_signed"] is True
         assert cli["dnssec_validated"] == mcp["dnssec_validated"] is False
+
+
+class TestDnssecSkipIsNotAFailure:
+    """Asking for both strong guarantees at once must not return nothing.
+
+    JWS verification is skipped for a DNSSEC-validated record, because the DNS
+    chain already authenticates it and JWS exists as the fallback for zones
+    that cannot sign. Skipping is right. The trust gate treating that skip as a
+    failure was not: --require-signed together with DNSSEC returned zero agents.
+    """
+
+    def _signed(self, dnssec: bool, with_sig: bool = True):
+        from dns_aid.core.jwks import RecordPayload, generate_keypair, sign_record
+
+        priv, _ = generate_keypair()
+        sig = sign_record(
+            RecordPayload.from_agent_record(
+                "a.example.com", "t.example.com", 443, "mcp", ttl_seconds=90 * 86400
+            ),
+            priv,
+        )
+        a = AgentRecord(
+            name="a",
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="t.example.com",
+            port=443,
+            sig=sig if with_sig else None,
+        )
+        a.dnssec_validated = dnssec
+        return a
+
+    async def _verified(self, agent):
+        from dns_aid.core.discoverer import _verify_agent_signatures
+
+        await _verify_agent_signatures(
+            [agent], "example.com", dnssec_validated=agent.dnssec_validated
+        )
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_skip_is_labelled_not_left_blank(self):
+        agent = await self._verified(self._signed(dnssec=True))
+
+        assert agent.signature_status == SignatureStatus.SKIPPED_DNSSEC
+
+    @pytest.mark.asyncio
+    async def test_require_signed_keeps_a_dnssec_validated_signed_record(self):
+        """The reported bug: two strong guarantees together returned nothing."""
+        from dns_aid.core.filters import apply_filters
+
+        agent = await self._verified(self._signed(dnssec=True))
+
+        assert apply_filters([agent], require_signed=True) == [agent]
+
+    @pytest.mark.asyncio
+    async def test_require_signed_still_means_signed(self):
+        """A record with no signature is not signed, however it was validated.
+
+        Deliberately narrow. Callers wanting to filter on the DNS chain have
+        min_dnssec for that.
+        """
+        from dns_aid.core.filters import apply_filters
+
+        agent = await self._verified(self._signed(dnssec=True, with_sig=False))
+
+        assert apply_filters([agent], require_signed=True) == []
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_algorithm_demand_still_needs_a_real_jws(self):
+        """Only a verified signature carries an algorithm to match against."""
+        from dns_aid.core.filters import apply_filters
+
+        agent = await self._verified(self._signed(dnssec=True))
+
+        assert (
+            apply_filters([agent], require_signed=True, require_signature_algorithm=["ES256"]) == []
+        )
+
+    @pytest.mark.asyncio
+    async def test_unverified_without_dnssec_is_still_dropped(self):
+        """Fail-closed is unchanged where nothing authenticated the record."""
+        from dns_aid.core.filters import apply_filters
+
+        agent = await self._verified(self._signed(dnssec=False))
+
+        assert apply_filters([agent], require_signed=True) == []
+
+
+class TestExpiryIsSurfacedBeforeItBites:
+    """A signature is valid until the moment it is not, with no prior signal."""
+
+    def _agent_expiring_in(self, days: int):
+        import time
+
+        a = _agent("verified", True)
+        a.signature_expires_at = int(time.time()) + days * 86400
+        return a
+
+    def test_remaining_window_is_shown(self):
+        # Fractional time.time() means a 60-day window floors to 59.
+        rendered = _format_signature(self._agent_expiring_in(60))
+
+        assert "d left" in rendered
+        assert "59d left" in rendered or "60d left" in rendered
+
+    def test_approaching_expiry_asks_for_a_re_publish(self):
+        rendered = _format_signature(self._agent_expiring_in(5))
+
+        assert "re-publish" in rendered
+        assert "yellow" in rendered
+
+    def test_a_comfortable_window_is_not_alarming(self):
+        rendered = _format_signature(self._agent_expiring_in(60))
+
+        assert "re-publish" not in rendered
+        assert "green" in rendered
+
+    def test_expiry_reaches_the_json_payload(self):
+        agent = self._agent_expiring_in(60)
+        out = _run_discover(agent, "--verify-signatures", "--json").output
+        entry = json.loads(out[out.index("{") :])["agents"][0]
+
+        assert entry["signature_expires_at"] == agent.signature_expires_at

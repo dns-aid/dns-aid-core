@@ -753,6 +753,11 @@ def discover_agents_via_dns(
                         if agent.signature_algorithm is not None
                         else {}
                     ),
+                    **(
+                        {"signature_expires_at": agent.signature_expires_at}
+                        if agent.signature_expires_at is not None
+                        else {}
+                    ),
                 }
                 for agent in result.agents
             ],

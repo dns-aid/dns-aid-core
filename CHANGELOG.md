@@ -65,6 +65,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The CLI renders an unvalidated DNSSEC result as `unvalidated`, not `no`. The flag follows
   the AD bit, which a non-validating resolver never sets, so `no` asserted that a zone was
   unsigned when the more common cause is the caller's own resolver.
+- **`--require-signed` no longer cancels out DNSSEC.** JWS verification is skipped for a
+  DNSSEC-validated record, because the DNS chain already authenticates it and JWS exists as
+  the fallback for zones that cannot sign. The trust gate treated that skip as a failure, so
+  asking for both of the strongest guarantees at once returned zero agents. The skip is now
+  labelled `skipped_dnssec` and passes `require_signed`. Deliberately narrow: a record with
+  no signature at all is still not "signed" (use `min_dnssec` to filter on the DNS chain),
+  and an explicit `require_signature_algorithm` still needs a real verified JWS.
+- **`mcp` is bounded below 2.** `mcp>=1.28.1` had no upper bound and resolved to 2.0.0, which
+  removed `mcp.server.fastmcp`, so `from mcp.server.fastmcp import FastMCP` failed at import
+  and `pip install 'dns-aid[mcp]'` produced a broken MCP server. Present in 0.27.0 as well.
+- **`AgentRecord.signature_expires_at`** exposes when a verified signature lapses. Verification
+  is binary right up to the moment it flips to expired, so the remaining window was the one
+  signal nobody had. The CLI shows the days left and turns amber inside two weeks.
 - **`AgentRecord.dnssec_signed` separates an unsigned zone from a non-validating resolver.**
   `dnssec_validated=False` could not distinguish "the zone owner never signed" from "the zone
   is signed and your resolver will not validate it", which have opposite owners and opposite

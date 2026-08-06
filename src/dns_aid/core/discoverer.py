@@ -1894,8 +1894,16 @@ async def _verify_agent_signatures(
     from dns_aid.core.jwks import SignatureStatus as _Status
 
     for _a in agents:
-        if _a.sig is None and _a.signature_status is None:
+        if _a.signature_status is not None:
+            continue
+        if _a.sig is None:
             _a.signature_status = str(_Status.NOT_SIGNED)
+        elif dnssec_validated.get(_a.fqdn, False):
+            # A signature is present but was deliberately not checked: the DNS
+            # chain already authenticated this record, which is the stronger
+            # guarantee. Labelled so the skip is visible, because an unlabelled
+            # None was indistinguishable from a verification that failed.
+            _a.signature_status = str(_Status.SKIPPED_DNSSEC)
 
     if not agents_with_sig:
         logger.debug("No agents with JWS signatures to verify")
@@ -1962,6 +1970,11 @@ async def _verify_agent_signatures(
                 agent.signature_verified = payload_matches
 
             agent.signature_status = str(status)
+            # Record when this assertion lapses. Verification is binary right
+            # up to the moment it is not, so the remaining window is the only
+            # warning a publisher gets before records start failing.
+            if payload_matches and payload is not None:
+                agent.signature_expires_at = payload.exp
             agent.signature_algorithm = (
                 _extract_jws_algorithm(agent.sig) if payload_matches else None
             )

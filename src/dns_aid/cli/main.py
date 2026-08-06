@@ -556,6 +556,11 @@ def discover(
                         else {}
                     ),
                     **(
+                        {"signature_expires_at": a.signature_expires_at}
+                        if a.signature_expires_at is not None
+                        else {}
+                    ),
+                    **(
                         {"trust_manifest": a.trust_manifest.model_dump()}
                         if a.trust_manifest is not None
                         else {}
@@ -644,6 +649,9 @@ _EXIT_AUTH = 77  # EX_NOPERM — directory rejected credentials (401/403)
 _EXIT_CONFIG = 78  # EX_CONFIG — directory_api_url not set
 
 
+EXPIRY_WARN_DAYS = 14
+
+
 def _format_dnssec(value: bool | None, signed: bool | None = None) -> str:
     """Render the DNSSEC outcome.
 
@@ -696,8 +704,20 @@ def _format_signature(agent) -> str:
     if status is None:
         return "[dim]-[/dim]"
 
+    if status == "verified" and agent.signature_expires_at:
+        import time as _time
+
+        days = int((agent.signature_expires_at - _time.time()) // 86400)
+        # Verification stays green right up to the moment it flips to expired,
+        # so the window is the only notice a publisher gets. Amber inside two
+        # weeks, which is time to re-publish before anything starts failing.
+        if days <= EXPIRY_WARN_DAYS:
+            return f"[yellow]verified ({days}d left, re-publish)[/yellow]"
+        return f"[green]verified ({days}d left)[/green]"
+
     rendering = {
         "verified": ("green", f"verified ({agent.signature_algorithm or 'ES256'})"),
+        "skipped_dnssec": ("green", "n/a (DNSSEC)"),
         "expired": ("yellow", "expired (re-publish)"),
         "invalid": ("red", "invalid"),
         "unbound": ("red", "does not match record"),

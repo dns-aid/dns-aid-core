@@ -831,6 +831,13 @@ class AgentRecord(BaseModel):
         "from a signed zone behind a non-validating resolver, which dnssec_validated=False "
         "alone cannot do. None when the DNSSEC check did not run.",
     )
+    signature_expires_at: int | None = Field(
+        default=None,
+        description="Unix timestamp at which the verified JWS signature lapses, taken from "
+        "the signed payload's exp claim. None unless a signature actually verified. A lapsed "
+        "signature stops verifying with no prior signal, so consumers should surface the "
+        "remaining window rather than waiting for it to turn into a failure.",
+    )
     signature_status: str | None = Field(
         default=None,
         description="Why signature verification reached its answer: 'verified', 'invalid' "

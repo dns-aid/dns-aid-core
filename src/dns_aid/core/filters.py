@@ -16,6 +16,7 @@ list comprehensions remain the most readable expression of "select records match
 
 from __future__ import annotations
 
+from dns_aid.core.jwks import SignatureStatus
 from dns_aid.core.models import CATALOG_ENDPOINT_SOURCES, AgentRecord
 
 
@@ -208,7 +209,26 @@ def _matches_signed(
     if not require:
         return True
     if record.signature_verified is not True:
-        return False
+        # JWS verification is skipped for a DNSSEC-validated record, because
+        # the DNS chain already authenticates it and JWS exists as the fallback
+        # for zones that cannot sign. Treating that skip as a failure meant a
+        # caller asking for both of the strongest guarantees at once
+        # (--require-signed with DNSSEC) received nothing at all.
+        #
+        # An explicit algorithm demand is different: only a real JWS can carry
+        # an algorithm, so that still requires a verified signature.
+        if allowed_algorithms:
+            return False
+        # Narrow deliberately: only a record that CARRIES a signature and had
+        # its verification skipped because DNSSEC already authenticated it.
+        # A DNSSEC-validated record with no signature at all is not "signed",
+        # and --require-signed should keep meaning what its name says. Use
+        # min_dnssec to filter on the DNS chain instead.
+        return (
+            record.sig is not None
+            and record.dnssec_validated is True
+            and record.signature_status == SignatureStatus.SKIPPED_DNSSEC
+        )
     if record.signature_algorithm is None:
         return False
     if allowed_algorithms:

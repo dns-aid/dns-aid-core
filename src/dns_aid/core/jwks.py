@@ -91,6 +91,7 @@ class SignatureStatus(StrEnum):
     EXPIRED = "expired"  # signature lapsed; re-publish
     NO_KEY = "no_key"  # no JWKS reachable / no key matched -- unknown
     NOT_SIGNED = "not_signed"  # record carries no sig parameter
+    SKIPPED_DNSSEC = "skipped_dnssec"  # authenticated by DNSSEC; JWS not needed
 
 
 def jwks_urls(zone: str) -> list[str]:
