@@ -711,6 +711,30 @@ def discover_agents_via_dns(
                         if agent.trust_manifest is not None
                         else {}
                     ),
+                    # Signature outcome. Emitted only when the record carries a
+                    # sig or verification actually ran, so payloads for
+                    # unsigned records stay byte-identical.
+                    # ``signature_status`` is the field a caller should act on:
+                    # "expired" and "invalid" are both a False
+                    # ``signature_verified`` but need different responses, and
+                    # "no_key" means nothing was verified rather than that the
+                    # record was rejected.
+                    **({"sig": agent.sig} if agent.sig is not None else {}),
+                    **(
+                        {"signature_verified": agent.signature_verified}
+                        if agent.signature_status is not None
+                        else {}
+                    ),
+                    **(
+                        {"signature_status": agent.signature_status}
+                        if agent.signature_status is not None
+                        else {}
+                    ),
+                    **(
+                        {"signature_algorithm": agent.signature_algorithm}
+                        if agent.signature_algorithm is not None
+                        else {}
+                    ),
                 }
                 for agent in result.agents
             ],

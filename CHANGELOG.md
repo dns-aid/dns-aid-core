@@ -54,7 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty result under `--require-signed` now says the agents were dropped by the trust gate
   rather than reading as "nothing published". `dns-aid publish` gains `--sig-validity`. The
   MCP `discover_agents_via_dns` tool gains `verify_signatures`, so an agent can ask for the
-  status without also filtering on it. Output for unsigned records is unchanged.
+  status without also filtering on it, and returns the same four fields in its agent payload.
+  Output for unsigned records is unchanged on every interface.
 - **Key rollovers can overlap.** `sign_record(..., kid=...)` publishes a key identifier in
   the JWS protected header, verification selects the matching key from the JWKS, and
   `export_jwks_multi()` emits several keys in one document so the outgoing and incoming

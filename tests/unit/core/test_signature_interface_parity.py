@@ -72,14 +72,45 @@ class TestSdkSurface:
 
 
 class TestMcpSurface:
-    """MCP serialises with model_dump, so new fields flow without code changes."""
+    """MCP builds its agent payload by hand, so assert on the real output.
 
-    def test_model_dump_carries_every_signature_field(self):
-        dumped = _agent("verified", True).model_dump(mode="json")
+    An earlier version of this test asserted on ``AgentRecord.model_dump()``
+    and passed while the MCP tool was in fact emitting nothing. The tool
+    constructs its own dict, so ``model_dump`` proves only that the model has
+    the field, not that a caller ever receives it. That is the same
+    mock-the-seam mistake that let the ``sig`` defect ship, so the payload is
+    now driven end to end.
+    """
+
+    def _payload(self, agent: AgentRecord) -> dict:
+        from dns_aid.mcp.server import discover_agents_via_dns
+
+        fn = getattr(discover_agents_via_dns, "fn", discover_agents_via_dns)
+        with patch(
+            "dns_aid.core.discoverer.discover",
+            new=AsyncMock(return_value=_result(agent)),
+        ):
+            return fn(domain="agents.example.com", verify_signatures=True)
+
+    def test_payload_carries_every_signature_field(self):
+        entry = self._payload(_agent("verified", True))["agents"][0]
 
         for field in ("sig", "signature_verified", "signature_status", "signature_algorithm"):
-            assert field in dumped, f"{field} missing from the MCP payload"
-        assert dumped["signature_status"] == "verified"
+            assert field in entry, f"{field} never reaches the MCP caller"
+        assert entry["signature_status"] == "verified"
+        assert entry["signature_verified"] is True
+
+    def test_payload_distinguishes_unknown_from_rejected(self):
+        entry = self._payload(_agent("no_key", None))["agents"][0]
+
+        assert entry["signature_status"] == "no_key"
+        assert entry["signature_verified"] is None
+
+    def test_payload_for_unsigned_records_is_unchanged(self):
+        entry = self._payload(_agent(None, None, sig=None))["agents"][0]
+
+        for field in ("sig", "signature_verified", "signature_status", "signature_algorithm"):
+            assert field not in entry, f"{field} leaked into the payload for an unsigned record"
 
     def test_discover_tool_accepts_verify_signatures(self):
         """Verification must be requestable without also filtering.
@@ -91,7 +122,8 @@ class TestMcpSurface:
 
         from dns_aid.mcp.server import discover_agents_via_dns
 
-        params = inspect.signature(discover_agents_via_dns).parameters
+        fn = getattr(discover_agents_via_dns, "fn", discover_agents_via_dns)
+        params = inspect.signature(fn).parameters
         assert "verify_signatures" in params
         assert params["verify_signatures"].default is False
 
