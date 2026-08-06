@@ -449,15 +449,23 @@ async def _check_dane(target: str, port: int, *, verify_cert: bool = False) -> b
     via TLS, retrieves the certificate, and compares its digest against the
     TLSA association data.
 
+    Every association in the RRset is tried: the certificate is valid if it
+    matches ANY of them (RFC 6698; RFC 7671 Section 5.1). This is what allows a
+    certificate rollover to publish the outgoing and incoming pins side by side
+    (RFC 7671 Section 8.1) without verification depending on RRset ordering.
+
     Args:
         target: Hostname of the endpoint.
         port: Port number.
         verify_cert: If True, perform full certificate matching against TLSA.
 
     Returns:
-        True if TLSA record exists (and optionally cert matches)
-        False if TLSA record exists but cert does NOT match (verify_cert=True)
-        None if no TLSA record configured
+        True if TLSA record exists (and, with ``verify_cert``, some association
+        matched the presented certificate)
+        False if TLSA records exist and EVERY association was compared and
+        none matched (verify_cert=True)
+        None if no TLSA record is configured, or none could be evaluated
+        because every comparison errored -- unknown, not a mismatch
     """
     # TLSA record format: _port._tcp.hostname
     tlsa_fqdn = f"_{port}._tcp.{target}"
@@ -466,7 +474,18 @@ async def _check_dane(target: str, port: int, *, verify_cert: bool = False) -> b
         resolver = dns.asyncresolver.Resolver()
         answers = await resolver.resolve(tlsa_fqdn, "TLSA")
 
+        # A TLSA RRset may hold several associations and the certificate is
+        # valid if it matches ANY of them (RFC 6698; RFC 7671 Section 5.1).
+        # Publishing two associations is precisely how a key or certificate
+        # rollover is staged (RFC 7671 Section 8.1) -- the outgoing and
+        # incoming pins overlap for the duration. Returning on the first
+        # non-match would make the outcome depend on RRset ordering, which is
+        # not stable, and would break rollovers; so a non-match advances to the
+        # next association and only an exhausted RRset is a failure.
+        saw_record = False
+        evaluated_any = False
         for rdata in answers:
+            saw_record = True
             logger.debug(
                 "TLSA record found",
                 fqdn=tlsa_fqdn,
@@ -484,19 +503,47 @@ async def _check_dane(target: str, port: int, *, verify_cert: bool = False) -> b
                 cert_match = await _match_dane_cert(
                     target, port, rdata.usage, rdata.selector, rdata.mtype, rdata.cert
                 )
-                if cert_match:
-                    logger.info("DANE certificate match verified", fqdn=tlsa_fqdn)
-                    return True
-                else:
-                    logger.warning("DANE certificate mismatch", fqdn=tlsa_fqdn)
-                    return False
             except Exception as e:
+                # Transient failure against this association (connection reset,
+                # timeout, unsupported parameters). It is not evidence that the
+                # certificate is wrong, so try the next association rather than
+                # reporting a mismatch.
                 logger.warning(
                     "DANE certificate matching failed",
                     fqdn=tlsa_fqdn,
                     error=str(e),
                 )
-                return False
+                continue
+
+            evaluated_any = True
+            if cert_match:
+                logger.info("DANE certificate match verified", fqdn=tlsa_fqdn)
+                return True
+
+            logger.debug(
+                "TLSA association did not match; trying next",
+                fqdn=tlsa_fqdn,
+                usage=rdata.usage,
+                selector=rdata.selector,
+                mtype=rdata.mtype,
+            )
+
+        if saw_record and verify_cert:
+            if not evaluated_any:
+                # Every association raised: nothing was actually compared, so
+                # the result is unknown rather than a mismatch. Same
+                # distinction the JWS path draws between "no key" and "bad
+                # signature" -- an unverifiable result must not read as forgery.
+                logger.warning(
+                    "DANE verification inconclusive (no association could be evaluated)",
+                    fqdn=tlsa_fqdn,
+                )
+                return None
+            logger.warning(
+                "DANE certificate mismatch (no TLSA association matched)",
+                fqdn=tlsa_fqdn,
+            )
+            return False
 
     except dns.resolver.NXDOMAIN:
         logger.debug("No TLSA record (DANE not configured)", fqdn=tlsa_fqdn)
