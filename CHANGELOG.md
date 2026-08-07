@@ -76,6 +76,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked". Consumers alerting on `invalid` will see new alerts. The verdict no longer depends
   on whether a network refetch succeeded, which an attacker could influence.
 - **`--sig-validity` without `--sign` now exits 1** instead of being accepted and ignored.
+- **BEHAVIOR NOTE: every signature published today now reports
+  `verified_endpoint_only` rather than `verified`.** The `signature_status`
+  values are `verified`, `verified_endpoint_only`, `expired`, `invalid`,
+  `unbound`, `no_key`, `not_signed`, `not_checked` and `skipped_dnssec`. Two are
+  new. `verified_endpoint_only` means the signature verified but covers only
+  fqdn/target/port/alpn -- cap, cap-sha256, policy, realm and well-known are not
+  attested, which is true of every record signed before the `svcb` claim
+  existed. `not_checked` means verification was requested but the aggregate
+  budget expired first. A consumer matching `signature_status == "verified"`
+  will reject records it previously accepted; `signature_verified is True` is
+  unchanged, and `require_signed` is unaffected. Publishers should re-sign.
+- **DANE probes are restricted to ports 443, 853 and 8443**, overridable with
+  `DNS_AID_DANE_ALLOWED_PORTS` (a comma-separated list, or `any`). target and
+  port come off a forgeable record, so an unrestricted probe was a port scanner
+  attributed to every consumer. The reachability probes are deliberately NOT
+  restricted, because there a refusal would report a healthy agent on 8080 as
+  unreachable.
+- **Non-public addresses are now rejected by an allow-list rather than an
+  enumeration.** This newly blocks RFC 6598 shared address space
+  (`100.64.0.0/10` -- Tailscale, carrier NAT, some Kubernetes fabrics),
+  multicast, `240/4` and `0.0.0.0`, and resolves NAT64 (RFC 6052) and 6to4
+  addresses to the destination they actually reach before the check. If you
+  discover agents on CGNAT addresses, set `DNS_AID_FETCH_ALLOWLIST`.
+- **Every guarded fetch now dials the address that was vetted**, carrying the
+  original name in SNI and the `Host` header. Validating a name and then
+  connecting to it resolved twice and checked only the first, so a one-second
+  TTL could move the destination in between.
+- **A TLSA RRset larger than 32 usable associations is truncated**, and the
+  dropped records count as unevaluated -- so a very large RRset softens the
+  verdict to `null` rather than producing a definite mismatch.
+- **DANE and signature verification run concurrently under aggregate budgets**
+  (8 / 60s and 16 / 45s). Endpoints not reached keep `dane_verified: null`;
+  records not verified report `not_checked`.
+- **The JWKS fetch is single-flighted per zone and negatively cached for 30s**,
+  so one unreachable key host costs one timeout per zone rather than one per
+  agent, and cache keys are normalised for case and trailing dot.
+- **A JWKS key-set change is reported.** Advisory only; it never refuses a
+  signature.
+- **DNSSEC chain validation is available** via `dns_aid.core.dnssec_chain`,
+  anchored at the IANA root KSK, so a verdict no longer rests on the AD flag.
 - **`mcp` is bounded below 2.** `mcp>=1.28.1` had no upper bound and resolved to 2.0.0, which
   removed `mcp.server.fastmcp`, so `from mcp.server.fastmcp import FastMCP` failed at import
   and `pip install 'dns-aid[mcp]'` produced a broken MCP server. Present in 0.27.0 as well.
