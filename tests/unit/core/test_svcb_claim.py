@@ -251,3 +251,65 @@ class TestRequireSignedParamsGate:
             apply_filters([self._verified(False)], require_signed=True, require_signed_params=True)
             == []
         )
+
+
+class TestTheMigrationPathActuallyWorks:
+    """Re-signing must produce a record that satisfies the gate.
+
+    The gate defaults off because every record published before the claim reports
+    endpoint-only coverage. That trade is only defensible if re-signing genuinely
+    fixes it, so the publish-to-verify round trip is pinned here rather than
+    assumed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_publish_sign_then_verify_yields_full_coverage(self, tmp_path, monkeypatch):
+        import base64
+        import json
+
+        from cryptography.hazmat.primitives import serialization
+
+        from dns_aid.core.filters import apply_filters
+        from dns_aid.core.publisher import publish
+
+        priv, pub = generate_keypair()
+        key_path = tmp_path / "signing.pem"
+        key_path.write_bytes(
+            priv.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        monkeypatch.setenv("DNS_AID_BACKEND", "mock")
+
+        result = await publish(
+            name="ddi-agent",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="edge.example.com",
+            port=443,
+            cap_uri="https://edge.example.com/.well-known/agent-card.json",
+            realm="production",
+            well_known_path="agent-card.json",
+            sign=True,
+            private_key_path=str(key_path),
+        )
+
+        assert result.success
+        record = result.agent
+        assert record.sig is not None
+
+        payload = json.loads(base64.urlsafe_b64decode(record.sig.split(".")[1] + "=="))
+        assert "svcb" in payload, "a freshly signed record must carry the claim"
+
+        record.signature_status = None
+        record.signature_verified = None
+        with patch("dns_aid.core.jwks.fetch_jwks", new=AsyncMock(return_value=export_jwks(pub))):
+            await _verify_agent_signatures([record], "example.com", dnssec_validated={})
+
+        assert record.signature_status == SignatureStatus.VERIFIED
+        assert record.signature_covers_params is True
+        assert apply_filters([record], require_signed=True, require_signed_params=True) == [
+            record
+        ], "re-signing must be a real remedy, not a nominal one"
