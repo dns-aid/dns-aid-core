@@ -324,6 +324,22 @@ class TestCheckDane:
 
 
 # =============================================================================
+@pytest.fixture(autouse=True)
+def _allow_probe_targets():
+    """The endpoint probe is SSRF-guarded, and the guard resolves for real.
+
+    These tests use reserved example.com names that do not resolve, so the guard
+    would reject before any mocked HTTP behaviour is reached. It has its own
+    coverage; what is under test here is what happens once the probe is allowed.
+    """
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    with patch(
+        "dns_aid.utils.url_safety.validate_fetch_url_async", new=_AsyncMock(return_value="")
+    ):
+        yield
+
+
 # Tests for _check_endpoint()
 # =============================================================================
 

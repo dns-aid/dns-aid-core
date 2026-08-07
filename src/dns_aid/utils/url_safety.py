@@ -15,6 +15,7 @@ import concurrent.futures
 import ipaddress
 import os
 import socket
+from urllib.parse import urlparse, urlunparse
 
 import structlog
 
@@ -261,7 +262,36 @@ async def safe_fetch_bytes(
     if max_redirects:
         kwargs["max_redirects"] = max_redirects
 
-    async with httpx.AsyncClient(**kwargs) as client, client.stream("GET", url) as resp:
+    # Pin the connection to the address the guard actually vetted.
+    #
+    # Every caller validates the URL and then hands the same NAME to httpx,
+    # which resolves it a second time. Only the first resolution is checked, so
+    # a hostile authoritative server answering with a one-second TTL returns a
+    # public address to the guard and a loopback or metadata address to the
+    # connection. The retrieved body then lands in the discovery result, which
+    # makes it exfiltration rather than blind SSRF.
+    #
+    # Rewriting the URL to the literal keeps the range check meaningful;
+    # sni_hostname carries the original name so SNI and certificate hostname
+    # verification are unchanged. Falls back to the name when no pin is
+    # available (an allow-listed host, or a URL validated elsewhere), which is
+    # the pre-existing behaviour rather than a new hole.
+    request_url = url
+    extensions: dict = {}
+    pinned = vetted_ip_for(url)
+    if pinned:
+        parsed = urlparse(url)
+        if parsed.hostname and parsed.hostname != pinned:
+            host_literal = f"[{pinned}]" if ":" in pinned else pinned
+            netloc = f"{host_literal}:{parsed.port}" if parsed.port else host_literal
+            request_url = urlunparse(parsed._replace(netloc=netloc))
+            extensions["sni_hostname"] = parsed.hostname
+            kwargs["headers"] = {"Host": parsed.netloc}
+
+    async with (
+        httpx.AsyncClient(**kwargs) as client,
+        client.stream("GET", request_url, extensions=extensions) as resp,
+    ):
         if resp.status_code != 200:
             return None
 

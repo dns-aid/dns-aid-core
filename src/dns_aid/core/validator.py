@@ -471,8 +471,11 @@ async def _check_tls(target: str, port: int) -> TLSDetail:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(writer.wait_closed(), timeout=DANE_SHUTDOWN_TIMEOUT)
 
-        # Check HSTS via HTTP request
+        # Check HSTS via HTTP request. Guarded like the dial above: target and
+        # port come off a forgeable record, and an httpx call is as much a sink
+        # as a raw socket.
         try:
+            await _guarded_dial_host(target, port)
             async with httpx.AsyncClient(timeout=5.0, verify=True) as client:
                 response = await client.head(f"https://{target}:{port}/")
                 hsts_header = response.headers.get("strict-transport-security")
@@ -970,6 +973,11 @@ async def _check_endpoint(target: str, port: int) -> dict:
     endpoint = f"https://{target}:{port}"
 
     try:
+        # Same guard as every other probe in this module. Without it
+        # `dns-aid verify` reached arbitrary host:port pairs from the
+        # consumer's network on a record the attacker published.
+        await _guarded_dial_host(target, port)
+
         start_time = time.perf_counter()
 
         async with httpx.AsyncClient(
