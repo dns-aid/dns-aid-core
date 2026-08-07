@@ -28,6 +28,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import threading
 import time
 import warnings
 from collections.abc import Mapping
@@ -638,6 +639,74 @@ def verify_signature_detailed(
         return False, None, SignatureStatus.INVALID
 
 
+# --- Key continuity -----------------------------------------------------------
+#
+# You cannot bootstrap trust from inside a zone an attacker controls. Any pin
+# carried in the record is forged alongside the record, and the JWKS is fetched
+# over WebPKI for a name in that same zone, so an adversary with zone-level DNS
+# control can obtain a DV certificate and serve their own document. That is a
+# property of the layer, not a bug to patch.
+#
+# What IS achievable is detectability. An attacker who swaps the key set must
+# swap the key, and a key change is observable. Trust-on-first-use with change
+# alerting turns a silent substitution into a loud one, needs no protocol change,
+# and costs one hash per zone.
+#
+# Deliberately advisory: this NEVER refuses a signature. A publisher rotating
+# keys legitimately must not have discovery break, and treating a rotation as an
+# attack would be the unverifiable-reads-as-forgery inversion this module exists
+# to avoid. It reports; the operator decides.
+_KEY_CONTINUITY_MAX = 512
+_seen_key_sets: dict[str, str] = {}
+_continuity_lock = threading.Lock()
+
+
+def jwks_fingerprint(jwks: Mapping[str, Any]) -> str:
+    """Order-independent digest of the key material in a JWKS document.
+
+    Covers only the public-key parameters, so a document reserialised with new
+    kids, extra metadata or a different key order fingerprints the same. What
+    changes the fingerprint is the actual set of keys the publisher serves.
+    """
+    keys = []
+    for jwk in jwks.get("keys", []):
+        if not isinstance(jwk, dict):
+            continue
+        keys.append(
+            ":".join(str(jwk.get(field, "")) for field in ("kty", "crv", "x", "y", "n", "e"))
+        )
+    raw = "\n".join(sorted(keys)).encode("utf-8")
+    return base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode().rstrip("=")
+
+
+def observe_key_set(domain: str, jwks: Mapping[str, Any]) -> str | None:
+    """Record the key set seen for a zone and report a change.
+
+    Returns the previous fingerprint when it differs from the current one, and
+    None on first sight or when unchanged.
+    """
+    key = _cache_key(domain)
+    current = jwks_fingerprint(jwks)
+    with _continuity_lock:
+        previous = _seen_key_sets.get(key)
+        if previous == current:
+            return None
+        while len(_seen_key_sets) >= _KEY_CONTINUITY_MAX:
+            _seen_key_sets.pop(next(iter(_seen_key_sets)), None)
+        _seen_key_sets[key] = current
+    if previous is None:
+        logger.debug("first key set seen for zone", domain=domain, fingerprint=current)
+        return None
+    logger.warning(
+        "JWKS key set changed for this zone; this is a legitimate rotation OR a "
+        "substituted key document. Confirm the rotation with the publisher",
+        domain=domain,
+        previous_fingerprint=previous,
+        current_fingerprint=current,
+    )
+    return previous
+
+
 async def fetch_jwks(domain: str) -> dict[str, Any] | None:
     """
     Fetch JWKS from a domain's well-known endpoint.
@@ -707,6 +776,7 @@ async def _fetch_jwks_locked(domain: str) -> dict[str, Any] | None:
             )
 
         _cache_jwks(domain, jwks)
+        observe_key_set(domain, jwks)
         logger.info("JWKS fetched successfully", domain=domain, url=url)
         return jwks
 
