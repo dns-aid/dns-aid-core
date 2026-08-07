@@ -185,13 +185,19 @@ class TestLiveSignedRecordOnUnsignedZone:
 
         assert agent.signature_status in {
             SignatureStatus.VERIFIED,
+            # The published record predates the svcb claim, so it verifies with
+            # endpoint-only coverage. Both count as verified.
+            SignatureStatus.VERIFIED_ENDPOINT_ONLY,
             SignatureStatus.EXPIRED,
             SignatureStatus.INVALID,
             SignatureStatus.UNBOUND,
             SignatureStatus.NO_KEY,
         }, f"unexpected status {agent.signature_status!r}"
 
-        if agent.signature_status == SignatureStatus.VERIFIED:
+        if agent.signature_status in (
+            SignatureStatus.VERIFIED,
+            SignatureStatus.VERIFIED_ENDPOINT_ONLY,
+        ):
             assert agent.signature_verified is True
             assert agent.signature_algorithm == "ES256"
         elif agent.signature_status == SignatureStatus.NO_KEY:

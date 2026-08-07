@@ -458,7 +458,8 @@ class TestDnssecSkipIsNotAFailure:
         # for a signature: the skip map is empty, so JWS runs.
         await self._verify(agent, skip=False)
 
-        assert agent.signature_status == SignatureStatus.VERIFIED
+        # Signed without params, so the endpoint tuple is all that is attested.
+        assert agent.signature_status == SignatureStatus.VERIFIED_ENDPOINT_ONLY
         assert agent.signature_verified is True
         assert agent.signature_algorithm == "ES256"
         assert _matches_signed(agent, require=True, allowed_algorithms=None) is True

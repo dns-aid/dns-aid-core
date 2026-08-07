@@ -23,11 +23,15 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
+import time
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from dns_aid.core.models import AgentRecord
 
 app = typer.Typer(
     name="dns-aid",
@@ -768,7 +772,7 @@ def _format_dane(value: bool | None) -> str:
     return "[yellow]unknown[/yellow]"
 
 
-def _format_signature(agent) -> str:
+def _format_signature(agent: AgentRecord) -> str:
     """Render the signature outcome for the discover table.
 
     Keyed on ``signature_status`` rather than ``signature_verified`` because
@@ -781,10 +785,8 @@ def _format_signature(agent) -> str:
     if status is None:
         return "[dim]-[/dim]"
 
-    if status == "verified" and agent.signature_expires_at is not None:
-        import time as _time
-
-        remaining = agent.signature_expires_at - _time.time()
+    if status in ("verified", "verified_endpoint_only") and agent.signature_expires_at is not None:
+        remaining = agent.signature_expires_at - time.time()
         # A lapsed window is expired whatever the verifier concluded: the JWS
         # validated against a key that has since aged past its own exp claim.
         # Rendering that as "verified (-3d left)" reads as healthy.
@@ -802,6 +804,7 @@ def _format_signature(agent) -> str:
 
     rendering = {
         "verified": ("green", f"verified ({agent.signature_algorithm or 'ES256'})"),
+        "verified_endpoint_only": ("yellow", "verified (endpoint only, re-sign)"),
         "skipped_dnssec": ("green", "n/a (DNSSEC)"),
         "expired": ("yellow", "expired (re-publish)"),
         "invalid": ("red", "invalid"),

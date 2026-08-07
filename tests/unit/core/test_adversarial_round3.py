@@ -173,3 +173,72 @@ class TestNegativeCacheOutlivesTheFetch:
 
     def test_the_window_is_short_enough_to_recover(self):
         assert JWKS_NEGATIVE_TTL <= 60
+
+
+class TestExpiryIsPopulatedNotJustRendered:
+    """The renderer is well covered; the line that FEEDS it was not.
+
+    Mutating `agent.signature_expires_at = payload.exp` to `= None` survived the
+    entire unit suite and the live suite, because every test that touches the
+    field hand-assigns it -- mocking the exact seam where the value would be
+    lost. That is the same failure shape that let the original `sig` parse bug
+    ship, and it is what this PR exists to fix.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_exp_claim_reaches_the_record(self):
+        priv, pub = generate_keypair()
+        payload = RecordPayload.from_agent_record(
+            "a.example.com", "t.example.com", 443, "mcp", params=PARAMS
+        )
+        agent = await _verify(_record("dns_svcb", sig=sign_record(payload, priv)), pub)
+
+        assert agent.signature_verified is True
+        assert agent.signature_expires_at == payload.exp, (
+            "the exp claim did not reach the record; the renderer has nothing to show"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_window_is_the_signed_one_not_the_dns_ttl(self):
+        priv, pub = generate_keypair()
+        payload = RecordPayload.from_agent_record(
+            "a.example.com", "t.example.com", 443, "mcp", params=PARAMS
+        )
+        agent = await _verify(_record("dns_svcb", sig=sign_record(payload, priv)), pub)
+
+        assert agent.signature_expires_at is not None
+        assert agent.signature_expires_at - payload.iat == 90 * 86400
+
+
+class TestTrustGateStandsOnItsOwn:
+    """Blanking the primary gate survived the suite, masked by the algorithm check."""
+
+    @pytest.mark.parametrize("verified", [False, None])
+    def test_require_signed_refuses_whatever_the_algorithm_says(self, verified):
+        from dns_aid.core.filters import apply_filters
+
+        rec = _record("dns_svcb")
+        rec.signature_verified = verified
+        rec.signature_algorithm = "ES256"  # present, but nothing verified it
+
+        assert apply_filters([rec], require_signed=True) == []
+
+
+def test_the_mcp_extra_keeps_an_upper_bound():
+    """The bound IS the fix; a dependency sweep could drop it silently.
+
+    mcp 2.0.0 removed mcp.server.fastmcp, so an unbounded requirement gives
+    `pip install 'dns-aid[mcp]'` a broken server -- which is what shipped in
+    0.27.0.
+    """
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    data = tomllib.loads((root / "pyproject.toml").read_text())
+    extras = data["project"]["optional-dependencies"]
+
+    for name, reqs in extras.items():
+        for req in reqs:
+            if req.replace("-", "_").startswith("mcp") and "mcp_registry" not in req:
+                assert "<" in req, f"extra '{name}' declares {req!r} with no upper bound"

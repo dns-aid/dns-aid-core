@@ -50,12 +50,41 @@ def redact_url_for_log(url: str) -> str:
 # twice, and only the first is checked: a hostile authoritative server with a
 # one-second TTL answers public, then loopback. Measured retrieving an internal
 # service's certificate through the DANE path.
+_VETTED_IP_MAX = 512
 _last_vetted_ip: dict[str, str | None] = {}
 
 
 def vetted_ip_for(url: str) -> str | None:
     """The address ``validate_fetch_url`` approved for this URL, if any."""
     return _last_vetted_ip.get(url)
+
+
+# NAT64 (RFC 6052) and 6to4 relay anycast carry an embedded IPv4 destination and
+# are classified globally reachable, so `64:ff9b::a9fe:a9fe` passed the range
+# check while the bare 169.254.169.254 it translates to did not. On any host
+# behind NAT64/DNS64 -- IPv6-only clusters, AWS VPC NAT64, mobile carriers --
+# the gateway delivers it to the metadata service.
+_EMBEDDED_V4_PREFIXES = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+)
+_SIXTOFOUR_RELAY = ipaddress.ip_network("192.88.99.0/24")
+
+
+def _unwrap_embedded_v4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Resolve an address to the destination it actually reaches."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return ip.ipv4_mapped
+        for prefix in _EMBEDDED_V4_PREFIXES:
+            if ip in prefix:
+                return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    elif ip in _SIXTOFOUR_RELAY:
+        # Anycast relay into 6to4; the far side is not constrained.
+        return ipaddress.IPv4Address("127.0.0.1")
+    return ip
 
 
 def validate_fetch_url(url: str) -> str:
@@ -124,6 +153,7 @@ def validate_fetch_url(url: str) -> str:
         # (100.64.0.0/10 -- Alibaba Cloud metadata at 100.100.100.200, Tailscale
         # tailnets, carrier-grade NAT, some k8s fabrics) and multicast, both of
         # which a forgeable SVCB target could name.
+        ip = _unwrap_embedded_v4(ip)
         if not ip.is_global or ip.is_multicast or ip.is_unspecified:
             raise UnsafeURLError(
                 f"URL resolves to non-public IP {ip_str} (hostname '{hostname}'): {url}"
@@ -131,6 +161,12 @@ def validate_fetch_url(url: str) -> str:
         if vetted is None:
             vetted = str(ip_str)
 
+    # Bounded like every other cache in this package. URLs are built from record
+    # data, so an attacker publishing many distinct URIs across many zones would
+    # otherwise grow this without limit in a long-running server.
+    while len(_last_vetted_ip) >= _VETTED_IP_MAX:
+        _last_vetted_ip.pop(next(iter(_last_vetted_ip)), None)
+    _last_vetted_ip.pop(url, None)
     _last_vetted_ip[url] = vetted
     return url
 

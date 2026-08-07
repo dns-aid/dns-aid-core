@@ -2159,6 +2159,12 @@ async def _verify_agent_signatures(
                     payload_matches = False
                 else:
                     agent.signature_covers_params = True
+            elif payload_matches and payload is not None and payload.svcb is None:
+                # No claim in the payload, so the capability pointer on this
+                # record is unattested. Say so in the status rather than only in
+                # a log line: signature_verified stays True for compatibility,
+                # but no surface should call this plainly "verified".
+                status = SignatureStatus.VERIFIED_ENDPOINT_ONLY
 
             if status is SignatureStatus.NO_KEY:
                 # No key document was reachable, so nothing was verified. This

@@ -103,7 +103,13 @@ class SignatureStatus(StrEnum):
     operator no way to tell which they are looking at.
     """
 
-    VERIFIED = "verified"  # signature valid AND bound to this record
+    VERIFIED = "verified"
+    # The signature verified, but covers only fqdn/target/port/alpn -- cap,
+    # cap-sha256, policy, realm and well-known are NOT attested. The attacker
+    # chooses which genuine signature to replay, so they choose one without the
+    # svcb claim; reporting that as plain "verified" is a false statement about
+    # what was proven, whatever require_signed_params is set to.
+    VERIFIED_ENDPOINT_ONLY = "verified_endpoint_only"  # signature valid AND bound to this record
     INVALID = "invalid"  # a key was retrieved; the signature did not verify
     UNBOUND = "unbound"  # signature valid but describes a different record
     EXPIRED = "expired"  # signature lapsed; re-publish

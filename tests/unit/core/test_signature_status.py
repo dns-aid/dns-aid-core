@@ -179,6 +179,7 @@ class TestStatusDistinguishesCauses:
 
     @pytest.mark.asyncio
     async def test_verified_record_reports_verified(self):
+        """Signed without params, so this is the endpoint-only flavour."""
         from dns_aid.core.discoverer import _verify_agent_signatures
 
         priv, pub = generate_keypair()
@@ -191,7 +192,7 @@ class TestStatusDistinguishesCauses:
             await _verify_agent_signatures([agent], ZONE, dnssec_validated=False)
 
         assert agent.signature_verified is True
-        assert agent.signature_status == SignatureStatus.VERIFIED
+        assert agent.signature_status == SignatureStatus.VERIFIED_ENDPOINT_ONLY
         assert agent.signature_algorithm == "ES256"
 
 

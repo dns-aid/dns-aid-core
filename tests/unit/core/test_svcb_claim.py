@@ -165,8 +165,12 @@ class TestLegacyRecordsStillVerify:
 
         agent = await _verify(_record(legacy), pub)
 
-        assert agent.signature_verified is True
-        assert agent.signature_status == SignatureStatus.VERIFIED
+        assert agent.signature_verified is True, "an existing record must not stop verifying"
+        assert agent.signature_status == SignatureStatus.VERIFIED_ENDPOINT_ONLY, (
+            "it verified, but no surface should call an unattested capability "
+            "pointer plainly 'verified' -- the attacker picks which signature to "
+            "replay, so they pick one without the claim"
+        )
 
     @pytest.mark.asyncio
     async def test_but_its_reduced_coverage_is_reported(self, keys):

@@ -424,7 +424,12 @@ async def _check_tls(target: str, port: int) -> TLSDetail:
     try:
         ctx = ssl.create_default_context()
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(target, port, ssl=ctx),
+            asyncio.open_connection(
+                await _guarded_dial_host(target, port),
+                port,
+                ssl=ctx,
+                server_hostname=target,
+            ),
             timeout=10.0,
         )
 
@@ -785,6 +790,28 @@ def _dane_port_allowed(port: int) -> bool:
     return port in _DEFAULT_DANE_PORTS
 
 
+async def _guarded_dial_host(target: str, port: int) -> str:
+    """Vet a target/port pair and return the address that was approved.
+
+    Both come verbatim off a forgeable SVCB record. The DANE probe below already
+    refuses non-public addresses and off-list ports; `_check_tls` and
+    `_check_endpoint` in this same file did not, so `dns-aid verify` and the MCP
+    verify tool would dial any host on any port from the consumer's network. The
+    guard belongs on every dial that takes its destination from a record, not
+    just the one that was reviewed.
+    """
+    from dns_aid.utils.url_safety import validate_fetch_url_async, vetted_ip_for
+
+    if not _dane_port_allowed(port):
+        raise ConnectionError(
+            f"probe refused for port {port}; allowed {sorted(_DEFAULT_DANE_PORTS)} "
+            "(override with DNS_AID_DANE_ALLOWED_PORTS)"
+        )
+    probe_url = f"https://{target}:{port}/"
+    await validate_fetch_url_async(probe_url)
+    return vetted_ip_for(probe_url) or target
+
+
 async def _fetch_peer_cert(target: str, port: int, *, pkix: bool) -> bytes:
     """Retrieve the peer certificate once, in DER form.
 
@@ -807,22 +834,13 @@ async def _fetch_peer_cert(target: str, port: int, *, pkix: bool) -> bytes:
     #
     # The caller maps a raised exception to None (unknown), which is the right
     # verdict for an endpoint we decline to dial.
-    from dns_aid.utils.url_safety import validate_fetch_url_async, vetted_ip_for
 
-    if not _dane_port_allowed(port):
-        raise ConnectionError(
-            f"DANE probe refused for port {port}; allowed {sorted(_DEFAULT_DANE_PORTS)} "
-            "(override with DNS_AID_DANE_ALLOWED_PORTS)"
-        )
-
-    probe_url = f"https://{target}:{port}/"
-    await validate_fetch_url_async(probe_url)
+    dial_host = await _guarded_dial_host(target, port)
     # Dial the address that was actually vetted. Connecting to the name would
     # resolve a second time, and only the first resolution was checked --
     # a one-second TTL flipping public to loopback between them retrieved an
     # internal service's certificate. server_hostname keeps SNI and, for
     # pkix=True, hostname verification pointed at the real name.
-    dial_host = vetted_ip_for(probe_url) or target
     if pkix:
         ctx = ssl.create_default_context()
     else:
@@ -956,7 +974,8 @@ async def _check_endpoint(target: str, port: int) -> dict:
 
         async with httpx.AsyncClient(
             timeout=10.0,
-            follow_redirects=True,
+            # A record-supplied URL must not be able to chain the probe onward.
+            follow_redirects=False,
             verify=True,
         ) as client:
             # Try health endpoint first, then root

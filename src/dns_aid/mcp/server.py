@@ -682,6 +682,10 @@ def discover_agents_via_dns(
                 "no_key" = no key document was reachable, so NOTHING was
                   verified. This is unknown, not forged. Do not treat it as an
                   attack signal,
+                "verified_endpoint_only" = the signature verified but covers ONLY
+                  fqdn/target/port/alpn. cap, cap-sha256, policy, realm and
+                  well-known are NOT attested, so treat the capability pointer on
+                  this record as unverified and ask the publisher to re-sign,
                 "not_signed" = the record carries no signature,
                 "not_checked" = verification was requested but did not run before
                   the aggregate budget expired. Nothing was learned about this
