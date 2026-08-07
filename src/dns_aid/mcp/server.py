@@ -572,6 +572,7 @@ def discover_agents_via_dns(
     text_match: str | None = None,
     verify_signatures: bool = False,
     require_signed: bool = False,
+    require_signed_params: bool = False,
     require_signature_algorithm: list[str] | None = None,
     verify_dane: bool = False,
 ) -> dict:
@@ -758,6 +759,7 @@ def discover_agents_via_dns(
             text_match=text_match,
             verify_signatures=verify_signatures,
             require_signed=require_signed,
+            require_signed_params=require_signed_params,
             require_signature_algorithm=require_signature_algorithm,
             verify_dane=verify_dane,
         )

@@ -15,6 +15,7 @@ import concurrent.futures
 import ipaddress
 import os
 import socket
+import threading
 from urllib.parse import urlparse, urlunparse
 
 import structlog
@@ -53,6 +54,7 @@ def redact_url_for_log(url: str) -> str:
 # service's certificate through the DANE path.
 _VETTED_IP_MAX = 512
 _last_vetted_ip: dict[str, str | None] = {}
+_vetted_ip_lock = threading.Lock()
 
 
 def vetted_ip_for(url: str) -> str | None:
@@ -65,10 +67,18 @@ def vetted_ip_for(url: str) -> str | None:
 # check while the bare 169.254.169.254 it translates to did not. On any host
 # behind NAT64/DNS64 -- IPv6-only clusters, AWS VPC NAT64, mobile carriers --
 # the gateway delivers it to the metadata service.
+# RFC 6052 section 2.2 puts the embedded IPv4 at a different offset per prefix
+# length, so the decode must be per prefix. Reading the low 32 bits is correct
+# ONLY for /96; for /48 those bits are the attacker-chosen suffix, so a decode
+# of 64:ff9b:1:a9fe:a9:fe00:808:808 returned 8.8.8.8 and let an address that
+# reaches 169.254.169.254 through a NAT64 gateway pass as global.
 _EMBEDDED_V4_PREFIXES = (
-    ipaddress.ip_network("64:ff9b::/96"),
-    ipaddress.ip_network("64:ff9b:1::/48"),
+    (ipaddress.ip_network("64:ff9b::/96"), 96),
+    (ipaddress.ip_network("64:ff9b:1::/48"), 48),
 )
+# IPv4-compatible IPv6 (RFC 4291 2.5.5.1): ::a.b.c.d reports is_global for a
+# private embedded address, and ipv4_mapped does not catch it.
+_V4_COMPATIBLE = ipaddress.ip_network("::/96")
 _SIXTOFOUR_RELAY = ipaddress.ip_network("192.88.99.0/24")
 
 
@@ -79,9 +89,17 @@ def _unwrap_embedded_v4(
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.ipv4_mapped is not None:
             return ip.ipv4_mapped
-        for prefix in _EMBEDDED_V4_PREFIXES:
+        raw = int(ip)
+        for prefix, length in _EMBEDDED_V4_PREFIXES:
             if ip in prefix:
-                return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+                if length == 96:
+                    return ipaddress.IPv4Address(raw & 0xFFFFFFFF)
+                # /48: bits 48-63 then 72-87, skipping the reserved u octet.
+                return ipaddress.IPv4Address(
+                    (((raw >> 64) & 0xFFFF) << 16) | ((raw >> 40) & 0xFFFF)
+                )
+        if ip in _V4_COMPATIBLE and raw & 0xFFFFFFFF:
+            return ipaddress.IPv4Address(raw & 0xFFFFFFFF)
     elif ip in _SIXTOFOUR_RELAY:
         # Anycast relay into 6to4; the far side is not constrained.
         return ipaddress.IPv4Address("127.0.0.1")
@@ -165,10 +183,17 @@ def validate_fetch_url(url: str) -> str:
     # Bounded like every other cache in this package. URLs are built from record
     # data, so an attacker publishing many distinct URIs across many zones would
     # otherwise grow this without limit in a long-running server.
-    while len(_last_vetted_ip) >= _VETTED_IP_MAX:
-        _last_vetted_ip.pop(next(iter(_last_vetted_ip)), None)
-    _last_vetted_ip.pop(url, None)
-    _last_vetted_ip[url] = vetted
+    # Locked. Unlike the caches in jwks.py, which run on the single-threaded
+    # event loop, validate_fetch_url executes in a 32-worker ThreadPoolExecutor
+    # via validate_fetch_url_async -- and `iter()` then `next()` are separate
+    # bytecodes, so another worker mutating the dict between them raises
+    # RuntimeError. That escaped through six call sites that catch only
+    # UnsafeURLError, as an intermittent load-triggered failure.
+    with _vetted_ip_lock:
+        while len(_last_vetted_ip) >= _VETTED_IP_MAX:
+            _last_vetted_ip.pop(next(iter(_last_vetted_ip)), None)
+        _last_vetted_ip.pop(url, None)
+        _last_vetted_ip[url] = vetted
     return url
 
 

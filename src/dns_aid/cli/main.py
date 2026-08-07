@@ -455,6 +455,18 @@ def discover(
             help="Only return records whose JWS signature verified (auto-enables --verify-signatures).",
         ),
     ] = False,
+    require_signed_params: Annotated[
+        bool,
+        typer.Option(
+            "--require-signed-params",
+            help=(
+                "Also require the signature to cover the DNS-AID parameters "
+                "(cap, cap-sha256, policy, realm, well-known), not just the endpoint. "
+                "Refuses records signed before the svcb claim, whose capability "
+                "pointer can be swapped while the signature still verifies."
+            ),
+        ),
+    ] = False,
     require_signature_algorithm: Annotated[
         list[str] | None,
         typer.Option(
@@ -514,6 +526,7 @@ def discover(
                 min_dnssec=min_dnssec,
                 text_match=text_match,
                 require_signed=require_signed,
+                require_signed_params=require_signed_params,
                 require_signature_algorithm=require_signature_algorithm,
                 verify_dane=verify_dane,
             )
@@ -798,6 +811,13 @@ def _format_signature(agent: AgentRecord) -> str:
         # Verification stays green right up to the moment it flips to expired,
         # so the window is the only notice a publisher gets. Amber inside two
         # weeks, which is time to re-publish before anything starts failing.
+        # The endpoint-only qualifier has to survive the countdown path.
+        # signature_expires_at is never None for a bound signature, so putting
+        # the qualifier only in the table below made it unreachable and every
+        # real endpoint-only record rendered as plain green "verified".
+        scope = " endpoint only," if status == "verified_endpoint_only" else ""
+        if scope:
+            return f"[yellow]verified ({scope.strip(' ,')}, {days}d left, re-sign)[/yellow]"
         if days <= EXPIRY_WARN_DAYS:
             return f"[yellow]verified ({days}d left, re-publish)[/yellow]"
         return f"[green]verified ({days}d left)[/green]"

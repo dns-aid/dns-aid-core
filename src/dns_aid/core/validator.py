@@ -425,7 +425,7 @@ async def _check_tls(target: str, port: int) -> TLSDetail:
         ctx = ssl.create_default_context()
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(
-                await _guarded_dial_host(target, port),
+                await _guarded_dial_host(target, port, enforce_ports=False),
                 port,
                 ssl=ctx,
                 server_hostname=target,
@@ -475,9 +475,13 @@ async def _check_tls(target: str, port: int) -> TLSDetail:
         # port come off a forgeable record, and an httpx call is as much a sink
         # as a raw socket.
         try:
-            await _guarded_dial_host(target, port)
+            hsts_host = await _guarded_dial_host(target, port, enforce_ports=False)
             async with httpx.AsyncClient(timeout=5.0, verify=True) as client:
-                response = await client.head(f"https://{target}:{port}/")
+                response = await client.head(
+                    f"https://{hsts_host}:{port}/",
+                    extensions={"sni_hostname": target},
+                    headers={"Host": f"{target}:{port}"},
+                )
                 hsts_header = response.headers.get("strict-transport-security")
                 if hsts_header:
                     detail.hsts_enabled = True
@@ -781,6 +785,17 @@ MAX_TLSA_ASSOCIATIONS = 32
 _DEFAULT_DANE_PORTS = frozenset({443, 853, 8443})
 
 
+def _effective_dane_ports() -> frozenset[int]:
+    """The port set actually in force, so error messages do not lie."""
+    raw = os.environ.get("DNS_AID_DANE_ALLOWED_PORTS", "").strip()
+    if raw and raw.lower() != "any":
+        try:
+            return frozenset(int(p) for p in raw.split(",") if p.strip())
+        except ValueError:
+            return _DEFAULT_DANE_PORTS
+    return _DEFAULT_DANE_PORTS
+
+
 def _dane_port_allowed(port: int) -> bool:
     raw = os.environ.get("DNS_AID_DANE_ALLOWED_PORTS", "").strip()
     if raw.lower() == "any":
@@ -793,7 +808,7 @@ def _dane_port_allowed(port: int) -> bool:
     return port in _DEFAULT_DANE_PORTS
 
 
-async def _guarded_dial_host(target: str, port: int) -> str:
+async def _guarded_dial_host(target: str, port: int, *, enforce_ports: bool = True) -> str:
     """Vet a target/port pair and return the address that was approved.
 
     Both come verbatim off a forgeable SVCB record. The DANE probe below already
@@ -805,14 +820,25 @@ async def _guarded_dial_host(target: str, port: int) -> str:
     """
     from dns_aid.utils.url_safety import validate_fetch_url_async, vetted_ip_for
 
-    if not _dane_port_allowed(port):
+    # enforce_ports=False for the reachability probes. There the port comes from
+    # the record's own SVCB and an agent on 8080 or 9000 is an ordinary
+    # deployment, so refusing it would report a healthy endpoint as unreachable.
+    # The address guard below still blocks every internal destination, which is
+    # what the port list was really protecting.
+    if enforce_ports and not _dane_port_allowed(port):
         raise ConnectionError(
-            f"probe refused for port {port}; allowed {sorted(_DEFAULT_DANE_PORTS)} "
+            f"probe refused for port {port}; allowed {sorted(_effective_dane_ports())} "
             "(override with DNS_AID_DANE_ALLOWED_PORTS)"
         )
     probe_url = f"https://{target}:{port}/"
     await validate_fetch_url_async(probe_url)
-    return vetted_ip_for(probe_url) or target
+    pinned = vetted_ip_for(probe_url)
+    if pinned is None:
+        # Fail-open by design (an allow-listed host records no pin), but never
+        # silently: dialling the name re-resolves, which is the window the pin
+        # closes, and an attacker can force the pin's eviction.
+        logger.debug("no vetted address pinned; dialling by name", target=target, port=port)
+    return pinned or target
 
 
 async def _fetch_peer_cert(target: str, port: int, *, pkix: bool) -> bytes:
@@ -970,13 +996,13 @@ async def _check_endpoint(target: str, port: int) -> dict:
 
     Returns dict with reachable status and latency.
     """
-    endpoint = f"https://{target}:{port}"
+    endpoint = f"https://{target}:{port}"  # for reporting; the dial is pinned below
 
     try:
         # Same guard as every other probe in this module. Without it
         # `dns-aid verify` reached arbitrary host:port pairs from the
         # consumer's network on a record the attacker published.
-        await _guarded_dial_host(target, port)
+        dial_host = await _guarded_dial_host(target, port, enforce_ports=False)
 
         start_time = time.perf_counter()
 
@@ -989,7 +1015,15 @@ async def _check_endpoint(target: str, port: int) -> dict:
             # Try health endpoint first, then root
             for path in ["/health", "/.well-known/agent-card.json", "/"]:
                 try:
-                    response = await client.get(f"{endpoint}{path}")
+                    # Dial the vetted literal; the name rides in SNI and Host
+                    # so certificate verification is unchanged. Resolving the
+                    # name again here is what let a one-second TTL flip the
+                    # destination between the guard and the connection.
+                    response = await client.get(
+                        f"https://{dial_host}:{port}{path}",
+                        extensions={"sni_hostname": target},
+                        headers={"Host": f"{target}:{port}"},
+                    )
                     latency_ms = (time.perf_counter() - start_time) * 1000
 
                     if response.status_code < 500:
