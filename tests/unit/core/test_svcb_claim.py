@@ -213,10 +213,11 @@ class TestRequireSignedParamsGate:
         agent.signature_covers_params = covers
         return agent
 
-    def test_off_by_default_a_legacy_record_still_matches(self):
+    def test_endpoint_only_is_refused_unless_explicitly_allowed(self):
         from dns_aid.core.filters import _matches_signed
 
-        assert _matches_signed(self._verified(False), True, None) is True
+        assert _matches_signed(self._verified(False), True, None, True) is False
+        assert _matches_signed(self._verified(False), True, None, False) is True
 
     def test_on_it_refuses_endpoint_only_coverage(self):
         from dns_aid.core.filters import _matches_signed
@@ -228,8 +229,25 @@ class TestRequireSignedParamsGate:
 
         assert _matches_signed(self._verified(True), True, None, True) is True
 
-    def test_it_requires_require_signed(self):
+    def test_it_is_inert_without_require_signed(self):
+        """A sub-condition, not a peer. On by default, so it must not fire alone."""
         from dns_aid.core.filters import apply_filters
 
-        with pytest.raises(ValueError, match="require_signed_params requires require_signed"):
-            apply_filters([], require_signed_params=True)
+        rec = self._verified(False)
+
+        assert apply_filters([rec], require_signed_params=True) == [rec]
+
+    def test_endpoint_only_passes_until_the_gate_is_asked_for(self):
+        """Default off, and deliberately so: the order is re-sign, then flip.
+
+        Flipping before publishers re-sign returns zero agents for every record
+        published today. The insecure state is never silent -- those records
+        report VERIFIED_ENDPOINT_ONLY, render amber, and are named in a warning.
+        """
+        from dns_aid.core.filters import apply_filters
+
+        assert apply_filters([self._verified(False)], require_signed=True) != []
+        assert (
+            apply_filters([self._verified(False)], require_signed=True, require_signed_params=True)
+            == []
+        )

@@ -86,8 +86,10 @@ def apply_filters(
         raise ValueError("text_match cannot be empty; use None to skip the filter")
     if require_signature_algorithm and not require_signed:
         raise ValueError("require_signature_algorithm requires require_signed=True to take effect")
-    if require_signed_params and not require_signed:
-        raise ValueError("require_signed_params requires require_signed=True to take effect")
+    # No guard pairing this with require_signed. It is a SUB-CONDITION of it --
+    # _matches_signed returns early when require is False -- so defaulting it on
+    # is inert until a caller asks for a signature, and raising here would make
+    # every unfiltered call fail.
 
     no_constraints = (
         capabilities is None
