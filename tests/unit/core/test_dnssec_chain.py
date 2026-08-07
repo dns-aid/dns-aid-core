@@ -112,3 +112,113 @@ class TestFailuresAreSafeDirection:
 
         assert result.status is ChainStatus.BOGUS
         assert result.secure is False
+
+
+class TestWiredIntoDiscovery:
+    """Built is not delivered. These pin that the walk actually gates trust."""
+
+    @staticmethod
+    def _agent(name="a"):
+        from dns_aid.core.models import AgentRecord, Protocol
+
+        return AgentRecord(
+            name=name,
+            domain="example.com",
+            protocol=Protocol.MCP,
+            target_host="t.example.com",
+            port=443,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_secure_chain_sets_the_verdict(self, monkeypatch):
+        from dns_aid.core.discoverer import _apply_post_discovery
+
+        async def secure(fqdn, rdtype="SVCB", **kw):  # noqa: ARG001
+            return ChainResult(ChainStatus.SECURE, "ok", zone="example.com.")
+
+        monkeypatch.setattr("dns_aid.core.dnssec_chain.validate_chain", secure)
+        agent = self._agent()
+
+        await _apply_post_discovery(
+            [agent], False, False, False, "example.com", require_secure_chain=True
+        )
+
+        assert agent.dnssec_chain_status == str(ChainStatus.SECURE)
+        assert agent.dnssec_validated is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status", [ChainStatus.INSECURE, ChainStatus.BOGUS, ChainStatus.INDETERMINATE]
+    )
+    async def test_anything_short_of_secure_fails_closed(self, monkeypatch, status):
+        from dns_aid.core.discoverer import _apply_post_discovery
+        from dns_aid.core.models import DNSSECError
+
+        async def not_secure(fqdn, rdtype="SVCB", **kw):  # noqa: ARG001
+            return ChainResult(status, "nope")
+
+        monkeypatch.setattr("dns_aid.core.dnssec_chain.validate_chain", not_secure)
+
+        with pytest.raises(DNSSECError, match="root anchor"):
+            await _apply_post_discovery(
+                [self._agent()], False, False, False, "example.com", require_secure_chain=True
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_walk_that_raises_is_not_secure(self, monkeypatch):
+        from dns_aid.core.discoverer import _apply_post_discovery
+        from dns_aid.core.models import DNSSECError
+
+        async def explode(fqdn, rdtype="SVCB", **kw):  # noqa: ARG001
+            raise OSError("resolver down")
+
+        monkeypatch.setattr("dns_aid.core.dnssec_chain.validate_chain", explode)
+
+        with pytest.raises(DNSSECError):
+            await _apply_post_discovery(
+                [self._agent()], False, False, False, "example.com", require_secure_chain=True
+            )
+
+    @pytest.mark.asyncio
+    async def test_it_replaces_the_ad_flag_rather_than_adding_to_it(self, monkeypatch):
+        """A locally proved answer is strictly stronger than a resolver's bit.
+
+        A spoofed AD flag must not survive a chain walk that says otherwise.
+        """
+        from dns_aid.core.discoverer import _apply_post_discovery
+        from dns_aid.core.models import DNSSECError
+
+        async def ad_says_yes(fqdn):  # noqa: ARG001
+            return (True, True)
+
+        async def chain_says_no(fqdn, rdtype="SVCB", **kw):  # noqa: ARG001
+            return ChainResult(ChainStatus.BOGUS, "forged")
+
+        monkeypatch.setattr("dns_aid.core.validator._check_dnssec_with_evidence", ad_says_yes)
+        monkeypatch.setattr("dns_aid.core.dnssec_chain.validate_chain", chain_says_no)
+        agent = self._agent()
+
+        with pytest.raises(DNSSECError):
+            await _apply_post_discovery(
+                [agent], False, False, True, "example.com", require_secure_chain=True
+            )
+
+        assert agent.dnssec_validated is False, "the spoofed AD flag must not win"
+
+    @pytest.mark.asyncio
+    async def test_off_by_default_the_walk_does_not_run(self, monkeypatch):
+        from dns_aid.core.discoverer import _apply_post_discovery
+
+        called = []
+
+        async def tracked(fqdn, rdtype="SVCB", **kw):  # noqa: ARG001
+            called.append(fqdn)
+            return ChainResult(ChainStatus.SECURE, "ok")
+
+        monkeypatch.setattr("dns_aid.core.dnssec_chain.validate_chain", tracked)
+        agent = self._agent()
+
+        await _apply_post_discovery([agent], False, False, False, "example.com")
+
+        assert called == [], "the walk costs queries; it must be opt-in"
+        assert agent.dnssec_chain_status is None
