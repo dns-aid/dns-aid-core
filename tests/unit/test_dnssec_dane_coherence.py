@@ -851,8 +851,8 @@ class TestEnrichmentDoesNotVoidDnssec:
     CATALOG_ENDPOINT_SOURCES, which is the exemption list for DNSSEC -- so a
     genuine SVCB record dropped out of `dnssec_scope`. Because `all({}.values())`
     is True, `require_dnssec=True` was then satisfied with zero DNSSEC queries,
-    and `min_dnssec`, `require_secure_chain` and the DANE gate all read the same
-    field. One relabel silently voided four guarantees.
+    and `min_dnssec` and the DANE gate read the same field. One relabel silently
+    voided three guarantees.
 
     The correct label already existed: `dns_svcb_enriched` records both facts --
     it came from DNS, and its endpoint was enriched -- and is not exempt.

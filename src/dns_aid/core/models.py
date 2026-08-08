@@ -838,16 +838,6 @@ class AgentRecord(BaseModel):
         "signature stops verifying with no prior signal, so consumers should surface the "
         "remaining window rather than waiting for it to turn into a failure.",
     )
-    dnssec_chain_status: str | None = Field(
-        default=None,
-        description=(
-            "Outcome of full DNSSEC chain validation against the IANA root "
-            "anchor: 'secure', 'insecure', 'bogus' or 'indeterminate'. None when "
-            "the walk did not run. Unlike dnssec_validated, which follows the "
-            "resolver's AD flag, this is proved locally -- only 'secure' means "
-            "the answer was verified rather than asserted."
-        ),
-    )
     signature_covers_params: bool = Field(
         default=False,
         description=(

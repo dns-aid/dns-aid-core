@@ -571,7 +571,6 @@ def discover_agents_via_dns(
     trust_dnssec_pointers: bool = False,
     text_match: str | None = None,
     verify_signatures: bool = False,
-    require_secure_chain: bool = False,
     require_signed: bool = False,
     require_signed_params: bool = False,
     require_signature_algorithm: list[str] | None = None,
@@ -708,11 +707,6 @@ def discover_agents_via_dns(
               Records signed before the svcb claim existed report False; treat
               their capability document as unverified and ask the publisher to
               re-sign.
-            - dnssec_chain_status: present only with require_secure_chain. One of
-              "secure", "insecure", "bogus" or "indeterminate". Unlike
-              dnssec_validated, which follows the resolver's AD flag, this is
-              proved locally against the IANA root anchor -- only "secure" means
-              the answer was verified rather than asserted.
             - signature_algorithm: JWS algorithm of a successful verification.
               The raw JWS itself is deliberately NOT returned here: it costs
               context and carries nothing you can act on, since verifying it
@@ -764,7 +758,6 @@ def discover_agents_via_dns(
             trust_dnssec_pointers=trust_dnssec_pointers,
             text_match=text_match,
             verify_signatures=verify_signatures,
-            require_secure_chain=require_secure_chain,
             require_signed=require_signed,
             require_signed_params=require_signed_params,
             require_signature_algorithm=require_signature_algorithm,
