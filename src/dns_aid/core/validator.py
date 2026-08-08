@@ -842,7 +842,21 @@ async def _guarded_dial_host(target: str, port: int, *, enforce_ports: bool = Tr
     guard belongs on every dial that takes its destination from a record, not
     just the one that was reviewed.
     """
-    from dns_aid.utils.url_safety import validate_fetch_url_async, vetted_ip_for
+    return (await _guarded_dial_hosts(target, port, enforce_ports=enforce_ports))[0]
+
+
+async def _guarded_dial_hosts(target: str, port: int, *, enforce_ports: bool = True) -> list[str]:
+    """Every vetted address for a target/port pair, in preference order.
+
+    All of them passed the same range check, so dialling any is exactly as safe
+    as dialling the first. Recording only the first removed the multi-address
+    fallback the HTTP stack used to provide: ``getaddrinfo(AF_UNSPEC)`` applies
+    no ``AI_ADDRCONFIG``, so a dual-stack target returns its AAAA first even on
+    a client with no IPv6 route, and a probe that pinned that one literal
+    reported a healthy agent as unreachable. Same exposure for any multi-homed
+    host whose first address is transiently down.
+    """
+    from dns_aid.utils.url_safety import validate_fetch_url_async, vetted_ips_for
 
     # enforce_ports=False for the reachability probes. There the port comes from
     # the record's own SVCB and an agent on 8080 or 9000 is an ordinary
@@ -856,13 +870,14 @@ async def _guarded_dial_host(target: str, port: int, *, enforce_ports: bool = Tr
         )
     probe_url = f"https://{target}:{port}/"
     await validate_fetch_url_async(probe_url)
-    pinned = vetted_ip_for(probe_url)
-    if pinned is None:
+    pinned = vetted_ips_for(probe_url)
+    if not pinned:
         # Fail-open by design (an allow-listed host records no pin), but never
         # silently: dialling the name re-resolves, which is the window the pin
         # closes, and an attacker can force the pin's eviction.
         logger.debug("no vetted address pinned; dialling by name", target=target, port=port)
-    return pinned or target
+        return [target]
+    return pinned
 
 
 def _url_host(dial_host: str) -> str:
@@ -903,7 +918,7 @@ async def _fetch_peer_cert(target: str, port: int, *, pkix: bool) -> bytes:
     # The caller maps a raised exception to None (unknown), which is the right
     # verdict for an endpoint we decline to dial.
 
-    dial_host = await _guarded_dial_host(target, port)
+    dial_hosts = await _guarded_dial_hosts(target, port)
     # Dial the address that was actually vetted. Connecting to the name would
     # resolve a second time, and only the first resolution was checked --
     # a one-second TTL flipping public to loopback between them retrieved an
@@ -917,11 +932,33 @@ async def _fetch_peer_cert(target: str, port: int, *, pkix: bool) -> bytes:
         ctx.verify_mode = ssl.CERT_NONE
 
     # Bound the connect. Without this a target that black-holes hangs the whole
-    # verification, and _verify_agents_dane walks agents sequentially.
-    _, writer = await asyncio.wait_for(
-        asyncio.open_connection(dial_host, port, ssl=ctx, server_hostname=target),
-        timeout=DANE_CONNECT_TIMEOUT,
-    )
+    # verification, and _verify_agents_dane walks agents sequentially. Each
+    # vetted address gets its own budget, and only a transport failure advances
+    # to the next: a TLS rejection is the peer's real answer.
+    writer = None
+    for index, dial_host in enumerate(dial_hosts):
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(dial_host, port, ssl=ctx, server_hostname=target),
+                timeout=DANE_CONNECT_TIMEOUT,
+            )
+            break
+        except (OSError, TimeoutError) as e:
+            if index + 1 >= len(dial_hosts):
+                raise
+            logger.debug(
+                "vetted address unreachable; trying the next one",
+                target=target,
+                port=port,
+                address=dial_host,
+                error=str(e),
+            )
+    if writer is None:
+        # Unreachable: the loop above either breaks with a writer or re-raises
+        # on the last address. Stated rather than asserted, because an assert
+        # is stripped under -O and this is the branch that would hand a None to
+        # the block below.
+        raise ConnectionError(f"no vetted address for {target}:{port} could be dialled")
     try:
         ssl_object = writer.get_extra_info("ssl_object")
         if ssl_object is None:
@@ -1041,7 +1078,7 @@ async def _check_endpoint(target: str, port: int) -> dict:
         # Same guard as every other probe in this module. Without it
         # `dns-aid verify` reached arbitrary host:port pairs from the
         # consumer's network on a record the attacker published.
-        dial_host = await _guarded_dial_host(target, port, enforce_ports=False)
+        dial_hosts = await _guarded_dial_hosts(target, port, enforce_ports=False)
 
         start_time = time.perf_counter()
 
@@ -1051,35 +1088,42 @@ async def _check_endpoint(target: str, port: int) -> dict:
             follow_redirects=False,
             verify=True,
         ) as client:
-            # Try health endpoint first, then root
-            for path in ["/health", "/.well-known/agent-card.json", "/"]:
-                try:
-                    # Dial the vetted literal; the name rides in SNI and Host
-                    # so certificate verification is unchanged. Resolving the
-                    # name again here is what let a one-second TTL flip the
-                    # destination between the guard and the connection.
-                    response = await client.get(
-                        f"https://{_url_host(dial_host)}:{port}{path}",
-                        extensions={"sni_hostname": target},
-                        headers={"Host": f"{target}:{port}"},
-                    )
-                    latency_ms = (time.perf_counter() - start_time) * 1000
-
-                    if response.status_code < 500:
-                        logger.debug(
-                            "Endpoint reachable",
-                            endpoint=endpoint,
-                            path=path,
-                            status=response.status_code,
-                            latency_ms=f"{latency_ms:.2f}",
+            # Each vetted address gets a full path sweep before the next is
+            # tried. They all passed the same range check, and pinning only the
+            # first reported a healthy multi-homed agent as unreachable whenever
+            # the resolver's preferred address was unroutable from here -- an
+            # AAAA on an IPv4-only client, most commonly, since
+            # getaddrinfo(AF_UNSPEC) applies no AI_ADDRCONFIG.
+            for dial_host in dial_hosts:
+                # Try health endpoint first, then root
+                for path in ["/health", "/.well-known/agent-card.json", "/"]:
+                    try:
+                        # Dial the vetted literal; the name rides in SNI and Host
+                        # so certificate verification is unchanged. Resolving the
+                        # name again here is what let a one-second TTL flip the
+                        # destination between the guard and the connection.
+                        response = await client.get(
+                            f"https://{_url_host(dial_host)}:{port}{path}",
+                            extensions={"sni_hostname": target},
+                            headers={"Host": f"{target}:{port}"},
                         )
-                        return {
-                            "reachable": True,
-                            "latency_ms": latency_ms,
-                            "status_code": response.status_code,
-                        }
-                except httpx.HTTPError:
-                    continue
+                        latency_ms = (time.perf_counter() - start_time) * 1000
+
+                        if response.status_code < 500:
+                            logger.debug(
+                                "Endpoint reachable",
+                                endpoint=endpoint,
+                                path=path,
+                                status=response.status_code,
+                                latency_ms=f"{latency_ms:.2f}",
+                            )
+                            return {
+                                "reachable": True,
+                                "latency_ms": latency_ms,
+                                "status_code": response.status_code,
+                            }
+                    except httpx.HTTPError:
+                        continue
 
     except httpx.ConnectError as e:
         logger.debug("Endpoint connection failed", endpoint=endpoint, error=str(e))

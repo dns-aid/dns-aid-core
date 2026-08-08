@@ -184,6 +184,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SSRF address pinning no longer discards the multi-address fallback.** `validate_fetch_url`
+  range-checks every address a name resolves to, but recorded only the first for dialling —
+  and `getaddrinfo(AF_UNSPEC)` applies no `AI_ADDRCONFIG`, so a dual-stack host returns its
+  AAAA first even on a client with no IPv6 route. Pinning that one literal turned a routine
+  deployment into a hard failure where httpcore had previously tried each address in turn:
+  fetching a JWKS from an IPv4-only container failed on the v6 address instead of falling
+  through to the A record, and every agent in the zone came back `signature_status='no_key'`.
+  Same exposure for any multi-homed host whose first address is transiently down. Every
+  vetted address is now recorded in resolution order and tried in turn by `safe_fetch_bytes`,
+  the DANE certificate dial and the reachability probe. Only a transport failure advances to
+  the next address — a non-200, an oversized body or a TLS rejection is the peer's real answer.
+  The security property is unchanged: one bad address in the set still fails the whole URL,
+  so the fallback cannot be used to reach an internal destination.
 - **`publish(sign=True)` signs the record as published, not the arguments it was built
   from.** `AgentRecord` normalises several fields on the way in — `connect_class` is
   lower-cased, `target_host` loses a trailing dot — so signing the raw keyword arguments

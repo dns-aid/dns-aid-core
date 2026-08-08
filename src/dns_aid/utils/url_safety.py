@@ -53,13 +53,33 @@ def redact_url_for_log(url: str) -> str:
 # one-second TTL answers public, then loopback. Measured retrieving an internal
 # service's certificate through the DANE path.
 _VETTED_IP_MAX = 512
-_last_vetted_ip: dict[str, str | None] = {}
+_last_vetted_ip: dict[str, list[str]] = {}
 _vetted_ip_lock = threading.Lock()
 
 
 def vetted_ip_for(url: str) -> str | None:
-    """The address ``validate_fetch_url`` approved for this URL, if any."""
-    return _last_vetted_ip.get(url)
+    """The first address ``validate_fetch_url`` approved for this URL, if any."""
+    addresses = _last_vetted_ip.get(url)
+    return addresses[0] if addresses else None
+
+
+def vetted_ips_for(url: str) -> list[str]:
+    """Every address ``validate_fetch_url`` approved, in resolution order.
+
+    All of them passed the same range check, so dialling any one is exactly as
+    safe as dialling the first -- and trying them in turn is what restores the
+    multi-address fallback that pinning removed.
+
+    ``getaddrinfo(AF_UNSPEC)`` does not apply ``AI_ADDRCONFIG``, so a dual-stack
+    name returns its AAAA first even on a client with no IPv6 route. Recording
+    only the first address turned that into a hard failure where httpcore had
+    previously tried each address in turn: fetching a JWKS from an IPv4-only
+    container failed on the v6 literal instead of falling through to the A
+    record, and the zone's every agent came back ``signature_status='no_key'``.
+    The same exposure applies to any multi-homed host whose first address is
+    transiently down.
+    """
+    return list(_last_vetted_ip.get(url) or ())
 
 
 # NAT64 (RFC 6052) and 6to4 relay anycast carry an embedded IPv4 destination and
@@ -159,7 +179,12 @@ def validate_fetch_url(url: str) -> str:
     except socket.gaierror as e:
         raise UnsafeURLError(f"Cannot resolve hostname '{hostname}': {e}") from e
 
-    vetted: str | None = None
+    # Every resolved address is range-checked (one bad answer in the set fails
+    # the whole URL), and every one that passes is recorded so the caller can
+    # fall through when the first is unreachable. Order is preserved: the
+    # resolver's preference is still honoured, it is simply no longer the only
+    # option.
+    vetted: list[str] = []
     for _family, _type, _proto, _canonname, sockaddr in addrinfos:
         ip_str = sockaddr[0]
         try:
@@ -177,8 +202,8 @@ def validate_fetch_url(url: str) -> str:
             raise UnsafeURLError(
                 f"URL resolves to non-public IP {ip_str} (hostname '{hostname}'): {url}"
             )
-        if vetted is None:
-            vetted = str(ip_str)
+        if ip_str not in vetted:
+            vetted.append(str(ip_str))
 
     # Bounded like every other cache in this package. URLs are built from record
     # data, so an attacker publishing many distinct URIs across many zones would
@@ -301,57 +326,77 @@ async def safe_fetch_bytes(
     # verification are unchanged. Falls back to the name when no pin is
     # available (an allow-listed host, or a URL validated elsewhere), which is
     # the pre-existing behaviour rather than a new hole.
-    request_url = url
-    extensions: dict = {}
-    pinned = vetted_ip_for(url)
-    if pinned:
-        parsed = urlparse(url)
-        if parsed.hostname and parsed.hostname != pinned:
-            host_literal = f"[{pinned}]" if ":" in pinned else pinned
-            netloc = f"{host_literal}:{parsed.port}" if parsed.port else host_literal
-            request_url = urlunparse(parsed._replace(netloc=netloc))
-            extensions["sni_hostname"] = parsed.hostname
-            kwargs["headers"] = {"Host": parsed.netloc}
+    async def _fetch_from(pinned: str | None) -> bytes | None:
+        request_url = url
+        extensions: dict = {}
+        per_attempt = dict(kwargs)
+        if pinned:
+            parsed = urlparse(url)
+            if parsed.hostname and parsed.hostname != pinned:
+                host_literal = f"[{pinned}]" if ":" in pinned else pinned
+                netloc = f"{host_literal}:{parsed.port}" if parsed.port else host_literal
+                request_url = urlunparse(parsed._replace(netloc=netloc))
+                extensions["sni_hostname"] = parsed.hostname
+                per_attempt["headers"] = {"Host": parsed.netloc}
 
-    async with (
-        httpx.AsyncClient(**kwargs) as client,
-        client.stream("GET", request_url, extensions=extensions) as resp,
-    ):
-        if resp.status_code != 200:
-            return None
+        async with (
+            httpx.AsyncClient(**per_attempt) as client,
+            client.stream("GET", request_url, extensions=extensions) as resp,
+        ):
+            if resp.status_code != 200:
+                return None
 
-        # Fast-path: reject via Content-Length header if present.
-        # Not authoritative (can be spoofed/absent) — stream read is.
-        cl = resp.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) > max_bytes:
-            logger.warning(
-                "Response Content-Length exceeds limit — aborting",
-                url=url,
-                content_length=int(cl),
-                limit=max_bytes,
-            )
-            raise ResponseTooLargeError(
-                f"Content-Length {cl} exceeds {max_bytes} byte limit: {url}"
-            )
-
-        # Stream with byte counting — the real guard.
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in resp.aiter_bytes(chunk_size=8192):
-            total += len(chunk)
-            if total > max_bytes:
+            # Fast-path: reject via Content-Length header if present.
+            # Not authoritative (can be spoofed/absent) — stream read is.
+            cl = resp.headers.get("content-length")
+            if cl and cl.isdigit() and int(cl) > max_bytes:
                 logger.warning(
-                    "Response exceeded size limit mid-stream — aborting",
+                    "Response Content-Length exceeds limit — aborting",
                     url=url,
-                    bytes_read=total,
+                    content_length=int(cl),
                     limit=max_bytes,
                 )
                 raise ResponseTooLargeError(
-                    f"Response exceeded {max_bytes} byte limit at {total} bytes: {url}"
+                    f"Content-Length {cl} exceeds {max_bytes} byte limit: {url}"
                 )
-            chunks.append(chunk)
 
-        return b"".join(chunks)
+            # Stream with byte counting — the real guard.
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes(chunk_size=8192):
+                total += len(chunk)
+                if total > max_bytes:
+                    logger.warning(
+                        "Response exceeded size limit mid-stream — aborting",
+                        url=url,
+                        bytes_read=total,
+                        limit=max_bytes,
+                    )
+                    raise ResponseTooLargeError(
+                        f"Response exceeded {max_bytes} byte limit at {total} bytes: {url}"
+                    )
+                chunks.append(chunk)
+
+            return b"".join(chunks)
+
+    # Try every vetted address before giving up. Only a TRANSPORT failure
+    # advances to the next one: a non-200, an oversized body or a TLS rejection
+    # is the server's real answer and retrying it against a sibling address
+    # would just repeat the same result more slowly.
+    candidates: list[str | None] = list(vetted_ips_for(url)) or [None]
+    for index, candidate in enumerate(candidates):
+        try:
+            return await _fetch_from(candidate)
+        except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as e:
+            if index + 1 >= len(candidates):
+                raise
+            logger.debug(
+                "vetted address unreachable; trying the next one",
+                url=url,
+                address=candidate,
+                error=str(e),
+            )
+    return None
 
 
 def _get_allowlist() -> set[str]:
