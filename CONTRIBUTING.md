@@ -259,7 +259,7 @@ uv run pytest tests/integration/test_infoblox.py -v
 - Add tests for new functionality
 - Update documentation if behavior changes
 - Update `CHANGELOG.md` for significant changes
-- Ensure all 8 CI checks pass
+- Ensure every CI check on the PR passes
 
 ## Code Review
 
