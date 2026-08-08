@@ -125,6 +125,7 @@ def _dnssec_check_runs(
     min_dnssec: bool = False,
     verify_dane: bool = False,
     verify_signatures: bool = False,
+    require_secure_chain: bool = False,
 ) -> bool:
     """Whether discovery computes a per-agent DNSSEC verdict for these options.
 
@@ -139,7 +140,9 @@ def _dnssec_check_runs(
     without touching the other two silently dropped a real verdict from both
     machine-readable surfaces.
     """
-    return bool(require_dnssec or min_dnssec or verify_dane or verify_signatures)
+    return bool(
+        require_dnssec or min_dnssec or verify_dane or verify_signatures or require_secure_chain
+    )
 
 
 async def _apply_post_discovery(
@@ -190,6 +193,7 @@ async def _apply_post_discovery(
         min_dnssec=min_dnssec,
         verify_dane=verify_dane,
         verify_signatures=verify_signatures,
+        require_secure_chain=require_secure_chain,
     ):
         from dns_aid.core.validator import _check_dnssec_with_evidence
 

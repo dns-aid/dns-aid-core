@@ -87,3 +87,18 @@ def _stub_agent(fqdn: str):
         target_host=fqdn,
         port=443,
     )
+
+
+def test_the_chain_flag_counts_as_a_dnssec_check() -> None:
+    """The chain gate computes a verdict, so the display predicate must say so.
+
+    `_dnssec_check_runs` is the single predicate the CLI and MCP use to decide
+    whether `dnssec_validated` carries a real answer. The chain gate populates
+    it, so leaving the flag out of the predicate makes discovery compute a
+    verdict and then suppress it -- the exact drift the helper exists to stop,
+    and which its own docstring warns about.
+    """
+    from dns_aid.core.discoverer import _dnssec_check_runs
+
+    assert _dnssec_check_runs(require_secure_chain=True) is True
+    assert _dnssec_check_runs() is False

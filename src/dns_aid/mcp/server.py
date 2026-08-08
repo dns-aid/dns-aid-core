@@ -827,6 +827,7 @@ def discover_agents_via_dns(
                             min_dnssec=min_dnssec,
                             verify_dane=verify_dane,
                             verify_signatures=verify_signatures,
+                            require_secure_chain=require_secure_chain,
                         )
                         else {}
                     ),

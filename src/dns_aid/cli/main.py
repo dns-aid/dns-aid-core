@@ -594,6 +594,7 @@ def discover(
                             min_dnssec=min_dnssec,
                             verify_dane=verify_dane,
                             verify_signatures=verify_signatures,
+                            require_secure_chain=require_secure_chain,
                         )
                         else {}
                     ),
@@ -693,6 +694,7 @@ def discover(
         min_dnssec=min_dnssec,
         verify_dane=verify_dane,
         verify_signatures=verify_signatures,
+        require_secure_chain=require_secure_chain,
     )
     if show_dnssec:
         table.add_column("DNSSEC")
