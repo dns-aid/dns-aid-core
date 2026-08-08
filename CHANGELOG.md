@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Docker image is now built from the committed lockfile instead of a fresh
+  resolution.** The builder ran `pip wheel ".[mcp,route53,akamai-edgedns]"`,
+  which resolved every dependency from its declared floor at build time with no
+  lockfile and no hashes — so image contents differed between builds of the same
+  commit, and an upstream major release could break the image with no change to
+  this repo. That is precisely how mcp 2.0.0 shipped: the image built cleanly and
+  the container then exited at import. Dependencies are now exported from
+  `uv.lock` with per-artifact hashes and installed with `--require-hashes`, and
+  the final stage installs with `--no-index` so nothing can be fetched outside
+  the wheels the builder produced. `uv export --locked` makes a stale `uv.lock` a
+  build failure rather than a silent fallback to older pins.
+  ([#235](https://github.com/dns-aid/dns-aid-core/issues/235))
+
 ## [0.28.0] - 2026-08-08
 
 ### Added
