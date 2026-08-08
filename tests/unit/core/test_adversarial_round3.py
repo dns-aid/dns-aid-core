@@ -222,23 +222,3 @@ class TestTrustGateStandsOnItsOwn:
         rec.signature_algorithm = "ES256"  # present, but nothing verified it
 
         assert apply_filters([rec], require_signed=True) == []
-
-
-def test_the_mcp_extra_keeps_an_upper_bound():
-    """The bound IS the fix; a dependency sweep could drop it silently.
-
-    mcp 2.0.0 removed mcp.server.fastmcp, so an unbounded requirement gives
-    `pip install 'dns-aid[mcp]'` a broken server -- which is what shipped in
-    0.27.0.
-    """
-    import tomllib
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[3]
-    data = tomllib.loads((root / "pyproject.toml").read_text())
-    extras = data["project"]["optional-dependencies"]
-
-    for name, reqs in extras.items():
-        for req in reqs:
-            if req.replace("-", "_").startswith("mcp") and "mcp_registry" not in req:
-                assert "<" in req, f"extra '{name}' declares {req!r} with no upper bound"

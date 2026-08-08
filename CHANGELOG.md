@@ -128,9 +128,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extended-card flag is recognised whether it sits at the top level (0.3) or
   under `capabilities` (1.0), because real cards carry either. 0.2 cards parse
   exactly as before, and absent 0.3 fields read as absent rather than empty.
-- **`mcp` is bounded below 2.** `mcp>=1.28.1` had no upper bound and resolved to 2.0.0, which
-  removed `mcp.server.fastmcp`, so `from mcp.server.fastmcp import FastMCP` failed at import
-  and `pip install 'dns-aid[mcp]'` produced a broken MCP server. Present in 0.27.0 as well.
 - **`AgentRecord.signature_expires_at`** exposes when a verified signature lapses. Verification
   is binary right up to the moment it flips to expired, so the remaining window was the one
   signal nobody had. The CLI shows the days left and turns amber inside two weeks.
