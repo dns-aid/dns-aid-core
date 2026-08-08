@@ -632,33 +632,24 @@ dependencies = [
 akamai-edgedns = [
     { name = "edgegrid-python" },
     { name = "requests" },
+    { name = "urllib3" },
 ]
 all = [
     { name = "boto3" },
-    { name = "boto3-stubs", extra = ["route53"] },
     { name = "cel-python" },
     { name = "common-expression-language" },
-    { name = "cryptography" },
-    { name = "cyclonedx-bom" },
     { name = "edgegrid-python" },
     { name = "google-auth" },
-    { name = "httpx" },
-    { name = "lxml" },
     { name = "mcp" },
-    { name = "mypy" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-sdk" },
     { name = "pqcrypto" },
     { name = "pygments" },
     { name = "pyjwt" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
     { name = "python-multipart" },
     { name = "requests" },
     { name = "rich" },
-    { name = "ruff" },
     { name = "typer" },
     { name = "urllib3" },
     { name = "uvicorn" },
@@ -666,14 +657,17 @@ all = [
 cel = [
     { name = "cel-python" },
     { name = "common-expression-language" },
+    { name = "pygments" },
 ]
 cli = [
+    { name = "pygments" },
     { name = "rich" },
     { name = "typer" },
 ]
 cloud-dns = [
     { name = "google-auth" },
     { name = "requests" },
+    { name = "urllib3" },
 ]
 dev = [
     { name = "boto3-stubs", extra = ["route53"] },
@@ -708,6 +702,7 @@ pqc = [
 ]
 route53 = [
     { name = "boto3" },
+    { name = "urllib3" },
 ]
 
 [package.metadata]
@@ -721,7 +716,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "cryptography", marker = "extra == 'dev'", specifier = ">=50.0.0" },
     { name = "cyclonedx-bom", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "dns-aid", extras = ["cli", "mcp", "route53", "cloudflare", "ns1", "cloud-dns", "infoblox", "nios", "akamai-edgedns", "ddns", "jws", "sdk", "otel", "cel", "pqc", "dev"], marker = "extra == 'all'" },
+    { name = "dns-aid", extras = ["cli", "mcp", "route53", "cloudflare", "ns1", "cloud-dns", "infoblox", "nios", "akamai-edgedns", "ddns", "jws", "sdk", "otel", "cel", "pqc"], marker = "extra == 'all'" },
     { name = "dnspython", specifier = ">=2.6.0" },
     { name = "edgegrid-python", marker = "extra == 'akamai-edgedns'", specifier = ">=2.0.7" },
     { name = "google-auth", marker = "extra == 'cloud-dns'", specifier = ">=2.30.0" },
@@ -736,6 +731,8 @@ requires-dist = [
     { name = "pqcrypto", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "pqcrypto", marker = "extra == 'pqc'", specifier = ">=0.4.0" },
     { name = "pydantic", specifier = ">=2.5.0" },
+    { name = "pygments", marker = "extra == 'cel'", specifier = ">=2.20.0" },
+    { name = "pygments", marker = "extra == 'cli'", specifier = ">=2.20.0" },
     { name = "pygments", marker = "extra == 'dev'", specifier = ">=2.20.0" },
     { name = "pyjwt", marker = "extra == 'mcp'", specifier = ">=2.13.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
@@ -749,7 +746,10 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.3.0" },
     { name = "structlog", specifier = ">=24.0.0" },
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12.0" },
+    { name = "urllib3", marker = "extra == 'akamai-edgedns'", specifier = ">=2.7.0" },
+    { name = "urllib3", marker = "extra == 'cloud-dns'", specifier = ">=2.7.0" },
     { name = "urllib3", marker = "extra == 'dev'", specifier = ">=2.7.0" },
+    { name = "urllib3", marker = "extra == 'route53'", specifier = ">=2.7.0" },
     { name = "uvicorn", marker = "extra == 'mcp'", specifier = ">=0.30.0" },
 ]
 provides-extras = ["cli", "mcp", "route53", "cloud-dns", "infoblox", "cloudflare", "ns1", "nios", "akamai-edgedns", "ddns", "jws", "sdk", "otel", "cel", "pqc", "dev", "all"]

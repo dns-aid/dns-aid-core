@@ -52,6 +52,7 @@ dependencies = [
 cli = [
     "typer>=0.12.0",
     "rich>=13.0.0",
+    "pygments>=2.20.0", # CVE-2026-4539 (low) — ReDoS in GUID regex, via rich/cel
 ]
 mcp = [
     "mcp>=1.28.1",
@@ -63,10 +64,12 @@ mcp = [
 ]
 route53 = [
     "boto3>=1.34.0",
+    "urllib3>=2.7.0",   # CVE-2026-44431 + CVE-2026-44432 (high) — via boto3/requests
 ]
 cloud-dns = [
     "google-auth>=2.30.0",
     "requests>=2.33.0",
+    "urllib3>=2.7.0",   # CVE-2026-44431 + CVE-2026-44432 (high) — via boto3/requests
 ]
 infoblox = [
     # Uses httpx from core deps
@@ -83,6 +86,7 @@ nios = [
 akamai-edgedns = [
     "edgegrid-python>=2.0.7",
     "requests>=2.33.0",
+    "urllib3>=2.7.0",   # CVE-2026-44431 + CVE-2026-44432 (high) — via boto3/requests
 ]
 ddns = [
     # Uses dnspython from core deps
@@ -112,6 +116,7 @@ cel = [
     # Rust backend (~2µs/eval); falls back to cel-python (~200µs/eval) if unavailable
     "common-expression-language>=0.5.0",
     "cel-python>=0.5.0",
+    "pygments>=2.20.0", # CVE-2026-4539 (low) — ReDoS in GUID regex, via rich/cel
 ]
 pqc = [
     # Post-quantum cryptography (ML-DSA-65 for HTTP Message Signatures)
@@ -140,11 +145,23 @@ dev = [
 # requests, the two CEL packages and pqcrypto, so `pip install dns-aid[all]`
 # shipped without the CEL policy engine or PQC/ML-DSA signing. Listing the
 # extras instead means a dependency added to any extra is inherited here
-# automatically, and a version floor is declared in exactly one place.
-# Empty extras are listed deliberately, so they stay covered once they gain
-# dependencies. `test_all_extra_is_complete` guards this invariant.
+# automatically. Empty extras are listed deliberately, so they stay covered once
+# they gain dependencies.
+#
+# `dev` is deliberately EXCLUDED. `all` is a published, user-facing extra, and
+# folding `dev` in would give every `[all]` user the test/lint toolchain plus
+# cyclonedx-bom and its ~20-package SBOM/schema/URI-validation tree, none of
+# which has runtime relevance. The previous hand-written `all` did leak pytest,
+# mypy and ruff; that was a bug being preserved, not a precedent.
+#
+# Note the CVE floors on transitive deps that `dev` used to carry for `all`
+# (urllib3, pygments) now live on the runtime extras that actually pull them,
+# so excluding `dev` does not drop them. lxml's floor stays in `dev` because
+# only cyclonedx-bom pulls it.
+#
+# tests/unit/test_packaging.py guards all of this.
 all = [
-    "dns-aid[cli,mcp,route53,cloudflare,ns1,cloud-dns,infoblox,nios,akamai-edgedns,ddns,jws,sdk,otel,cel,pqc,dev]",
+    "dns-aid[cli,mcp,route53,cloudflare,ns1,cloud-dns,infoblox,nios,akamai-edgedns,ddns,jws,sdk,otel,cel,pqc]",
 ]
 
 [project.scripts]

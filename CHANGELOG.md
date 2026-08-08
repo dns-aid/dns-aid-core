@@ -18,11 +18,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `akamai-edgedns` extras declare. `all` is now defined by PEP 508
   self-reference — `dns-aid[cli,mcp,route53,...]` — so a dependency added to any
   extra is inherited automatically and each version floor is declared in exactly
-  one place. Every extra is listed, including ones that are currently empty, so
-  they stay covered once they gain dependencies. A new
-  `tests/unit/test_packaging.py` fails if a bare requirement is added back to
-  `all` or if a new extra is not referenced by it.
+  one place. Every user-facing extra is listed, including ones that are
+  currently empty, so they stay covered once they gain dependencies.
   ([#236](https://github.com/dns-aid/dns-aid-core/issues/236))
+- **`dns-aid[all]` no longer installs the development toolchain.** The previous
+  hand-written `all` leaked `pytest`, `mypy`, `ruff` and `boto3-stubs` into a
+  published, user-facing extra. `all` now aggregates the runtime extras only,
+  which drops 39 packages from a fresh `[all]` install (114 → 75), including
+  `cyclonedx-bom` and its SBOM/JSON-schema/URI-validation tree. Install
+  `dns-aid[dev]` alongside it for the toolchain — `CONTRIBUTING.md`'s documented
+  setup is unaffected. The CVE floors that `dev` previously carried for `[all]`
+  (`urllib3>=2.7.0`, `pygments>=2.20.0`) now sit on the runtime extras that
+  actually pull those packages, so `[all]` keeps them; `lxml`'s floor stays in
+  `dev`, which is the only place `cyclonedx-bom` is pulled from.
+
+  `tests/unit/test_packaging.py` guards four drift modes: a bare requirement
+  restated in `all`, an extra `all` fails to reference, a name in `all` that is
+  not a real extra (uv silently ignores these), and the same package declared
+  with different version specifiers in two places.
 
 ## [0.28.0] - 2026-08-08
 
