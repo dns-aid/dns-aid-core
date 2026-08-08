@@ -54,7 +54,12 @@ cli = [
     "rich>=13.0.0",
 ]
 mcp = [
-    "mcp>=1.28.1",
+    # Upper-bounded: mcp 2.0.0 renamed/relocated FastMCP to
+    # mcp.server.mcpserver.MCPServer, which breaks the `from
+    # mcp.server.fastmcp import FastMCP` import in dns_aid.mcp.server
+    # (ModuleNotFoundError at startup). Raise the ceiling only after
+    # migrating server.py to the new API.
+    "mcp>=1.28.1,<2.0.0",
     "uvicorn>=0.30.0",
     # Direct floors on transitive deps pulled by `mcp` to close Dependabot alerts
     # (mcp's upstream constraints are looser than the patched versions need).
@@ -139,8 +144,8 @@ all = [
     # CLI
     "typer>=0.12.0",
     "rich>=13.0.0",
-    # MCP
-    "mcp>=1.28.1",
+    # MCP (see cap rationale in the `mcp` extra above)
+    "mcp>=1.28.1,<2.0.0",
     "uvicorn>=0.30.0",
     # Transitive floors via mcp (Dependabot)
     "pyjwt>=2.13.0",
