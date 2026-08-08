@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wheels the builder produced. `uv export --locked` makes a stale `uv.lock` a
   build failure rather than a silent fallback to older pins.
   ([#235](https://github.com/dns-aid/dns-aid-core/issues/235))
+- **The Docker image builds again.** Both `FROM` lines pinned
+  `python:3.11-slim@sha256:6ed5bff4…`, a digest no longer present on Docker Hub
+  (`docker pull` → `not found`), so `docker build` failed at the first
+  instruction regardless of anything else in the file. Repinned to the current
+  multi-arch index digest `sha256:90744cff…`, which covers both linux/amd64 and
+  linux/arm64 so the pin does not break on Apple Silicon builders.
 
 ## [0.28.0] - 2026-08-08
 
