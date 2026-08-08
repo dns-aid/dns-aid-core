@@ -116,6 +116,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signature.
 - **DNSSEC chain validation is available** via `dns_aid.core.dnssec_chain`,
   anchored at the IANA root KSK, so a verdict no longer rests on the AD flag.
+- **A DNSKEY RRset is validated only under the key the parent's DS references**,
+  per RFC 4035 5.2. Validating under every key a zone serves let an attacker who
+  could publish a DNSKEY RRset add the real anchor key beside their own, sign
+  with theirs, and be believed.
+- **The chain walk queries with CD set** (RFC 4035 3.2.2, RFC 6840 5.9). A
+  validating upstream withholds a bogus zone's records entirely, which left the
+  walk unable to tell a forged signature from an unreachable server. Bogus zones
+  are now proved bogus rather than reported as indeterminate.
 - **A2A agent cards at protocol version 0.3 are parsed, not just 0.2.** 0.3
   restructured the card and a 0.2-only reader dropped all of it into untyped
   metadata. Now typed: `protocolVersion`, `preferredTransport` and the interface

@@ -283,6 +283,18 @@ async def validate_chain(
 
     res = resolver or _default_resolver()
     res.use_edns(0, dns.flags.DO, 4096)
+    # CD, not just DO. DO asks the upstream for the DNSSEC records; CD tells it
+    # not to apply its own judgement first. Without CD a validating upstream
+    # SERVFAILs on a bogus zone and hands us nothing, so the walk cannot tell a
+    # forged signature from an unreachable server and has to say INDETERMINATE
+    # -- the one verdict a local validator exists to avoid. We are the validator
+    # here, so we want the unvalidated bytes and we judge them ourselves.
+    # RFC 4035 3.2.2 and RFC 6840 5.9. Every answer fetched under CD is proved
+    # below or the walk fails closed; nothing reaches a caller unvalidated.
+    # RD stays set explicitly: res.flags defaults to None, which makes dnspython
+    # supply RD itself. Assigning any value takes that default over, so dropping
+    # RD here would stop the recursive resolver recursing at all.
+    res.flags = (res.flags if res.flags is not None else dns.flags.RD) | dns.flags.CD
 
     try:
         keys = await _validated_dnskey(res, dns.name.root, _anchor_ds_rrset())
