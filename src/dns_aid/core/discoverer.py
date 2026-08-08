@@ -144,6 +144,7 @@ async def _apply_post_discovery(
     domain: str,
     min_dnssec: bool = False,
     verify_dane: bool = False,
+    require_secure_chain: bool = False,
 ) -> bool:
     """Apply DNSSEC enforcement, endpoint enrichment, JWS + DANE verification.
 
@@ -204,6 +205,49 @@ async def _apply_post_discovery(
             raise DNSSECError(
                 f"DNSSEC validation required but the following agent "
                 f"FQDNs were not authenticated (AD flag not set): {failed}"
+            )
+
+    # Opt-in: prove the answer instead of trusting the AD flag.
+    #
+    # The flag is one bit set by whichever resolver replied, over a path this
+    # code does not control, so an on-path attacker or a hostile resolver
+    # sets it at will. Walking from the IANA root anchor shipped with the
+    # library makes the resolver untrusted transport rather than an
+    # authority. Where the walk runs it REPLACES the flag for the trust
+    # decision, because a locally proved answer is strictly stronger.
+    #
+    # Opt-in rather than default: the walk costs a DNSKEY and a DS query per
+    # label, and turning it on unannounced would change both the latency and
+    # the result set of every existing caller.
+    if require_secure_chain and dnssec_scope:
+        from dns_aid.core.dnssec_chain import ChainStatus, validate_chain
+
+        chains = await asyncio.gather(
+            *[validate_chain(a.fqdn, "SVCB") for a in dnssec_scope],
+            return_exceptions=True,
+        )
+        for agent, chain in zip(dnssec_scope, chains, strict=True):
+            if isinstance(chain, BaseException):
+                agent.dnssec_chain_status = str(ChainStatus.INDETERMINATE)
+                per_agent_dnssec[agent.fqdn] = False
+                agent.dnssec_validated = False
+                continue
+            agent.dnssec_chain_status = str(chain.status)
+            per_agent_dnssec[agent.fqdn] = chain.secure
+            agent.dnssec_validated = chain.secure
+            if not chain.secure:
+                logger.warning(
+                    "DNSSEC chain did not validate to the root anchor",
+                    fqdn=agent.fqdn,
+                    status=str(chain.status),
+                    reason=chain.reason,
+                )
+
+        unproved = sorted(f for f, ok in per_agent_dnssec.items() if not ok)
+        if unproved:
+            raise DNSSECError(
+                f"require_secure_chain is set but the following agent FQDNs "
+                f"were not proved to the root anchor: {unproved}"
             )
 
     if enrich_endpoints and agents:
@@ -379,6 +423,7 @@ async def discover(
     verify_signatures: bool = False,
     trust_dnssec_pointers: bool = False,
     verify_dane: bool = False,
+    require_secure_chain: bool = False,
     *,
     # Path A in-memory filter kwargs (FR-002, FR-021..FR-023). All optional; default
     # behavior is unchanged when none are passed.
@@ -536,6 +581,7 @@ async def discover(
         domain,
         min_dnssec=min_dnssec,
         verify_dane=verify_dane,
+        require_secure_chain=require_secure_chain,
     )
     # Per-agent `dnssec_validated` is set inside _apply_post_discovery for DNS-plane
     # agents when require_dnssec / min_dnssec / verify_dane is set; no re-stamp here.
@@ -1377,9 +1423,9 @@ def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> N
             # SVCB answer and only its endpoint path was enriched from the index.
             # Labelling it as a catalog source removed it from dnssec_scope, and
             # because `all({}.values())` is True that made require_dnssec pass
-            # with zero DNSSEC queries -- and min_dnssec and the DANE gate read
-            # the same field. One relabel silently voided three guarantees on a
-            # record that came from DNS.
+            # with zero DNSSEC queries -- and min_dnssec, require_secure_chain and
+            # the DANE gate all read the same field. One relabel silently voided
+            # four guarantees on a genuine DNS record.
             agent.endpoint_source = "dns_svcb_enriched"
             logger.debug(
                 "Merged HTTP index endpoint path",

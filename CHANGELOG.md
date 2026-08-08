@@ -114,6 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent, and cache keys are normalised for case and trailing dot.
 - **A JWKS key-set change is reported.** Advisory only; it never refuses a
   signature.
+- **DNSSEC chain validation is available** via `dns_aid.core.dnssec_chain`,
+  anchored at the IANA root KSK, so a verdict no longer rests on the AD flag.
 - **A2A agent cards at protocol version 0.3 are parsed, not just 0.2.** 0.3
   restructured the card and a 0.2-only reader dropped all of it into untyped
   metadata. Now typed: `protocolVersion`, `preferredTransport` and the interface

@@ -455,6 +455,17 @@ def discover(
             help="Only return records whose JWS signature verified (auto-enables --verify-signatures).",
         ),
     ] = False,
+    require_secure_chain: Annotated[
+        bool,
+        typer.Option(
+            "--require-secure-chain",
+            help=(
+                "Prove DNSSEC locally instead of trusting the resolver's AD flag. "
+                "Walks from the IANA root anchor and drops any record not proved. "
+                "Costs a DNSKEY and a DS query per label."
+            ),
+        ),
+    ] = False,
     require_signed_params: Annotated[
         bool,
         typer.Option(
@@ -525,6 +536,7 @@ def discover(
                 require_dnssec=require_dnssec,
                 min_dnssec=min_dnssec,
                 text_match=text_match,
+                require_secure_chain=require_secure_chain,
                 require_signed=require_signed,
                 require_signed_params=require_signed_params,
                 require_signature_algorithm=require_signature_algorithm,
