@@ -822,6 +822,42 @@ class AgentRecord(BaseModel):
         "successful signature verification. None when verification did not succeed or was "
         "not attempted.",
     )
+    dnssec_signed: bool | None = Field(
+        default=None,
+        description="True when RRSIG records were seen on the response, meaning the zone "
+        "signs its records. DIAGNOSTIC ONLY -- never a trust signal: an attacker who can "
+        "spoof an answer can spoof an RRSIG beside it, so only dnssec_validated (the AD "
+        "flag) speaks to authenticity. Its purpose is to separate a genuinely unsigned zone "
+        "from a signed zone behind a non-validating resolver, which dnssec_validated=False "
+        "alone cannot do. None when the DNSSEC check did not run.",
+    )
+    signature_expires_at: int | None = Field(
+        default=None,
+        description="Unix timestamp at which the verified JWS signature lapses, taken from "
+        "the signed payload's exp claim. None unless a signature actually verified. A lapsed "
+        "signature stops verifying with no prior signal, so consumers should surface the "
+        "remaining window rather than waiting for it to turn into a failure.",
+    )
+    signature_covers_params: bool = Field(
+        default=False,
+        description=(
+            "Whether the verified signature covers the DNS-AID SvcParams (cap, "
+            "cap-sha256, policy, realm, well-known) and not only the endpoint "
+            "tuple. False on records signed before the svcb claim existed: those "
+            "verify, but their capability pointer is not attested."
+        ),
+    )
+
+    signature_status: str | None = Field(
+        default=None,
+        description="Why signature verification reached its answer: 'verified', 'invalid' "
+        "(a key was retrieved and the signature was rejected), 'unbound' (valid signature "
+        "describing a different record), 'expired' (lapsed; re-publish), 'no_key' (no JWKS "
+        "reachable, so nothing was verified), or 'not_signed'. Consumers should prefer this "
+        "over signature_verified when reporting to an operator: 'expired' and 'invalid' are "
+        "both False but call for different responses. None when verification was not "
+        "attempted. See dns_aid.core.jwks.SignatureStatus.",
+    )
 
     # ARD trust manifest (populated when this agent was discovered from — or
     # enriched by — an ARD ai-catalog entry carrying a trustManifest).

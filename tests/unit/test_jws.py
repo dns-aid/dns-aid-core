@@ -157,7 +157,7 @@ class TestRecordPayload:
             target="payment.example.com",
             port=443,
             protocol="mcp",
-            ttl_seconds=3600,
+            validity_seconds=3600,
         )
 
         assert payload.fqdn == "_payment._mcp._agents.example.com"
@@ -602,7 +602,7 @@ class TestSignatureBindsToRecord:
 
         with patch("dns_aid.core.jwks.fetch_jwks", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = jwks
-            await _verify_agent_signatures([spoofed], "example.com", dnssec_validated=False)
+            await _verify_agent_signatures([spoofed], "example.com")
 
         assert spoofed.signature_verified is False
         assert spoofed.signature_algorithm is None
@@ -643,7 +643,7 @@ class TestSignatureBindsToRecord:
 
         with patch("dns_aid.core.jwks.fetch_jwks", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = jwks
-            await _verify_agent_signatures([agent], "example.com", dnssec_validated=False)
+            await _verify_agent_signatures([agent], "example.com")
 
         assert agent.signature_verified is False
 
@@ -683,7 +683,7 @@ class TestSignatureBindsToRecord:
 
         with patch("dns_aid.core.jwks.fetch_jwks", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = jwks
-            await _verify_agent_signatures([agent], "example.com", dnssec_validated=False)
+            await _verify_agent_signatures([agent], "example.com")
 
         assert agent.signature_verified is False
 
@@ -723,7 +723,7 @@ class TestSignatureBindsToRecord:
 
         with patch("dns_aid.core.jwks.fetch_jwks", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = jwks
-            await _verify_agent_signatures([agent], "example.com", dnssec_validated=False)
+            await _verify_agent_signatures([agent], "example.com")
 
         assert agent.signature_verified is True
         assert agent.signature_algorithm is not None

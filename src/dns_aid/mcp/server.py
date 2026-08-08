@@ -570,7 +570,9 @@ def discover_agents_via_dns(
     min_dnssec: bool = False,
     trust_dnssec_pointers: bool = False,
     text_match: str | None = None,
+    verify_signatures: bool = False,
     require_signed: bool = False,
+    require_signed_params: bool = False,
     require_signature_algorithm: list[str] | None = None,
     verify_dane: bool = False,
 ) -> dict:
@@ -605,6 +607,38 @@ def discover_agents_via_dns(
         use_http_index: If True, fetch agent list from the HTTP index endpoint
             instead of DNS-only discovery. The HTTP index provides richer metadata
             (descriptions, capabilities) upfront. Default False (pure DNS).
+        capabilities: Keep only agents advertising ALL of these capabilities.
+        capabilities_any: Keep only agents advertising AT LEAST ONE of these.
+        auth_type: Keep only agents whose declared auth type matches.
+        intent: Keep only agents declaring this intent type.
+        transport: Keep only agents using this wire transport.
+        realm: Keep only agents in this multi-tenant scope.
+        require_dnssec: Raise if any DNS-plane agent was not DNSSEC-validated.
+        min_dnssec: Keep only agents whose DNS response was DNSSEC-validated.
+        trust_dnssec_pointers: Follow an off-domain catalog pointer when the pointer
+            record is DNSSEC-validated. Off by default: the AD flag is only
+            trustworthy through a validating resolver on a secure path.
+        text_match: Free-text filter across agent name and description.
+        verify_signatures: Verify JWS record signatures and report the outcome
+            WITHOUT filtering on it. Use this to see signature_status and decide
+            for yourself. Performed for every signed record, including ones
+            already authenticated by DNSSEC — a DNSSEC-validated record can
+            still carry an invalid or unbound signature, and that is worth
+            knowing. Costs one DNSSEC lookup per agent plus a JWKS fetch
+            per zone.
+        require_signed: Keep only agents whose record authentication succeeded.
+        require_signed_params: Also require the signature to cover the DNS-AID
+          parameters (cap, cap-sha256, policy, realm, well-known) and not only
+          the endpoint tuple. Refuses records signed before the svcb claim
+          existed, whose capability pointer can be swapped while the signature
+          still verifies. Defaults False so existing records keep matching, and
+          the reduced coverage is reported as signature_covers_params.
+            Fail-closed: an agent whose signature could not be verified is
+            dropped, including when the key document was unreachable.
+        require_signature_algorithm: Restrict require_signed to these JWS
+            algorithms. Only a real signature carries an algorithm, so this
+            never matches an agent authenticated by DNSSEC alone.
+        verify_dane: Bind the endpoint certificate to its TLSA record.
 
     Returns:
         dict with:
@@ -627,12 +661,80 @@ def discover_agents_via_dns(
                 "txt_fallback" = parsed from TXT record,
                 "none" = no capabilities found
             - cap_uri: URI to capability document (if present in SVCB record)
+            - cap_sha256: Expected SHA-256 of the capability document, pinning
+              its content (if present in SVCB record)
+            - well_known_path: RFC 8615 path suffix under /.well-known/ on the
+              target host where the descriptor is served (if present)
+            - catalog_trust: How an ARD catalog entry was trusted:
+              "tls_domain" (served on the queried domain), "dnssec" (pointer
+              was DNSSEC-validated), or "jws" (records verified against the
+              domain JWKS). Absent for pure DNS records
+            - trust_manifest: Publisher trust claims from an ARD catalog entry.
+              PASS-THROUGH AND UNVERIFIED: these are assertions the publisher
+              made about itself, not findings. Verify them yourself before
+              acting on them
             - bap: Supported bulk agent protocols (if present in SVCB record)
             - policy_uri: URI to agent policy document (if present in SVCB record)
             - realm: Multi-tenant scope identifier (if present in SVCB record)
             - description: Human-readable agent description (if available)
             - fqdn: Fully qualified DNS name for this agent
               (e.g., "booking.example.com")
+            - signature_status: Why record-signature verification reached its
+              answer. Present once verification ran. ACT ON THIS RATHER THAN
+              signature_verified, because several outcomes share one boolean
+              and call for different responses:
+                "verified" = signature valid and bound to this record,
+                "expired" = signature lapsed, the publisher should re-publish
+                  (NOT evidence of tampering),
+                "invalid" = a key was retrieved and the signature was rejected
+                  (investigate),
+                "unbound" = valid signature describing a different record
+                  (a lifted signature pasted onto a spoofed one),
+                "no_key" = no key document was reachable, so NOTHING was
+                  verified. This is unknown, not forged. Do not treat it as an
+                  attack signal,
+                "verified_endpoint_only" = the signature verified but covers ONLY
+                  fqdn/target/port/alpn. cap, cap-sha256, policy, realm and
+                  well-known are NOT attested, so treat the capability pointer on
+                  this record as unverified and ask the publisher to re-sign,
+                "not_signed" = the record carries no signature,
+                "not_checked" = verification was requested but did not run before
+                  the aggregate budget expired. Nothing was learned about this
+                  record's signature; treat it as unverified, not as rejected,
+                "skipped_dnssec" = no longer produced by this tool. Verification
+                  used to be skipped for a DNSSEC-validated record; it is now
+                  always performed, because that DNSSEC signal is the AD flag
+                  with no chain validation and an attacker who can forge answers
+                  can set it. Retained in the enum for wire compatibility
+            - signature_verified: true / false / null. Null means verification
+              did not conclude (see signature_status). Absent unless
+              verification ran.
+            - signature_covers_params: present only when a signature verified.
+              True means the signature covers the whole DNS-AID parameter set.
+              False means it covers the endpoint tuple only (fqdn, target, port,
+              alpn) and NOT cap, cap-sha256, policy, realm or well-known, so the
+              capability pointer on this record is not attested by the signature.
+              Records signed before the svcb claim existed report False; treat
+              their capability document as unverified and ask the publisher to
+              re-sign.
+            - signature_algorithm: JWS algorithm of a successful verification.
+              The raw JWS itself is deliberately NOT returned here: it costs
+              context and carries nothing you can act on, since verifying it
+              would mean re-fetching the key document this server already
+              checked. The CLI --json output does include it
+            - signature_expires_at: Unix timestamp at which a verified
+              signature lapses. Verification is binary until the moment it
+              flips to expired, so this is the only advance warning available.
+            - dnssec_validated: Whether the DNS response was authenticated by
+              the resolver (AD flag). Present once a DNSSEC check ran.
+            - dnssec_signed: Whether RRSIGs were seen, meaning the zone signs
+              its records. DIAGNOSTIC ONLY, never a trust signal: an attacker
+              who can spoof an answer can spoof an RRSIG beside it. Its use is
+              telling an unsigned zone apart from a signed zone behind a
+              non-validating resolver, which dnssec_validated alone cannot do.
+            - dane_verified: true / false / null for the endpoint certificate
+              against its TLSA record. Null means unknown, which is the normal
+              result without a DNSSEC-validated chain (RFC 6698 Section 10.1).
         - count: Number of agents found
         - query_time_ms: Total discovery latency in milliseconds
     """
@@ -646,7 +748,8 @@ def discover_agents_via_dns(
     except ValidationError as e:
         return _format_validation_error(e)
 
-    from dns_aid.core.discoverer import discover
+    from dns_aid.core.discoverer import _dnssec_check_runs, discover
+    from dns_aid.core.models import CATALOG_ENDPOINT_SOURCES
 
     async def _discover():
         return await discover(
@@ -664,7 +767,9 @@ def discover_agents_via_dns(
             min_dnssec=min_dnssec,
             trust_dnssec_pointers=trust_dnssec_pointers,
             text_match=text_match,
+            verify_signatures=verify_signatures,
             require_signed=require_signed,
+            require_signed_params=require_signed_params,
             require_signature_algorithm=require_signature_algorithm,
             verify_dane=verify_dane,
         )
@@ -699,14 +804,92 @@ def discover_agents_via_dns(
                         if agent.catalog_trust is not None
                         else {}
                     ),
+                    # Reported only when the check actually ran, so absence
+                    # means "not checked" rather than "failed". dnssec_validated
+                    # is a plain bool defaulting to False, so emitting it
+                    # unconditionally would report an unchecked agent as having
+                    # failed validation. DANE is emitted even when None: without
+                    # a DNSSEC-validated chain a TLSA match is demoted to
+                    # unknown (RFC 6698 section 10.1), and omitting that made a
+                    # demotion indistinguishable from no TLSA record at all.
+                    **(
+                        {"dnssec_validated": agent.dnssec_validated}
+                        # Per agent, not per query. Catalog / ARD records are
+                        # exempt from the DNSSEC check by design, so their
+                        # dnssec_validated is the model default False, not a
+                        # verdict -- reporting "not checked" as "failed".
+                        if agent.endpoint_source not in CATALOG_ENDPOINT_SOURCES
+                        and _dnssec_check_runs(
+                            require_dnssec=require_dnssec,
+                            min_dnssec=min_dnssec,
+                            verify_dane=verify_dane,
+                            # discover() turns require_signed into
+                            # verify_signatures internally, so the effective
+                            # value is what decides whether the check ran.
+                            # Passing the caller's meant require_signed alone
+                            # performed a DNSSEC lookup per agent and then
+                            # suppressed the verdict it produced.
+                            verify_signatures=verify_signatures or require_signed,
+                        )
+                        else {}
+                    ),
+                    **(
+                        {"dnssec_signed": agent.dnssec_signed}
+                        if agent.dnssec_signed is not None
+                        else {}
+                    ),
                     **(
                         {"dane_verified": agent.dane_verified}
-                        if agent.dane_verified is not None
+                        if (verify_dane or agent.dane_verified is not None)
                         else {}
                     ),
                     **(
                         {"trust_manifest": agent.trust_manifest.model_dump()}
                         if agent.trust_manifest is not None
+                        else {}
+                    ),
+                    # Signature outcome. Emitted only when the record carries a
+                    # sig or verification actually ran, so payloads for
+                    # unsigned records stay byte-identical.
+                    # ``signature_status`` is the field a caller should act on:
+                    # "expired" and "invalid" are both a False
+                    # ``signature_verified`` but need different responses, and
+                    # "no_key" means nothing was verified rather than that the
+                    # record was rejected.
+                    # The raw JWS is deliberately omitted here. It costs
+                    # roughly 75-100 tokens per agent in a model's context and
+                    # carries nothing a consumer can act on: signature_status
+                    # already reports the outcome, and re-verifying the blob
+                    # would mean re-fetching the JWKS the server just checked.
+                    # The CLI --json payload keeps it, where a human or a
+                    # script may want the artefact itself.
+                    **(
+                        {"signature_verified": agent.signature_verified}
+                        if agent.signature_status is not None
+                        else {}
+                    ),
+                    **(
+                        {"signature_status": agent.signature_status}
+                        if agent.signature_status is not None
+                        else {}
+                    ),
+                    # Only meaningful once a signature verified. False says the
+                    # signature covers the endpoint tuple but NOT cap, cap-sha256,
+                    # policy, realm or well-known, so the capability pointer is
+                    # unattested and the publisher should re-sign.
+                    **(
+                        {"signature_covers_params": agent.signature_covers_params}
+                        if agent.signature_verified is True
+                        else {}
+                    ),
+                    **(
+                        {"signature_algorithm": agent.signature_algorithm}
+                        if agent.signature_algorithm is not None
+                        else {}
+                    ),
+                    **(
+                        {"signature_expires_at": agent.signature_expires_at}
+                        if agent.signature_expires_at is not None
                         else {}
                     ),
                 }

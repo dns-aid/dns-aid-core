@@ -45,6 +45,16 @@ HTTP_INDEX_PATTERNS = [
     # Clean subdomain: https://index.aiagents.{domain}/index-wellknown (demo-friendly)
     {"type": "subdomain", "host": "index.aiagents.{domain}", "path": "/index-wellknown"},
     # ANS-style: https://_index._aiagents.{domain}/index-wellknown
+    #
+    # Deployment note: this host carries underscore labels, which are barred
+    # from certificate dNSName SANs by the CA/Browser Forum baseline
+    # requirements (effective 2019). No *publicly trusted* CA will issue for
+    # it, so over the public internet the TLS handshake fails before the index
+    # is read and the cascade falls through to the patterns below. It is
+    # retained deliberately: an internal CA is not bound by those rules, so the
+    # pattern remains serviceable inside an enterprise PKI, and it is an
+    # ANS-compatibility surface that other publishers may rely on. Prefer the
+    # clean subdomain above for public deployments.
     {"type": "subdomain", "host": "_index._aiagents.{domain}", "path": "/index-wellknown"},
     # Fallback: well-known paths at domain root
     {"type": "path", "host": "{domain}", "path": "/.well-known/agents-index.json"},

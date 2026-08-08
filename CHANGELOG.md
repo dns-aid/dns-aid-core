@@ -9,6 +9,158 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`AgentRecord.signature_status`** reports why verification reached its answer:
+  `verified`, `invalid`, `unbound` (a valid signature describing a different record),
+  `expired`, `no_key`, or `not_signed`. `expired` and `invalid` are both `False` but call
+  for different responses — re-publish versus investigate — which a boolean cannot express.
+  See `dns_aid.core.jwks.SignatureStatus`.
+- **The signature outcome is now visible from every interface.** `dns-aid discover` gains a
+  Signature column (shown when `--verify-signatures` or `--require-signed` is set) and emits
+  `sig`, `signature_verified`, `signature_status` and `signature_algorithm` in `--json`. An
+  empty result under `--require-signed` now says the agents were dropped by the trust gate
+  rather than reading as "nothing published". `dns-aid publish` gains `--sig-validity`. The
+  MCP `discover_agents_via_dns` tool gains `verify_signatures`, so an agent can ask for the
+  status without also filtering on it, and returns `signature_verified`, `signature_status`
+  and `signature_algorithm` in its agent payload; the raw JWS is deliberately omitted from
+  the MCP payload and kept in CLI `--json`.
+  Output for unsigned records is unchanged on every interface.
+- **DNSSEC and DANE outcomes are reportable from the CLI and MCP.** `dnssec_validated` was
+  never emitted by either, and `dane_verified` only when non-null, so a caller could see a
+  verified signature and nothing about the two anchors beneath it. Both are now reported once
+  the check has run, and `dane_verified` is emitted even when null, because null is the
+  meaningful answer: without a DNSSEC-validated chain a TLSA match is demoted to unknown
+  (RFC 6698 section 10.1), and omitting it made a demotion look like no TLSA record at all.
+  The CLI renders an unvalidated DNSSEC result as `unvalidated`, not `no`. The flag follows
+  the AD bit, which a non-validating resolver never sets, so `no` asserted that a zone was
+  unsigned when the more common cause is the caller's own resolver.
+- **`--require-signed` no longer cancels out DNSSEC.** JWS verification used to be skipped
+  for a DNSSEC-validated record, and the trust gate treated that skip as a failure, so asking
+  for both of the strongest guarantees at once returned zero agents. `verify_signatures` now
+  always verifies, and the gate requires a real verified JWS. The skip is gone rather than
+  whitelisted: DNSSEC here is the AD flag with no chain validation, so accepting a skip as
+  proof would let an attacker who can forge answers for an unsigned zone set AD=1, attach any
+  `sig`, and pass `require_signed` with no cryptography performed. Cost is one JWKS fetch per
+  zone (cached), not one per agent. A record with no signature at all is still not "signed"
+  (use `min_dnssec` to filter on the DNS chain).
+- **Diagnostics moved from stdout to stderr.** `configure_logging()` sent structlog output to
+  stdout while sending stdlib logging to stderr, so `discover --json` emitted log lines ahead
+  of the document and piping it to a parser failed on the first byte. BREAKING for embedders
+  who capture stdout: pass `configure_logging(stream=...)`, or set `DNS_AID_LOG_STREAM=stdout`
+  to restore the old behaviour.
+- **`RecordPayload.from_agent_record(ttl_seconds=)` is deprecated in favour of
+  `validity_seconds=`.** BREAKING for callers passing it positionally. The old keyword still
+  works and warns, is removed in 0.30.0, and passing both now raises `TypeError` rather than
+  letting the deprecated name win silently. Signature validity is independent of the DNS TTL.
+- **The record signature now covers every DNS-AID SvcParam, not just the endpoint tuple.** A
+  new optional `svcb` claim binds `cap`, `cap-sha256`, `bap`, `policy`, `realm`,
+  `connect-class`, `connect-meta`, `enroll-uri` and `well-known`. Without it a genuine
+  signature could be replayed onto a record whose capability pointer and digest had been
+  swapped, and still report `verified`. Records signed before the claim existed keep
+  verifying and report the new `signature_covers_params` field as `False`; the claim is
+  omitted rather than nulled so their payloads serialise byte-identically. Opt in to refusing
+  reduced coverage with `require_signed_params=True`, planned to become the default in 0.30.0.
+- **DANE now authenticates the TLSA RRset itself** (RFC 6698 Section 4.1) instead of relying
+  solely on the agent's SVCB owner name, which is a different zone whenever the target is
+  off-zone. Both checks are applied: the first proves the pin was not forged, the second that
+  the name dialled was not. The endpoint dial is also SSRF-guarded, matching every other
+  network sink in the package.
+- **TLSA usages 0 and 2 are now reported as unevaluable (`null`) rather than compared against
+  the end-entity certificate** (RFC 7671 Section 5.1). Deployments publishing only `2 1 1`
+  where the trust anchor is the leaf move from `dane_verified: true` to `null`; publish an
+  additional `3 1 1` association to keep a definite verdict.
+- **DANE runs concurrently** (up to 8 at a time) under a 60s aggregate budget, so a wide zone
+  cannot outlive the MCP server's per-call cap. Endpoints not reached keep `dane_verified:
+  null` and the cap is logged rather than passing silently.
+- **An unmatched `kid` whose signature is rejected by every key the publisher serves now
+  reports `invalid` rather than `no_key`.** `no_key` is reserved for "nothing could be
+  checked". Consumers alerting on `invalid` will see new alerts. The verdict no longer depends
+  on whether a network refetch succeeded, which an attacker could influence.
+- **`--sig-validity` without `--sign` now exits 1** instead of being accepted and ignored.
+- **BEHAVIOR NOTE: every signature published today now reports
+  `verified_endpoint_only` rather than `verified`.** The `signature_status`
+  values are `verified`, `verified_endpoint_only`, `expired`, `invalid`,
+  `unbound`, `no_key`, `not_signed`, `not_checked` and `skipped_dnssec`. Two are
+  new. `verified_endpoint_only` means the signature verified but covers only
+  fqdn/target/port/alpn -- cap, cap-sha256, policy, realm and well-known are not
+  attested, which is true of every record signed before the `svcb` claim
+  existed. `not_checked` means verification was requested but the aggregate
+  budget expired first. A consumer matching `signature_status == "verified"`
+  will reject records it previously accepted; `signature_verified is True` is
+  unchanged, and `require_signed` is unaffected. Publishers should re-sign.
+- **DANE probes are restricted to ports 443, 853 and 8443**, overridable with
+  `DNS_AID_DANE_ALLOWED_PORTS` (a comma-separated list, or `any`). target and
+  port come off a forgeable record, so an unrestricted probe was a port scanner
+  attributed to every consumer. The reachability probes are deliberately NOT
+  restricted, because there a refusal would report a healthy agent on 8080 as
+  unreachable.
+- **Non-public addresses are now rejected by an allow-list rather than an
+  enumeration.** This newly blocks RFC 6598 shared address space
+  (`100.64.0.0/10` -- Tailscale, carrier NAT, some Kubernetes fabrics),
+  multicast, `240/4` and `0.0.0.0`, and resolves NAT64 (RFC 6052) and 6to4
+  addresses to the destination they actually reach before the check. If you
+  discover agents on CGNAT addresses, set `DNS_AID_FETCH_ALLOWLIST`.
+- **Every guarded fetch now dials the address that was vetted**, carrying the
+  original name in SNI and the `Host` header. Validating a name and then
+  connecting to it resolved twice and checked only the first, so a one-second
+  TTL could move the destination in between.
+- **A TLSA RRset larger than 32 usable associations is truncated**, and the
+  dropped records count as unevaluated -- so a very large RRset softens the
+  verdict to `null` rather than producing a definite mismatch.
+- **DANE and signature verification run concurrently under aggregate budgets**
+  (8 / 60s and 16 / 45s). Endpoints not reached keep `dane_verified: null`;
+  records not verified report `not_checked`.
+- **The JWKS fetch is single-flighted per zone and negatively cached for 30s**,
+  so one unreachable key host costs one timeout per zone rather than one per
+  agent, and cache keys are normalised for case and trailing dot.
+- **A JWKS key-set change is reported.** Advisory only; it never refuses a
+  signature.
+- **A2A agent cards at protocol version 0.3 are parsed, not just 0.2.** 0.3
+  restructured the card and a 0.2-only reader dropped all of it into untyped
+  metadata. Now typed: `protocolVersion`, `preferredTransport` and the interface
+  list (so a caller can tell JSONRPC from gRPC), `capabilities`, `signatures`,
+  `iconUrl`, `documentationUrl`, and per-skill `examples` and
+  `securityRequirements`. Authentication is read from the 0.3 `securitySchemes`
+  map in both shapes seen in the wild -- OpenAPI style with a `type`, and the
+  proto-derived style with an `oauth2SecurityScheme`-style key -- so `auth_type`
+  is now populated for cards that carry no legacy `authentication` object. Where
+  a card carries both, the 0.3 map wins. The interface list is read under the 0.3
+  name `additionalInterfaces` and the 1.0 name `supportedInterfaces`, and the
+  extended-card flag is recognised whether it sits at the top level (0.3) or
+  under `capabilities` (1.0), because real cards carry either. 0.2 cards parse
+  exactly as before, and absent 0.3 fields read as absent rather than empty.
+- **`AgentRecord.signature_expires_at`** exposes when a verified signature lapses. Verification
+  is binary right up to the moment it flips to expired, so the remaining window was the one
+  signal nobody had. The CLI shows the days left and turns amber inside two weeks.
+- **`AgentRecord.dnssec_signed` separates an unsigned zone from a non-validating resolver.**
+  `dnssec_validated=False` could not distinguish "the zone owner never signed" from "the zone
+  is signed and your resolver will not validate it", which have opposite owners and opposite
+  fixes. RRSIG presence is now recorded from the response the DNSSEC check already fetches
+  (the DO bit is set, so no extra query), and the CLI reports `unvalidated (signed; resolver)`
+  or `unvalidated (zone unsigned)`. **Diagnostic only** — an attacker who can spoof an answer
+  can spoof an RRSIG beside it, so only `dnssec_validated` may inform a trust decision, and
+  `require_dnssec` / `min_dnssec` are unaffected.
+- **Key rollovers can overlap.** `sign_record(..., kid=...)` publishes a key identifier in
+  the JWS protected header, verification selects the matching key from the JWKS, and
+  `export_jwks_multi()` emits several keys in one document so the outgoing and incoming
+  keys coexist while records are re-signed. A signature naming a key absent from the cached
+  document triggers at most one forced refresh per domain per cache window, so a key rolled
+  in mid-cache-window is picked up without waiting for `JWKS_CACHE_TTL`. Because `kid` comes
+  off an unauthenticated DNS record the budget is keyed by domain rather than by `kid`; the
+  cost is that a bogus `kid` may delay a genuine rollover by up to one window, which is
+  bounded and self-healing. The refetch bypasses the cache rather than evicting it, so one
+  unmatched `kid` no longer degrades concurrent lookups for the same domain. Signatures published without a
+  `kid` still verify against the whole key set, and the header is byte-identical to before
+  when no `kid` is supplied. A `kid` is reachable from the publishing side via
+  `publish(sig_kid=...)` and `dns-aid publish --sig-kid`; without those nothing this project
+  emitted could carry one, so the selection and refresh machinery was unreachable end to end
+  and a staged rollover was not actually achievable.
+
+- **Signature validity constants moved to `dns_aid.core.sig_validity`.** The default lived
+  in `jwks` and the bounds in `publisher`, so `publisher` imported `jwks` at module scope to
+  re-export one integer — pulling the whole `cryptography` backend into every import of the
+  publish path, including CLI startup and MCP server boot, whether or not anything would be
+  signed. Both modules re-export the names, so existing imports are unaffected.
+
 - **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
   against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
   private-use SvcParamKeys (`key65280`–`key65534`), so `CloudflareBackend` sets
@@ -16,7 +168,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy, realm, … → `key65400`–`key65409`) are written directly to the SVCB record
   instead of being demoted to TXT, matching the NS1 and NIOS backends.
 
+### Changed
+
+- **The JWKS document is fetched from `https://dns-aid.<zone>/.well-known/dns-aid-jwks.json`**,
+  derived from the record's own publishing zone rather than the name passed to `discover()`.
+  The previous zone-apex location remains supported as a deprecated fallback, so existing
+  deployments continue to verify (with a warning). Two reasons: a zone that exists only to
+  carry agent records has no web presence at its apex, and a `dns-aid.` host — unlike an
+  apex — may be `CNAME`d to a gateway, CDN, or bucket. The location is derived rather than
+  advertised in the record because this path runs when the DNS answer is unauthenticated,
+  so a pointer could be forged alongside the record it is meant to authenticate. Same shape
+  as MTA-STS (RFC 8461 §3.1).
+  *Migration:* publishers should serve the document at `dns-aid.<zone>`; the apex location
+  costs one extra failed lookup per verification until they do.
+
 ### Fixed
+
+- **SSRF address pinning no longer discards the multi-address fallback.** `validate_fetch_url`
+  range-checks every address a name resolves to, but recorded only the first for dialling —
+  and `getaddrinfo(AF_UNSPEC)` applies no `AI_ADDRCONFIG`, so a dual-stack host returns its
+  AAAA first even on a client with no IPv6 route. Pinning that one literal turned a routine
+  deployment into a hard failure where httpcore had previously tried each address in turn:
+  fetching a JWKS from an IPv4-only container failed on the v6 address instead of falling
+  through to the A record, and every agent in the zone came back `signature_status='no_key'`.
+  Same exposure for any multi-homed host whose first address is transiently down. Every
+  vetted address is now recorded in resolution order and tried in turn by `safe_fetch_bytes`,
+  the DANE certificate dial and the reachability probe. Only a transport failure advances to
+  the next address — a non-200, an oversized body or a TLS rejection is the peer's real answer.
+  The security property is unchanged: one bad address in the set still fails the whole URL,
+  so the fallback cannot be used to reach an internal destination.
+- **`publish(sign=True)` signs the record as published, not the arguments it was built
+  from.** `AgentRecord` normalises several fields on the way in — `connect_class` is
+  lower-cased, `target_host` loses a trailing dot — so signing the raw keyword arguments
+  signed one value and published another. The `svcb` digests differed, `payload_matches`
+  went False, and a publisher's own genuine record verified as `unbound`: the status
+  documented to consumers as a lifted signature pasted onto a spoofed record. Publishing
+  `connect_class="Direct"` was enough to trigger it. The payload now reads the constructed
+  record through `params_from_record` — the same reader the verifier uses — so the two
+  sides cannot drift again. An empty parameter also signs as absent, because
+  `SvcbRecord.to_params()` tests for truthiness and so cannot put one on the wire.
+- **The per-zone JWKS lock is no longer shared across event loops.** An `asyncio.Lock`
+  binds to the loop that first contends on it and refuses to be awaited from any other,
+  and the MCP server runs every tool call under its own `asyncio.run()`. The second
+  contended fetch for a zone raised `RuntimeError: bound to a different event loop`, which
+  `_verify_one` recorded as `signature_status='no_key'` — so every agent in that zone
+  silently reported unverified and `require_signed=True` returned nothing from then on.
+  The locks are now keyed by running loop, weakly, so a finished loop takes its locks with
+  it. A held lock is also never evicted, which previously let two coroutines fetch the same
+  document concurrently.
+- **`--require-signed` no longer suppresses the DNSSEC verdict it computed.** `discover()`
+  turns `require_signed` into `verify_signatures` internally, so the check runs; the CLI
+  and MCP reporting surfaces evaluated the gate with the caller's value instead of the
+  effective one and omitted `dnssec_validated` from JSON while hiding the table column.
+  A check that ran and produced an answer was reported as "not checked".
+- **DANE advisory mode no longer requires a validating resolver.** The AD-flag gate on the
+  TLSA RRset was applied before the advisory branch, so a correctly DANE-configured host
+  behind a non-validating resolver reported the same `None` as a host publishing no TLSA
+  at all. Advisory mode answers "is DANE configured", not "does this certificate match",
+  so the gate now sits on the certificate-matching path where the trust decision is made.
+- **IPv6 literals are bracketed before going into a probe URL.** `_check_endpoint` and the
+  HSTS probe interpolated a bare vetted address, producing
+  `https://2606:4700::6810:85e5:443/health`, which httpx rejects — so `dns-aid verify`
+  reported every healthy IPv6-only agent as unreachable.
+- **A2A card `security` requirements survive parsing again.** `security` and
+  `securityRequirements` were added to `known_keys` without a field to land in, so they
+  were filtered out of `metadata` and dropped entirely, where previously they survived as
+  raw metadata. Both spellings are now parsed into `A2AAgentCard.security_requirements`,
+  and `A2ASkill` reads the schema's `security` spelling rather than only the draft's. The
+  0.2/0.3 authentication merge also keeps a credentials URL derived from `securitySchemes`
+  instead of discarding it — the guard skipped the merge in exactly the case it was
+  written to preserve.
+- **The `sig` SvcParam (`key65405`) is now read off DNS records.** It was parsed out of
+  the SVCB correctly and then discarded: the extraction below the parser handled nine of
+  the ten keys in `DNS_AID_KEY_MAP` and omitted `sig`, so `AgentRecord.sig` was always
+  `None` on the DNS discovery path, JWS verification never executed, and
+  `require_signed=True` returned no agents regardless of what had been published.
+  `publish --sign` wrote a signature no consumer could read back. A completeness test now
+  asserts every key in the map reaches a field on a discovered record.
+  *Behavior note:* `require_signed=True` now returns verified agents where it previously
+  returned an empty result.
+- **JWS signature validity is no longer derived from the DNS record TTL.** The publisher
+  passed `ttl` straight into the JWS `exp`, so a signature expired at the resolver
+  cache-refresh interval — one hour with the default TTL, thirty seconds at the floor —
+  while the record itself remained in DNS indefinitely. The relationship was inverted from
+  intent: the shorter the TTL chosen for fast propagation, the faster signatures broke.
+  Validity is now set by `publish(sig_validity_seconds=...)`, default 90 days, bounded to
+  1 hour–13 months. **Records signed by earlier versions should be re-published.**
+- **DANE verification tries every association in the TLSA RRset.** `_check_dane` returned
+  on the first association it examined, so an RRset with more than one record was decided
+  by RRset order. Because a certificate rollover is staged by publishing the outgoing and
+  incoming pins together (RFC 7671 §8.1) and a certificate is valid if it matches any
+  association (RFC 6698; RFC 7671 §5.1), rollovers could not overlap. The failure was
+  closed — a valid certificate rejected, never an invalid one accepted. A non-match now
+  advances to the next association and `False` is returned only after all were compared.
+- **An unverifiable result is no longer reported as a failed one.** A JWKS that could not
+  be fetched, and a TLSA association whose comparison raised, both returned `False` —
+  presenting a CDN blip or connection reset as a forged signature or a failed certificate
+  binding. Both now return `None` (unknown). `require_signed=True` remains fail-closed: it
+  requires `is True`, so `None` is still rejected.
+  *Behavior note:* `AgentRecord.signature_verified` may now be `None` where it was
+  previously `False`. Consumers testing `is True` are unaffected; consumers testing
+  `== False` to mean "rejected" should migrate to `signature_status`.
+
 
 - **Cloudflare TXT records now write each value as its own RFC 1035 `<character-string>`**
   (quoted, with escaping) instead of space-joining all values into a single string.

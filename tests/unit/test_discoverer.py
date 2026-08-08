@@ -1107,7 +1107,7 @@ class TestEnrichFromHttpIndex:
         )
         _enrich_from_http_index(agent, http_agent)
         assert agent.endpoint_override == "https://chat.example.com/mcp"
-        assert agent.endpoint_source == "http_index"
+        assert agent.endpoint_source == "dns_svcb_enriched"
 
     def test_does_not_override_existing_endpoint(self):
         from dns_aid.core.models import AgentRecord, Protocol
@@ -1690,9 +1690,9 @@ class TestPerAgentDnssec:
         )
 
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=True,
+            return_value=(True, True),
         ):
             result_level = await _apply_post_discovery(
                 [agent_a, agent_b],
@@ -1726,10 +1726,11 @@ class TestPerAgentDnssec:
         )
 
         async def selective_check(fqdn):
-            return fqdn == "chat.example.com"
+            validated = fqdn == "chat.example.com"
+            return validated, validated
 
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new=selective_check,
         ):
             with pytest.raises(DNSSECError) as excinfo:
