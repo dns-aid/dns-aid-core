@@ -23,6 +23,7 @@ longer the thing a trust decision rests on.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -120,6 +121,48 @@ def _find_rrset(response, name, rdtype, covers=dns.rdatatype.NONE):
     return None
 
 
+# A CNAME chain longer than this is a misconfiguration, and the length is
+# attacker-influenced, so it is bounded rather than followed indefinitely.
+MAX_CNAME_HOPS = 8
+
+
+def _follow_cname(response, name, rdtype, zone, keys):
+    """Resolve the queried name through any CNAME chain in the answer.
+
+    Looking for the requested type only at the QUERIED name reported
+    ``no answer`` for every CNAMEd record, which the walk then folded into
+    INDETERMINATE -- so a name whose CNAME is signed and provable read the same
+    as a resolver that could not answer. Most real deployments CNAME their agent
+    names at a CDN, so this affected the common case.
+
+    Each CNAME hop is validated under the zone's keys before it is followed: an
+    unvalidated CNAME would let a responder redirect the lookup to a name of its
+    choosing and have the answer there validate on its own merits.
+
+    Returns ``(rrset, final_name)``, or ``(None, final_name)`` when the type is
+    not present at the end of the chain.
+    """
+    current = name
+    for _ in range(MAX_CNAME_HOPS):
+        direct = _find_rrset(response, current, rdtype)
+        if direct is not None:
+            return direct, current
+
+        cname = _find_rrset(response, current, dns.rdatatype.CNAME)
+        if cname is None:
+            return None, current
+
+        cname_sig = _find_rrset(response, current, dns.rdatatype.RRSIG, covers=dns.rdatatype.CNAME)
+        if cname_sig is None:
+            raise _BogusError(f"CNAME at {current} carries no signature")
+        # Only meaningful while the chain stays inside the zone we hold keys for.
+        if current.is_subdomain(zone):
+            dns.dnssec.validate(cname, cname_sig, {zone: keys})
+        current = cname[0].target
+
+    raise _IndeterminateError(f"CNAME chain from {name} exceeded {MAX_CNAME_HOPS} hops")
+
+
 async def _validated_dnskey(resolver, zone, ds_rrset):
     """Fetch a zone's DNSKEY RRset and prove it against the parent's DS.
 
@@ -132,7 +175,10 @@ async def _validated_dnskey(resolver, zone, ds_rrset):
     dnskeys = _find_rrset(response, zone, dns.rdatatype.DNSKEY)
     rrsig = _find_rrset(response, zone, dns.rdatatype.RRSIG, covers=dns.rdatatype.DNSKEY)
     if dnskeys is None or rrsig is None:
-        raise _IndeterminateError(f"no signed DNSKEY RRset for {zone}")
+        raise _IndeterminateError(
+            f"no signed DNSKEY RRset for {zone}; the resolver may not serve DNSSEC "
+            "records (set DNS_AID_DNSSEC_RESOLVERS to one that does)"
+        )
 
     # Collect the keys the parent's DS actually references -- not merely whether
     # one exists.
@@ -193,6 +239,29 @@ class _IndeterminateError(Exception):
     """The walk could not complete. Unknown, not a rejection."""
 
 
+def _default_resolver() -> dns.asyncresolver.Resolver:
+    """A resolver that can actually serve a chain walk.
+
+    The walk needs DNSKEY and DS records. Many enterprise stub resolvers do not
+    return them -- on a split-horizon network the internal resolver is often
+    authoritative for the zone and answers DNSKEY empty -- so inheriting the
+    system resolver made the walk report INDETERMINATE on exactly the networks
+    DNS-AID targets, indistinguishable from a resolver stripping records under
+    attack.
+
+    Set DNS_AID_DNSSEC_RESOLVERS to a comma-separated list of addresses that do
+    serve DNSSEC records. Without it the system resolver is used, which is the
+    prior behaviour and correct wherever the resolver is DNSSEC-aware.
+    """
+    res = dns.asyncresolver.Resolver()
+    raw = os.environ.get("DNS_AID_DNSSEC_RESOLVERS", "").strip()
+    if raw:
+        servers = [ip.strip() for ip in raw.split(",") if ip.strip()]
+        if servers:
+            res.nameservers = servers
+    return res
+
+
 async def validate_chain(
     fqdn: str,
     rdtype: str = "SVCB",
@@ -212,7 +281,7 @@ async def validate_chain(
     if len(name) > MAX_CHAIN_LABELS:
         return ChainResult(ChainStatus.INDETERMINATE, "name has too many labels to walk")
 
-    res = resolver or dns.asyncresolver.Resolver()
+    res = resolver or _default_resolver()
     res.use_edns(0, dns.flags.DO, 4096)
 
     try:
@@ -234,13 +303,15 @@ async def validate_chain(
             zone = child
 
         response = await _query(res, name, dns.rdatatype.from_text(rdtype))
-        rrset = _find_rrset(response, name, dns.rdatatype.from_text(rdtype))
+        rrset, answer_name = _follow_cname(
+            response, name, dns.rdatatype.from_text(rdtype), zone, keys
+        )
         if rrset is None:
             return ChainResult(
                 ChainStatus.INDETERMINATE, f"no {rdtype} answer for {fqdn}", zone=str(zone)
             )
         rrsig = _find_rrset(
-            response, name, dns.rdatatype.RRSIG, covers=dns.rdatatype.from_text(rdtype)
+            response, answer_name, dns.rdatatype.RRSIG, covers=dns.rdatatype.from_text(rdtype)
         )
         if rrsig is None:
             # Reached a zone the chain stopped at and the answer is unsigned.
@@ -248,6 +319,16 @@ async def validate_chain(
             return ChainResult(
                 ChainStatus.INSECURE,
                 f"{fqdn} is served unsigned below {zone}",
+                zone=str(zone),
+            )
+        if not answer_name.is_subdomain(zone):
+            # A CNAME left the zone we hold keys for. Proving it needs a separate
+            # walk to that zone, so this is unknown rather than secure -- and
+            # unknown must not read as either proof or attack.
+            return ChainResult(
+                ChainStatus.INDETERMINATE,
+                f"{fqdn} resolves via CNAME to {answer_name}, outside {zone}; "
+                "validate that name separately",
                 zone=str(zone),
             )
         dns.dnssec.validate(rrset, rrsig, {zone: keys})

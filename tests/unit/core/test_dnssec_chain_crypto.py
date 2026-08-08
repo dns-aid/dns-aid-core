@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime
 
+import dns.asyncresolver
 import dns.dnssec
 import dns.name
 import dns.rdataclass
@@ -173,3 +174,131 @@ class TestTheRootAnchorsAreTheRealOnes:
         for tag, _alg, _dt, digest in ROOT_ANCHORS:
             assert set(digest) != {"0"}, f"anchor {tag} digest is zeroed"
             assert len(digest) == 64
+
+
+class TestCnameAnswersAreFollowedAndValidated:
+    """Looking only at the queried name reported no-answer for every CNAME.
+
+    The walk folded that into INDETERMINATE, so a name whose CNAME is signed and
+    provable read the same as a resolver that could not answer. Most real
+    deployments CNAME their agent names at a CDN, so this was the common case.
+    """
+
+    @staticmethod
+    def _chain(name, target, rdtype, priv, dnskey, signed_cname=True):
+        import datetime
+
+        now = int(datetime.datetime.now(tz=datetime.UTC).timestamp())
+        cname = dns.rrset.from_text(name, 3600, "IN", "CNAME", target.to_text())
+        answer = dns.rrset.from_text(target, 3600, "IN", "A", "93.184.216.34")
+
+        def sign(rrset):
+            return dns.dnssec.sign(
+                rrset=rrset,
+                private_key=priv,
+                dnskey=dnskey,
+                signer=ZONE,
+                inception=now - 300,
+                expiration=now + 3600,
+            )
+
+        answers = [cname, answer, dns.rrset.from_rdata_list(target, 3600, [sign(answer)])]
+        if signed_cname:
+            answers.append(dns.rrset.from_rdata_list(name, 3600, [sign(cname)]))
+
+        class _Resp:
+            pass
+
+        r = _Resp()
+        r.answer = answers
+        return r
+
+    def test_a_signed_cname_is_followed_to_the_answer(self):
+        from dns_aid.core.dnssec_chain import _follow_cname
+
+        priv, dnskey = _keypair()
+        keys = _dnskey_rrset(dnskey)
+        name = dns.name.from_text("agent.example.com.")
+        target = dns.name.from_text("edge.example.com.")
+        resp = self._chain(name, target, dns.rdatatype.A, priv, dnskey)
+
+        rrset, final = _follow_cname(resp, name, dns.rdatatype.A, ZONE, keys)
+
+        assert rrset is not None, "the answer under the canonical name was not found"
+        assert final == target
+
+    def test_an_unsigned_cname_is_not_followed(self):
+        """Otherwise a responder redirects the lookup and the answer there
+        validates on its own merits."""
+        from dns_aid.core.dnssec_chain import _BogusError, _follow_cname
+
+        priv, dnskey = _keypair()
+        keys = _dnskey_rrset(dnskey)
+        name = dns.name.from_text("agent.example.com.")
+        target = dns.name.from_text("edge.example.com.")
+        resp = self._chain(name, target, dns.rdatatype.A, priv, dnskey, signed_cname=False)
+
+        with pytest.raises(_BogusError, match="carries no signature"):
+            _follow_cname(resp, name, dns.rdatatype.A, ZONE, keys)
+
+    def test_the_hop_count_is_bounded(self):
+        """The chain length is attacker-influenced."""
+        from dns_aid.core.dnssec_chain import MAX_CNAME_HOPS
+
+        assert 1 < MAX_CNAME_HOPS <= 16
+
+
+class TestTheResolverCanBePointedAtOneThatServesDnssec:
+    """A stub resolver that strips DNSKEY made the walk unusable.
+
+    On a split-horizon network the internal resolver is often authoritative for
+    the zone and answers DNSKEY empty, so the walk reported INDETERMINATE on
+    exactly the networks DNS-AID targets -- and indistinguishable from a resolver
+    stripping records under attack.
+    """
+
+    def test_the_env_override_selects_the_nameservers(self, monkeypatch):
+        from dns_aid.core.dnssec_chain import _default_resolver
+
+        monkeypatch.setenv("DNS_AID_DNSSEC_RESOLVERS", "8.8.8.8, 1.1.1.1")
+
+        assert _default_resolver().nameservers == ["8.8.8.8", "1.1.1.1"]
+
+    def test_without_the_override_the_system_resolver_is_used(self, monkeypatch):
+        from dns_aid.core.dnssec_chain import _default_resolver
+
+        monkeypatch.delenv("DNS_AID_DNSSEC_RESOLVERS", raising=False)
+        system = dns.asyncresolver.Resolver().nameservers
+
+        assert _default_resolver().nameservers == system
+
+    def test_a_blank_override_does_not_empty_the_nameserver_list(self, monkeypatch):
+        from dns_aid.core.dnssec_chain import _default_resolver
+
+        monkeypatch.setenv("DNS_AID_DNSSEC_RESOLVERS", "  ,  ")
+
+        assert _default_resolver().nameservers, "an empty list would break every query"
+
+    @pytest.mark.asyncio
+    async def test_a_stripping_resolver_says_why(self):
+        """The reason must be actionable, not just 'indeterminate'."""
+        import dns_aid.core.dnssec_chain as chain
+
+        priv, dnskey = _keypair()
+        _ = priv, dnskey
+
+        async def empty(resolver, qname, rdtype):  # noqa: ARG001
+            class _Resp:
+                answer = []
+
+            return _Resp()
+
+        original = chain._query
+        chain._query = empty
+        try:
+            result = await chain.validate_chain("agent.example.com", "A")
+        finally:
+            chain._query = original
+
+        assert result.status is chain.ChainStatus.INDETERMINATE
+        assert "DNS_AID_DNSSEC_RESOLVERS" in result.reason
