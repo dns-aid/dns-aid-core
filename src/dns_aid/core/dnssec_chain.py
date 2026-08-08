@@ -36,6 +36,17 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# The supported surface of this module. The tuning constants below are
+# deliberately excluded: this package has no other __all__, so anything
+# non-underscored would otherwise become API on release and could not be
+# renamed afterwards.
+__all__ = [
+    "ChainResult",
+    "ChainStatus",
+    "ROOT_ANCHORS",
+    "validate_chain",
+]
+
 # IANA root zone trust anchors, as DS records over the root DNSKEY RRset.
 # KSK-2017 (tag 20326) is the anchor in force; KSK-2024 (tag 38696) is carried
 # so a rollover does not require a code change. Source: the IANA root anchors

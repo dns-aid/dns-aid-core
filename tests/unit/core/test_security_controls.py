@@ -251,7 +251,7 @@ class TestSignatureBudgetIsVisibleAndFailSafe:
             patch("dns_aid.core.jwks.verify_record_signature_detailed", new=hangs),
             patch("dns_aid.core.discoverer.SIG_VERIFY_BUDGET_SECONDS", 0.1),
         ):
-            await _verify_agent_signatures(agents, "example.com", dnssec_validated={})
+            await _verify_agent_signatures(agents, "example.com")
 
         assert all(a.signature_status == SignatureStatus.NOT_CHECKED for a in agents), (
             "status None is indistinguishable from never being in scope"
@@ -292,7 +292,7 @@ class TestSignatureBudgetIsVisibleAndFailSafe:
         ):
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(
-                    _verify_agent_signatures(agents, "example.com", dnssec_validated={}),
+                    _verify_agent_signatures(agents, "example.com"),
                     timeout=0.05,
                 )
 

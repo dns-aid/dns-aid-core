@@ -283,7 +283,7 @@ async def _apply_post_discovery(
         # on a record whose signature would have failed.
         #
         # The JWKS is cached per zone, so the cost is one fetch, not one per agent.
-        await _verify_agent_signatures(agents, domain, dnssec_validated={})
+        await _verify_agent_signatures(agents, domain)
 
     if verify_dane and agents:
         await _verify_agents_dane(agents)
@@ -2083,32 +2083,22 @@ def _dns_name_eq(a: str, b: str) -> bool:
 async def _verify_agent_signatures(
     agents: list[AgentRecord],
     domain: str,
-    dnssec_validated: dict[str, bool] | bool,
 ) -> None:
     """
-    Verify JWS signatures on agents that have sig parameter but no DNSSEC.
+    Verify JWS signatures on every agent that carries one.
 
-    Under draft-02 each agent has its own flat fqdn, so DNSSEC validation
-    is also per-agent. JWS verification runs as the per-agent fallback:
-    if a specific agent's owner-name validated under DNSSEC we skip JWS
-    for that agent (stronger guarantee already in place); otherwise we
-    fall through to JWS.
+    There is deliberately no way to suppress this. A DNSSEC-validated record
+    used to skip JWS on the grounds that the DNS chain was the stronger
+    guarantee -- but that signal is the AD flag with no chain validation, and an
+    attacker who can forge answers for an unsigned zone (the adversary the JWS
+    fallback exists to stop) sets it at will. The parameter that carried the
+    skip is gone rather than merely unused, so a future caller cannot reopen it.
 
     Args:
         agents: List of agents to verify (modified in place with verification status)
         domain: Domain to fetch JWKS from
-        dnssec_validated: Either a mapping of ``agent.fqdn → bool``
-            (per-agent DNSSEC outcome) or a plain bool treated as a
-            uniform answer for every agent. The plain-bool form is kept
-            for callers that haven't migrated to the per-agent map yet.
     """
-    # Normalize: plain bool → uniform-per-agent dict.
-    if isinstance(dnssec_validated, bool):
-        uniform = dnssec_validated
-        dnssec_validated = {a.fqdn: uniform for a in agents}
-
-    # Find agents with signatures to verify AND no DNSSEC pass.
-    agents_with_sig = [a for a in agents if a.sig and not dnssec_validated.get(a.fqdn, False)]
+    agents_with_sig = [a for a in agents if a.sig]
 
     from dns_aid.core.jwks import SignatureStatus as _Status
 
@@ -2117,12 +2107,6 @@ async def _verify_agent_signatures(
             continue
         if _a.sig is None:
             _a.signature_status = str(_Status.NOT_SIGNED)
-        elif dnssec_validated.get(_a.fqdn, False):
-            # A signature is present but was deliberately not checked: the DNS
-            # chain already authenticated this record, which is the stronger
-            # guarantee. Labelled so the skip is visible, because an unlabelled
-            # None was indistinguishable from a verification that failed.
-            _a.signature_status = str(_Status.SKIPPED_DNSSEC)
 
     if not agents_with_sig:
         logger.debug("No agents with JWS signatures to verify")

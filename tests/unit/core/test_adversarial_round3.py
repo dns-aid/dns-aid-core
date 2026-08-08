@@ -53,7 +53,7 @@ def _record(source, cap=PARAMS["cap"], sha=PARAMS["cap-sha256"], sig=None):
 
 async def _verify(agent, pub):
     with patch("dns_aid.core.jwks.fetch_jwks", new=AsyncMock(return_value=export_jwks(pub))):
-        await _verify_agent_signatures([agent], "example.com", dnssec_validated={})
+        await _verify_agent_signatures([agent], "example.com")
     return agent
 
 

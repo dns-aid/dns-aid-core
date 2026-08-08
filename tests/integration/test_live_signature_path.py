@@ -181,7 +181,7 @@ class TestLiveSignedRecordOnUnsignedZone:
         unreachable key document is never reported as a rejection.
         """
         agent = await discover_at_fqdn(SIGNED_RECORD_FQDN)
-        await _verify_agent_signatures([agent], agent.domain, dnssec_validated=False)
+        await _verify_agent_signatures([agent], agent.domain)
 
         assert agent.signature_status in {
             SignatureStatus.VERIFIED,
@@ -212,7 +212,7 @@ class TestLiveSignedRecordOnUnsignedZone:
         from dns_aid.core.filters import _matches_signed
 
         agent = await discover_at_fqdn(SIGNED_RECORD_FQDN)
-        await _verify_agent_signatures([agent], agent.domain, dnssec_validated=False)
+        await _verify_agent_signatures([agent], agent.domain)
 
         passes = _matches_signed(agent, require=True, allowed_algorithms=None)
         assert passes is (agent.signature_verified is True)

@@ -132,11 +132,9 @@ class TestZoneAnchoring:
             new=AsyncMock(side_effect=fake_verify),
         ):
             # Entry point A: the caller queried the zone.
-            await _verify_agent_signatures([_agent()], "ai.example.com", dnssec_validated=False)
+            await _verify_agent_signatures([_agent()], "ai.example.com")
             # Entry point B: the caller queried the agent FQDN directly.
-            await _verify_agent_signatures(
-                [_agent()], "ddi-agent.ai.example.com", dnssec_validated=False
-            )
+            await _verify_agent_signatures([_agent()], "ddi-agent.ai.example.com")
 
         assert zones_asked == ["ai.example.com", "ai.example.com"], (
             "JWKS zone must come from the record, not the discover() argument"

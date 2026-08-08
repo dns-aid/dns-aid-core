@@ -121,6 +121,11 @@ class SignatureStatus(StrEnum):
     # unset status (never in scope), because a caller that asked for
     # verification and silently received nothing cannot tell the difference.
     NOT_CHECKED = "not_checked"  # record carries no sig parameter
+    # RETAINED FOR WIRE COMPATIBILITY, NO LONGER PRODUCED. Verification used to
+    # be skipped for a DNSSEC-validated record and labelled with this. The skip
+    # rested on the AD flag with no chain validation, so it is gone and the
+    # parameter that carried it has been removed from _verify_agent_signatures.
+    # A consumer may still receive this from a record stored before the change.
     SKIPPED_DNSSEC = "skipped_dnssec"  # authenticated by DNSSEC; JWS not needed
 
 

@@ -66,7 +66,7 @@ def keys():
 
 async def _verify(agent, pub):
     with patch("dns_aid.core.jwks.fetch_jwks", new=AsyncMock(return_value=export_jwks(pub))):
-        await _verify_agent_signatures([agent], "example.com", dnssec_validated={})
+        await _verify_agent_signatures([agent], "example.com")
     return agent
 
 
@@ -306,7 +306,7 @@ class TestTheMigrationPathActuallyWorks:
         record.signature_status = None
         record.signature_verified = None
         with patch("dns_aid.core.jwks.fetch_jwks", new=AsyncMock(return_value=export_jwks(pub))):
-            await _verify_agent_signatures([record], "example.com", dnssec_validated={})
+            await _verify_agent_signatures([record], "example.com")
 
         assert record.signature_status == SignatureStatus.VERIFIED
         assert record.signature_covers_params is True

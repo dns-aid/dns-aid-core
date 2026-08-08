@@ -94,7 +94,7 @@ class TestUnknownIsNotForged:
         agent = _agent(sign_record(_payload(), priv))
 
         with patch("dns_aid.core.jwks.fetch_jwks", new=AsyncMock(return_value=None)):
-            await _verify_agent_signatures([agent], ZONE, dnssec_validated=False)
+            await _verify_agent_signatures([agent], ZONE)
 
         assert agent.signature_verified is None, "an outage must not be reported as forgery"
         assert agent.signature_status == SignatureStatus.NO_KEY
@@ -114,7 +114,7 @@ class TestUnknownIsNotForged:
             "dns_aid.core.jwks.fetch_jwks",
             new=AsyncMock(return_value=export_jwks(unrelated_pub, kid="other")),
         ):
-            await _verify_agent_signatures([agent], ZONE, dnssec_validated=False)
+            await _verify_agent_signatures([agent], ZONE)
 
         assert agent.signature_verified is False
         assert agent.signature_status == SignatureStatus.INVALID
@@ -159,7 +159,7 @@ class TestStatusDistinguishesCauses:
             "dns_aid.core.jwks.fetch_jwks",
             new=AsyncMock(return_value=export_jwks(pub, kid="k")),
         ):
-            await _verify_agent_signatures([agent], ZONE, dnssec_validated=False)
+            await _verify_agent_signatures([agent], ZONE)
 
         assert agent.signature_verified is False
         assert agent.signature_status == SignatureStatus.UNBOUND
@@ -172,7 +172,7 @@ class TestStatusDistinguishesCauses:
             name="plain", domain=ZONE, protocol=Protocol.A2A, target_host=TARGET, port=443
         )
 
-        await _verify_agent_signatures([agent], ZONE, dnssec_validated=False)
+        await _verify_agent_signatures([agent], ZONE)
 
         assert agent.signature_verified is None
         assert agent.signature_status == SignatureStatus.NOT_SIGNED
@@ -189,7 +189,7 @@ class TestStatusDistinguishesCauses:
             "dns_aid.core.jwks.fetch_jwks",
             new=AsyncMock(return_value=export_jwks(pub, kid="k")),
         ):
-            await _verify_agent_signatures([agent], ZONE, dnssec_validated=False)
+            await _verify_agent_signatures([agent], ZONE)
 
         assert agent.signature_verified is True
         assert agent.signature_status == SignatureStatus.VERIFIED_ENDPOINT_ONLY
@@ -501,19 +501,24 @@ class TestDnssecVerdictIsNotFlagDependent:
 
     @pytest.mark.asyncio
     async def test_the_verdict_is_stamped_but_never_suppresses_verification(self):
-        """Computed and reported, and deliberately NOT used to skip the JWS.
+        """Computed and reported, and structurally unable to suppress the JWS.
 
         An unvalidated AD flag must not suppress cryptography the caller asked
-        for: an on-path attacker sets that bit and the forged record would then
-        report skipped_dnssec, which reads as "already authenticated".
+        for. The parameter that carried the suppression has been removed rather
+        than merely left unused, so this asserts the signature of the function
+        as well as the verdict on the record.
         """
-        from dns_aid.core.discoverer import _apply_post_discovery
+        import inspect
+
+        from dns_aid.core.discoverer import _apply_post_discovery, _verify_agent_signatures
+
+        assert "dnssec_validated" not in inspect.signature(_verify_agent_signatures).parameters
 
         agent = self._agent()
         seen = {}
 
-        async def capture(agents, domain, *, dnssec_validated):  # noqa: ARG001
-            seen["skip_map"] = dnssec_validated
+        async def capture(agents, domain):  # noqa: ARG001
+            seen["called"] = True
 
         with (
             patch(
@@ -525,4 +530,4 @@ class TestDnssecVerdictIsNotFlagDependent:
             await _apply_post_discovery([agent], False, False, True, "signed.example.com")
 
         assert agent.dnssec_validated is True, "the verdict must still be computed and reported"
-        assert seen["skip_map"] == {}, "a spoofable AD flag must not suppress the signature check"
+        assert seen.get("called"), "verification must run regardless of the AD flag"

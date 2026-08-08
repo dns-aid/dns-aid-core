@@ -376,23 +376,45 @@ class TestDnssecEvidence:
         assert cli["dnssec_validated"] == mcp["dnssec_validated"] is False
 
 
-class TestDnssecSkipIsNotAFailure:
-    """Asking for both strong guarantees at once must not return nothing.
+class TestTheDnssecSkipIsGone:
+    """JWS verification cannot be suppressed, and the lever no longer exists.
 
-    JWS verification is skipped for a DNSSEC-validated record: the DNS chain
-    already authenticates it and JWS exists as the fallback for zones that
-    cannot sign. Skipping is right, and --require-signed together with DNSSEC
-    returning zero agents was not.
-
-    The first fix let the skip satisfy the gate. That was wrong in both
-    directions. DNSSEC here is the AD flag with no chain validation, so an
-    attacker forging answers for an unsigned zone could set AD=1, attach a
-    garbage sig, and pass with no cryptography performed. And a skip carries no
-    algorithm, so require_signature_algorithm dropped every agent.
-
-    The skip is an optimisation, never a substitute. When the caller demands a
-    signature, discovery verifies it, and the record passes on its own merits.
+    A DNSSEC-validated record used to skip JWS on the grounds that the DNS chain
+    was the stronger guarantee. That signal is the AD flag with no chain
+    validation, so an attacker who can forge answers for an unsigned zone -- the
+    adversary the JWS fallback exists to stop -- could set it and suppress the
+    check. The first fix stopped passing the skip; this one removed the
+    parameter, so a future caller cannot reopen it.
     """
+
+    def test_the_function_takes_no_suppression_argument(self):
+        import inspect
+
+        from dns_aid.core.discoverer import _verify_agent_signatures
+
+        params = set(inspect.signature(_verify_agent_signatures).parameters)
+
+        assert "dnssec_validated" not in params, (
+            "the skip parameter is back; a caller passing a truthy map reopens the AD-flag bypass"
+        )
+        assert params == {"agents", "domain"}
+
+    @pytest.mark.asyncio
+    async def test_a_signed_record_is_verified_even_on_a_dnssec_zone(self):
+        agent = self._signed(dnssec=True)
+        await self._verify(agent, skip=False)
+
+        assert agent.signature_status == SignatureStatus.VERIFIED_ENDPOINT_ONLY
+        assert agent.signature_verified is True
+
+    @pytest.mark.asyncio
+    async def test_an_unsigned_record_on_a_signed_zone_is_still_not_signed(self):
+        from dns_aid.core.filters import _matches_signed
+
+        agent = self._signed(dnssec=True, with_sig=False)
+        await self._verify(agent, skip=False)
+
+        assert _matches_signed(agent, require=True, allowed_algorithms=None) is False
 
     def _signed(self, dnssec: bool, with_sig: bool = True):
         from dns_aid.core.jwks import RecordPayload, generate_keypair, sign_record
@@ -419,9 +441,7 @@ class TestDnssecSkipIsNotAFailure:
     async def _verified(self, agent):
         from dns_aid.core.discoverer import _verify_agent_signatures
 
-        await _verify_agent_signatures(
-            [agent], "example.com", dnssec_validated=agent.dnssec_validated
-        )
+        await _verify_agent_signatures([agent], "example.com")
         return agent
 
     async def _verify(self, agent, *, skip: bool):
@@ -438,68 +458,8 @@ class TestDnssecSkipIsNotAFailure:
             await _verify_agent_signatures(
                 [agent],
                 "example.com",
-                dnssec_validated=(agent.dnssec_validated if skip else {}),
             )
         return agent
-
-    @pytest.mark.asyncio
-    async def test_skip_is_labelled_not_left_blank(self):
-        agent = await self._verified(self._signed(dnssec=True))
-
-        assert agent.signature_status == SignatureStatus.SKIPPED_DNSSEC
-
-    @pytest.mark.asyncio
-    async def test_require_signed_verifies_rather_than_trusting_the_skip(self):
-        """The record passes because its signature verified, not because it skipped."""
-        from dns_aid.core.filters import _matches_signed
-
-        agent = self._signed(dnssec=True)
-        # require_signature=True is what discovery passes when the caller asked
-        # for a signature: the skip map is empty, so JWS runs.
-        await self._verify(agent, skip=False)
-
-        # Signed without params, so the endpoint tuple is all that is attested.
-        assert agent.signature_status == SignatureStatus.VERIFIED_ENDPOINT_ONLY
-        assert agent.signature_verified is True
-        assert agent.signature_algorithm == "ES256"
-        assert _matches_signed(agent, require=True, allowed_algorithms=None) is True
-
-    @pytest.mark.asyncio
-    async def test_require_signature_algorithm_survives_a_dnssec_zone(self):
-        """A skip populates no algorithm, so this returned nothing on a signed zone."""
-        from dns_aid.core.filters import _matches_signed
-
-        agent = self._signed(dnssec=True)
-        await self._verify(agent, skip=False)
-
-        assert _matches_signed(agent, require=True, allowed_algorithms=["ES256"]) is True
-
-    @pytest.mark.asyncio
-    async def test_a_skip_alone_never_satisfies_the_gate(self):
-        """The security half: a spoofable AD bit is not a signature.
-
-        DNSSEC validation here is the AD flag with no chain validation. If a skip
-        could satisfy require_signed, an attacker who can forge DNS for an
-        unsigned zone -- exactly the adversary JWS defends against -- would set
-        AD=1, attach anything at all, and pass.
-        """
-        from dns_aid.core.filters import _matches_signed
-
-        agent = self._signed(dnssec=True)
-        await self._verify(agent, skip=True)
-
-        assert agent.signature_status == SignatureStatus.SKIPPED_DNSSEC
-        assert agent.signature_verified is None
-        assert _matches_signed(agent, require=True, allowed_algorithms=None) is False
-
-    @pytest.mark.asyncio
-    async def test_an_unsigned_record_on_a_signed_zone_is_still_not_signed(self):
-        from dns_aid.core.filters import _matches_signed
-
-        agent = self._signed(dnssec=True, with_sig=False)
-        await self._verify(agent, skip=True)
-
-        assert _matches_signed(agent, require=True, allowed_algorithms=None) is False
 
 
 class TestExpiryIsSurfacedBeforeItBites:
