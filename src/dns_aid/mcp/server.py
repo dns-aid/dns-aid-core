@@ -71,7 +71,7 @@ try:  # mcp >= 1.28.1, < 2
     from mcp.server.fastmcp import FastMCP as MCPServer  # noqa: E402
 
     _MCP_MAJOR = 1
-except ImportError:  # pragma: no cover - no CI leg installs mcp 2.x; see #234
+except ImportError:  # pragma: no cover - covered by the mcp-2x-compat CI job
     try:  # mcp >= 2
         # mypy resolves against whichever major is installed, so the other
         # branch is always unknown to it.
