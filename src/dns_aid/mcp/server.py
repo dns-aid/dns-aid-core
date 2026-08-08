@@ -30,7 +30,7 @@ import logging
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Literal
+from typing import Any, Literal
 
 # Configure logging BEFORE importing any dns_aid modules to ensure
 # structlog outputs to stderr (not stdout) in MCP stdio mode.
@@ -71,7 +71,7 @@ try:  # mcp >= 1.28.1, < 2
     from mcp.server.fastmcp import FastMCP as MCPServer  # noqa: E402
 
     _MCP_MAJOR = 1
-except ImportError:  # pragma: no cover - exercised by the mcp 2.x CI matrix leg
+except ImportError:  # pragma: no cover - no CI leg installs mcp 2.x; see #234
     try:  # mcp >= 2
         # mypy resolves against whichever major is installed, so the other
         # branch is always unknown to it.
@@ -80,11 +80,13 @@ except ImportError:  # pragma: no cover - exercised by the mcp 2.x CI matrix leg
         _MCP_MAJOR = 2
     except ImportError as exc:  # pragma: no cover - defensive
         raise ImportError(
-            "dns-aid's MCP server requires the `mcp` package. Install the MCP "
-            "extra with `pip install 'dns-aid[mcp]'`. Supported versions are "
-            "mcp >=1.28.1 (providing mcp.server.fastmcp.FastMCP) and mcp >=2.0.0 "
-            "(providing mcp.server.mcpserver.MCPServer); neither import "
-            f"succeeded, so the installed mcp is out of range. Underlying error: {exc}"
+            "dns-aid's MCP server could not import a supported `mcp` server "
+            "class: neither mcp.server.fastmcp.FastMCP (mcp 1.x) nor "
+            "mcp.server.mcpserver.MCPServer (mcp 2.x) is importable. If `mcp` "
+            "is not installed, run `pip install 'dns-aid[mcp]'`. If it IS "
+            "installed, this is more likely a broken or partial install than a "
+            "version problem — check the underlying error, which names the "
+            f"module that actually failed: {exc}"
         ) from exc
 
 from mcp.types import ToolAnnotations  # noqa: E402
@@ -154,19 +156,35 @@ def _build_server() -> MCPServer:
     """
     if _MCP_MAJOR == 1:
         return MCPServer("DNS-AID", json_response=True, instructions=_INSTRUCTIONS)
-    return MCPServer("DNS-AID", instructions=_INSTRUCTIONS)
+    # 2.x added a `version` parameter defaulting to "", which is what the client
+    # sees in serverInfo.version. 1.x reports the mcp library version there, so
+    # pass the package version explicitly to keep the handshake informative.
+    from dns_aid import __version__
+
+    return MCPServer(
+        "DNS-AID",
+        instructions=_INSTRUCTIONS,
+        version=__version__,  # type: ignore[call-arg]  # 2.x-only parameter
+    )
 
 
-def _streamable_http_app():
+def _streamable_http_app() -> Any:
     """Build the Starlette app, passing transport options where they belong.
 
-    Mirrors ``_build_server()``: under 1.x json_response was already applied via
-    the constructor and this factory takes no arguments, so passing it here
-    would raise TypeError.
+    Mirrors ``_build_server()``: under 1.x ``json_response`` was already applied
+    via the constructor and this factory takes no arguments, so passing it here
+    would raise TypeError. Under 2.x the reverse holds — and getting it wrong in
+    that direction is silent, producing a valid app that serves
+    ``text/event-stream`` instead of ``application/json``.
+
+    Not idempotent under 2.x: 1.x caches the session manager, while 2.x builds a
+    new one per call and overwrites the server's reference. Call once.
     """
     if _MCP_MAJOR == 1:
         return mcp.streamable_http_app()
-    return mcp.streamable_http_app(json_response=True)
+    # mypy resolves against the installed major (1.x), whose signature takes no
+    # arguments; this branch only runs under 2.x.
+    return mcp.streamable_http_app(json_response=True)  # type: ignore[call-arg]
 
 
 # Initialize MCP server

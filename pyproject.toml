@@ -55,16 +55,18 @@ cli = [
 ]
 mcp = [
     # Upper-bounded on the SDK client path, not the server. dns_aid.mcp.server
-    # now runs on both majors (see the dual-path import there), but
-    # dns_aid.sdk.protocols.mcp cannot follow yet: mcp 2.x's
-    # streamable_http_client dropped the headers/timeout/auth/httpx_client_factory
-    # arguments in favour of a single `http_client`, typed httpx2.AsyncClient.
-    # httpx2 is a DIFFERENT distribution from httpx (2.9.1 vs 0.28.1, and
-    # httpx.AsyncClient is not httpx2.AsyncClient). The SDK's public API takes an
-    # httpx.AsyncClient and its telemetry rides on httpx event hooks, so 2.x
-    # support means porting the SDK's HTTP layer to httpx2 or carrying two HTTP
-    # stacks. That is tracked separately; raise this ceiling only once the client
-    # path is ported. mcp.types and the ToolAnnotations import are unaffected.
+    # runs on both majors (see the dual-path import there), but
+    # dns_aid.sdk.protocols.mcp does not: mcp 2.x renamed mcp.types' camelCase
+    # result fields to snake_case, so CallToolResult.isError/.structuredContent,
+    # ListToolsResult.nextCursor and Tool.inputSchema all raise AttributeError
+    # there. The classes still import, which makes this easy to miss. The
+    # streamable-HTTP transport also changed shape (renamed, new argument set,
+    # yields TransportStreams instead of a 3-tuple).
+    #
+    # Not a reason: the transport's `http_client` is annotated
+    # httpx2.AsyncClient, but httpx2 and httpx expose identical AsyncClient
+    # constructor parameters and an httpx client is accepted, so no HTTP-layer
+    # port is needed. Raise this ceiling once the field-rename shim lands.
     "mcp>=1.28.1,<2.0.0",
     "uvicorn>=0.30.0",
     # Direct floors on transitive deps pulled by `mcp` to close Dependabot alerts

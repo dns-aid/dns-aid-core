@@ -63,19 +63,29 @@ try:
         TextContent,
     )
 
-    # The streamable-HTTP client is the one piece that does NOT carry over.
-    # mcp 2.x renamed streamablehttp_client -> streamable_http_client AND
-    # replaced its headers/timeout/auth/httpx_client_factory arguments with a
-    # single `http_client` typed httpx2.AsyncClient. httpx2 is a separate
-    # distribution from httpx (httpx.AsyncClient is not httpx2.AsyncClient), and
-    # this handler's public API takes an httpx.AsyncClient whose event hooks
-    # carry the cost/TTFB telemetry — so 2.x cannot be adapted here without
-    # porting the SDK's HTTP layer. It also yields TransportStreams rather than
-    # the (read, write, get_session_id) tuple unpacked below.
+    # The client path does not carry over to mcp 2.x. Three separate changes:
     #
-    # pyproject caps mcp below 2.0.0 for this reason. This detection exists so a
-    # forced 2.x install reports the real blocker instead of failing with an
-    # opaque TypeError partway through an invocation.
+    #   1. streamablehttp_client -> streamable_http_client, and its
+    #      headers/timeout/auth/httpx_client_factory arguments collapsed into a
+    #      single `http_client`.
+    #   2. It yields TransportStreams rather than the
+    #      (read, write, get_session_id) tuple unpacked below.
+    #   3. mcp.types renamed its camelCase fields to snake_case. The classes
+    #      still import, which makes this easy to miss, but every field this
+    #      module reads is gone: CallToolResult.isError and .structuredContent,
+    #      ListToolsResult.nextCursor, Tool.inputSchema (used at lines ~182-209
+    #      and ~340). Those are plain AttributeError at runtime.
+    #
+    # Note the `http_client` parameter is annotated httpx2.AsyncClient, but that
+    # is advisory: httpx2 and httpx expose identical AsyncClient constructor
+    # parameters and an httpx client is accepted, so the HTTP library is NOT the
+    # obstacle and no port of this module's transport layer is required. The
+    # blocker is (3), the field renames, which need a compatibility shim in
+    # _extract_* and the call-result handling.
+    #
+    # pyproject caps mcp below 2.0.0 until that shim exists. This detection is
+    # here so a forced 2.x install reports the real reason rather than failing
+    # with an opaque AttributeError partway through an invocation.
     try:  # mcp >= 1.28.1, < 2
         from mcp.client.streamable_http import streamablehttp_client
 
@@ -85,9 +95,11 @@ try:
         streamablehttp_client = None  # type: ignore[assignment]
         _MCP_SDK_AVAILABLE = False
         _MCP_IMPORT_ERROR = (
-            "mcp 2.x is installed, but its streamable_http_client requires an "
-            "httpx2.AsyncClient, while this handler is built on httpx. dns-aid "
-            "supports mcp >=1.28.1,<2.0.0 on the client path"
+            "mcp 2.x is installed, but this client requires the 1.x API: "
+            "mcp.types renamed its result fields to snake_case (isError, "
+            "structuredContent, nextCursor, inputSchema) and the "
+            "streamable-HTTP transport changed shape. dns-aid supports "
+            "mcp >=1.28.1,<2.0.0 on the client path"
         )
 except ImportError as exc:
     _MCP_SDK_AVAILABLE = False

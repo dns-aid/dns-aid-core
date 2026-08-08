@@ -26,13 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Previously any import failure produced "Missing 'mcp' extra: install
   dns-aid[mcp]", which sent users with mcp 2.x installed to reinstall a package
   they already had. The handler now distinguishes the two cases and states the
-  supported range. The `mcp` dependency stays capped below 2.0.0 for this
-  reason: mcp 2.x's `streamable_http_client` dropped the
-  `headers`/`timeout`/`auth`/`httpx_client_factory` arguments for a single
-  `http_client` typed `httpx2.AsyncClient` — a different distribution from
-  `httpx` — while the SDK's public API takes an `httpx.AsyncClient` and its
-  telemetry rides on httpx event hooks. Lifting the ceiling requires porting the
-  SDK's HTTP layer, tracked separately.
+  supported range. The `mcp` dependency stays capped below 2.0.0 because mcp 2.x
+  renamed `mcp.types`' camelCase result fields to snake_case: the classes still
+  import, but `CallToolResult.isError`, `CallToolResult.structuredContent`,
+  `ListToolsResult.nextCursor` and `Tool.inputSchema` all raise `AttributeError`,
+  and the streamable-HTTP transport changed shape. Lifting the ceiling needs a
+  field-compatibility shim, tracked separately. Note the transport's
+  `http_client` parameter is annotated `httpx2.AsyncClient`, but that is
+  advisory — httpx2 and httpx expose identical `AsyncClient` constructor
+  parameters and an httpx client is accepted, so no HTTP-layer port is required.
 
 ### Added
 

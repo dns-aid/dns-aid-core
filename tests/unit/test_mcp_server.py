@@ -345,6 +345,11 @@ class TestPublishBapScalar:
         assert result["success"] is True
 
 
+#: Tools registered by dns_aid.mcp.server. Asserted exactly, so that a tool
+#: silently failing to register under one mcp major is a test failure.
+EXPECTED_TOOL_COUNT = 22
+
+
 class TestMcpMajorCompatibility:
     """The server must run on both mcp majors.
 
@@ -362,19 +367,37 @@ class TestMcpMajorCompatibility:
         assert type(server.mcp).__name__ == expected
 
     def test_tools_are_registered_on_either_major(self):
-        """Tool registration is unaffected by which major is installed."""
-        from dns_aid.mcp import server
+        """Every tool registers, regardless of which major is installed.
 
-        assert len(server.mcp._tool_manager.list_tools()) > 0
-
-    def test_streamable_http_app_builds(self):
-        """json_response must reach the right place for the installed major.
-
-        1.x takes it in the constructor and its streamable_http_app() accepts no
-        arguments; 2.x rejects it in the constructor and accepts it here. Passing
-        it to the wrong one raises TypeError, so simply building the app catches
-        a mismatch.
+        Asserts the exact count, not merely a non-empty list: a decorator that
+        silently stopped registering would otherwise pass.
         """
         from dns_aid.mcp import server
 
-        assert server._streamable_http_app() is not None
+        assert len(server.mcp._tool_manager.list_tools()) == EXPECTED_TOOL_COUNT
+
+    def test_streamable_http_app_serves_json_not_sse(self):
+        """json_response must take effect, not merely be accepted.
+
+        1.x takes it in the constructor and its streamable_http_app() accepts no
+        arguments; 2.x is the reverse. Only ONE of those mistakes is loud:
+        passing it to 1.x's factory raises TypeError, but omitting it on 2.x
+        builds a perfectly valid app that serves text/event-stream instead of
+        application/json — silently changing the wire format for every client.
+
+        So assert the setting reached the transport that serves responses,
+        rather than that an object was returned.
+        """
+        from dns_aid.mcp import server
+
+        server._streamable_http_app()
+
+        # 1.x keeps this private, 2.x exposes it publicly.
+        manager = getattr(server.mcp, "_session_manager", None) or getattr(
+            server.mcp, "session_manager", None
+        )
+        assert manager is not None, "no streamable-HTTP session manager was built"
+        assert manager.json_response is True, (
+            "json_response did not reach the transport for this mcp major — "
+            "responses would be text/event-stream instead of application/json"
+        )
