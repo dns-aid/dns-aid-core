@@ -623,6 +623,12 @@ def discover_agents_via_dns(
             WITHOUT filtering on it. Use this to see signature_status and decide
             for yourself. Skipped for agents already authenticated by DNSSEC.
         require_signed: Keep only agents whose record authentication succeeded.
+        require_signed_params: Also require the signature to cover the DNS-AID
+          parameters (cap, cap-sha256, policy, realm, well-known) and not only
+          the endpoint tuple. Refuses records signed before the svcb claim
+          existed, whose capability pointer can be swapped while the signature
+          still verifies. Defaults False so existing records keep matching, and
+          the reduced coverage is reported as signature_covers_params.
             Fail-closed: an agent whose signature could not be verified is
             dropped, including when the key document was unreachable.
         require_signature_algorithm: Restrict require_signed to these JWS
