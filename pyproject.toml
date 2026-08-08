@@ -135,37 +135,16 @@ dev = [
     "pygments>=2.20.0",  # CVE-2026-4539 (low) — ReDoS in GUID regex, via rich/pytest/cel
     "urllib3>=2.7.0",    # CVE-2026-44431 + CVE-2026-44432 (high) — header leak + decompression bomb
 ]
+# `all` is defined by self-reference (PEP 508) rather than by restating every
+# requirement. Restating them is what let it drift: `all` was silently missing
+# requests, the two CEL packages and pqcrypto, so `pip install dns-aid[all]`
+# shipped without the CEL policy engine or PQC/ML-DSA signing. Listing the
+# extras instead means a dependency added to any extra is inherited here
+# automatically, and a version floor is declared in exactly one place.
+# Empty extras are listed deliberately, so they stay covered once they gain
+# dependencies. `test_all_extra_is_complete` guards this invariant.
 all = [
-    # CLI
-    "typer>=0.12.0",
-    "rich>=13.0.0",
-    # MCP
-    "mcp>=1.28.1",
-    "uvicorn>=0.30.0",
-    # Transitive floors via mcp (Dependabot)
-    "pyjwt>=2.13.0",
-    "python-multipart>=0.0.27",
-    # Backends: Route53, Cloudflare, NS1, Cloud DNS, Infoblox BloxOne, NIOS, Akamai EdgeDNS, DDNS
-    "boto3>=1.34.0",
-    "google-auth>=2.30.0",
-    "edgegrid-python>=2.0.7",
-    # JWS
-    "cryptography>=50.0.0",
-    # OpenTelemetry (spec 005 — upper bound pinned per FR-027)
-    "opentelemetry-api>=1.20.0,<2.0.0",
-    "opentelemetry-sdk>=1.20.0,<2.0.0",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0,<2.0.0",
-    # Dev
-    "pytest>=9.0.3",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=4.0.0",
-    "mypy>=1.8.0",
-    "ruff>=0.3.0",
-    "boto3-stubs[route53]>=1.34.0",
-    # Transitive floors (Dependabot)
-    "lxml>=6.1.0",
-    "pygments>=2.20.0",
-    "urllib3>=2.7.0",
+    "dns-aid[cli,mcp,route53,cloudflare,ns1,cloud-dns,infoblox,nios,akamai-edgedns,ddns,jws,sdk,otel,cel,pqc,dev]",
 ]
 
 [project.scripts]

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pip install dns-aid[all]` now installs everything it claims to.** The `all`
+  extra restated every requirement by hand and had drifted out of sync: it was
+  missing `cel-python` and `common-expression-language` (so `[all]` users got no
+  CEL policy engine), `pqcrypto` (no PQC/ML-DSA signing), and `requests`, which
+  arrived only transitively via `edgegrid-python` at an unconstrained version,
+  silently dropping the `>=2.33.0` floor that the `cloud-dns` and
+  `akamai-edgedns` extras declare. `all` is now defined by PEP 508
+  self-reference — `dns-aid[cli,mcp,route53,...]` — so a dependency added to any
+  extra is inherited automatically and each version floor is declared in exactly
+  one place. Every extra is listed, including ones that are currently empty, so
+  they stay covered once they gain dependencies. A new
+  `tests/unit/test_packaging.py` fails if a bare requirement is added back to
+  `all` or if a new extra is not referenced by it.
+  ([#236](https://github.com/dns-aid/dns-aid-core/issues/236))
+
 ## [0.28.0] - 2026-08-08
 
 ### Added
