@@ -116,6 +116,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signature.
 - **DNSSEC chain validation is available** via `dns_aid.core.dnssec_chain`,
   anchored at the IANA root KSK, so a verdict no longer rests on the AD flag.
+- **A2A agent cards at protocol version 0.3 are parsed, not just 0.2.** 0.3
+  restructured the card and a 0.2-only reader dropped all of it into untyped
+  metadata. Now typed: `protocolVersion`, `preferredTransport` and the interface
+  list (so a caller can tell JSONRPC from gRPC), `capabilities`, `signatures`,
+  `iconUrl`, `documentationUrl`, and per-skill `examples` and
+  `securityRequirements`. Authentication is read from the 0.3 `securitySchemes`
+  map in both shapes seen in the wild -- OpenAPI style with a `type`, and the
+  proto-derived style with an `oauth2SecurityScheme`-style key -- so `auth_type`
+  is now populated for cards that carry no legacy `authentication` object. Where
+  a card carries both, the 0.3 map wins. The interface list is read under the 0.3
+  name `additionalInterfaces` and the 1.0 name `supportedInterfaces`, and the
+  extended-card flag is recognised whether it sits at the top level (0.3) or
+  under `capabilities` (1.0), because real cards carry either. 0.2 cards parse
+  exactly as before, and absent 0.3 fields read as absent rather than empty.
 - **`mcp` is bounded below 2.** `mcp>=1.28.1` had no upper bound and resolved to 2.0.0, which
   removed `mcp.server.fastmcp`, so `from mcp.server.fastmcp import FastMCP` failed at import
   and `pip install 'dns-aid[mcp]'` produced a broken MCP server. Present in 0.27.0 as well.
