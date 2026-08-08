@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`requirements.lock`** — deleted, superseding the 0.5.1 entry below that
+  advertised it as "reproducible builds with pinned dependencies". Nothing ever
+  consumed it: the Dockerfile, the Makefile and the CONTRIBUTING dev setup all
+  install from `pyproject.toml`, and CI resolves either from `uv.lock` via
+  `uv sync --frozen` or from the hash-pinned `.github/workflows/requirements-*.txt`.
+  It was not usable as an install spec either — no hashes,
+  an `-e git+https://…#egg=dns_aid` editable line, and the dev toolchain (mypy,
+  ruff, radon, pip-licenses) mixed in with the runtime dependencies — because it
+  was a `pip freeze` of a development virtualenv rather than a resolved lock.
+  With no consumer and nothing regenerating it, it never moved: in six months
+  the only edits rewrote the editable-install URL across two org renames, and
+  six of its pins fell below the CVE floors `pyproject.toml` declares —
+  `mcp==1.26.0` (floor `>=1.28.1`, PYSEC-2026-3483), `PyJWT==2.11.0`
+  (`>=2.13.0`), `python-multipart==0.0.22` (`>=0.0.27`, CVE-2026-42561),
+  `Pygments==2.19.2` (`>=2.20.0`, CVE-2026-4539), `cryptography==46.0.4`
+  (`>=50.0.0`) and `urllib3==2.6.3` (`>=2.7.0`). The file
+  shipped inside the PyPI sdist, so anyone who took the advertisement at face
+  value and ran `pip install -r requirements.lock` got a knowingly vulnerable
+  set that the weekly `pip-audit` — which audits the `uv.lock` environment —
+  never inspected. `uv.lock` remains the maintained lockfile and is the one the
+  OpenSSF evidence table cites for `external_dependencies` and the `build_*`
+  criteria; regenerating a
+  second, hand-tended pin list would have added a competing source of truth that
+  drifts again the moment nobody remembers it. ([#232](https://github.com/dns-aid/dns-aid-core/issues/232))
+
 ## [0.28.0] - 2026-08-08
 
 ### Added
