@@ -134,21 +134,33 @@ async def _validated_dnskey(resolver, zone, ds_rrset):
     if dnskeys is None or rrsig is None:
         raise _IndeterminateError(f"no signed DNSKEY RRset for {zone}")
 
-    matched = False
+    # Collect the keys the parent's DS actually references -- not merely whether
+    # one exists.
+    #
+    # RFC 4035 Section 5.2 requires the DS-referenced key to be the key that
+    # verifies the DNSKEY RRset. Recording a boolean "some key matched" and then
+    # validating against the whole served RRset breaks the chain: a responder can
+    # republish the genuine anchor's PUBLIC key beside its own, sign everything
+    # below with its own key, and the RRset validates under the attacker's key
+    # while the DS check is satisfied by the anchor key it merely copied. No
+    # access to the anchor's private key is needed, and the walk reports SECURE.
+    matched_keys = []
     for key in dnskeys:
         for ds in ds_rrset:
             try:
                 if dns.dnssec.make_ds(zone, key, ds.digest_type) == ds:
-                    matched = True
+                    matched_keys.append(key)
                     break
             except Exception:  # noqa: BLE001 - unsupported digest type
                 continue
-        if matched:
-            break
-    if not matched:
+    if not matched_keys:
         raise _BogusError(f"no DNSKEY in {zone} matches the DS published by its parent")
 
-    dns.dnssec.validate(dnskeys, rrsig, {zone: dnskeys})
+    # Validate the RRset under ONLY those keys. Once its signature verifies, the
+    # whole RRset is authenticated, so the full set is returned for the child's
+    # DS and the final answer -- both are signed by a ZSK inside it.
+    trusted = dns.rrset.from_rdata_list(zone, dnskeys.ttl, matched_keys)
+    dns.dnssec.validate(dnskeys, rrsig, {zone: trusted})
     return dnskeys
 
 
