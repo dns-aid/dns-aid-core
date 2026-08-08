@@ -478,7 +478,7 @@ async def _check_tls(target: str, port: int) -> TLSDetail:
             hsts_host = await _guarded_dial_host(target, port, enforce_ports=False)
             async with httpx.AsyncClient(timeout=5.0, verify=True) as client:
                 response = await client.head(
-                    f"https://{hsts_host}:{port}/",
+                    f"https://{_url_host(hsts_host)}:{port}/",
                     extensions={"sni_hostname": target},
                     headers={"Host": f"{target}:{port}"},
                 )
@@ -548,12 +548,6 @@ async def _check_dane(target: str, port: int, *, verify_cert: bool = False) -> b
         # because the gate was checking trusted.com. The gate has to travel with
         # the data it is authenticating.
         tlsa_authenticated = bool(answers.response.flags & dns.flags.AD)
-        if not tlsa_authenticated:
-            logger.warning(
-                "TLSA RRset is not DNSSEC-authenticated; DANE result is unknown",
-                fqdn=tlsa_fqdn,
-            )
-            return None
 
         # A TLSA RRset may hold several associations and the certificate is
         # valid if it matches ANY of them (RFC 6698; RFC 7671 Section 5.1).
@@ -568,9 +562,39 @@ async def _check_dane(target: str, port: int, *, verify_cert: bool = False) -> b
             return None
 
         if not verify_cert:
-            # Advisory mode: existence is the whole answer, so nothing is dialled.
-            logger.debug("TLSA record found", fqdn=tlsa_fqdn, count=len(associations))
+            # Advisory mode asks "is DANE configured here", not "does this
+            # certificate match", so the AD flag does not gate it. Applying the
+            # authentication gate first collapsed a correctly DANE-configured
+            # host behind a non-validating resolver into the same None as a host
+            # publishing no TLSA at all -- the very ambiguity `dnssec_signed`
+            # was added to eliminate for DNSSEC. Existence is the whole answer,
+            # so nothing is dialled.
+            logger.debug(
+                "TLSA record found",
+                fqdn=tlsa_fqdn,
+                count=len(associations),
+                dnssec_authenticated=tlsa_authenticated,
+            )
             return True
+
+        # From here the answer is a trust decision about a certificate, so the
+        # TLSA RRset ITSELF must be DNSSEC-validated (RFC 6698 Section 4.1 and
+        # Section 10.1). Unauthenticated TLSA data offers no integrity
+        # guarantee, so a match against it proves nothing.
+        #
+        # The gate used to be on the agent's SVCB owner name instead, which is a
+        # different name in a different zone whenever the target is off-zone. A
+        # signed zone pointing at an unsigned CDN -- pay.trusted.com ->
+        # edge.cdn-provider.net -- let anyone who could forge the CDN zone serve
+        # a TLSA pinning their own certificate and collect dane_verified=True,
+        # because the gate was checking trusted.com. The gate has to travel with
+        # the data it is authenticating.
+        if not tlsa_authenticated:
+            logger.warning(
+                "TLSA RRset is not DNSSEC-authenticated; DANE result is unknown",
+                fqdn=tlsa_fqdn,
+            )
+            return None
 
         # Verdict model, written before the code because the previous
         # incremental versions each got a different corner wrong.
@@ -841,6 +865,21 @@ async def _guarded_dial_host(target: str, port: int, *, enforce_ports: bool = Tr
     return pinned or target
 
 
+def _url_host(dial_host: str) -> str:
+    """Bracket a bare IPv6 literal for use in a URL authority (RFC 3986 §3.2.2).
+
+    ``asyncio.open_connection`` wants the bare form and a URL does not, so the
+    two consumers of :func:`_guarded_dial_host` need different spellings.
+    Interpolating an unbracketed ``2606:4700::6810:85e5`` produced
+    ``https://2606:4700::6810:85e5:443/health``, which httpx rejects outright
+    (``InvalidURL: Invalid port``) -- so every probe against an IPv6-only
+    endpoint raised, and `dns-aid verify` reported a healthy agent as
+    unreachable. ``url_safety.safe_fetch_bytes`` already does this; the probes
+    in this module were the two call sites that dropped it.
+    """
+    return f"[{dial_host}]" if ":" in dial_host else dial_host
+
+
 async def _fetch_peer_cert(target: str, port: int, *, pkix: bool) -> bytes:
     """Retrieve the peer certificate once, in DER form.
 
@@ -1020,7 +1059,7 @@ async def _check_endpoint(target: str, port: int) -> dict:
                     # name again here is what let a one-second TTL flip the
                     # destination between the guard and the connection.
                     response = await client.get(
-                        f"https://{dial_host}:{port}{path}",
+                        f"https://{_url_host(dial_host)}:{port}{path}",
                         extensions={"sni_hostname": target},
                         headers={"Host": f"{target}:{port}"},
                     )

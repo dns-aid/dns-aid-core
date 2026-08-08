@@ -65,6 +65,22 @@ class A2AInterface:
         )
 
 
+def _security_requirements(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read a SecurityRequirement list, accepting either spelling.
+
+    The A2A schema calls this `security`; `securityRequirements` appears in
+    earlier drafts and in cards generated against them. Reading only one meant
+    a card declaring its required scopes parsed as declaring none.
+    """
+    for key in ("security", "securityRequirements"):
+        raw = data.get(key)
+        if isinstance(raw, list):
+            requirements = [r for r in raw if isinstance(r, dict)]
+            if requirements:
+                return requirements
+    return []
+
+
 @dataclass
 class A2ASkill:
     """A single skill/capability the agent can perform."""
@@ -92,9 +108,10 @@ class A2ASkill:
             output_modes=data.get("outputModes", ["text"]),
             tags=data.get("tags", []),
             examples=[e for e in data.get("examples", []) if isinstance(e, str)],
-            security_requirements=[
-                r for r in data.get("securityRequirements", []) if isinstance(r, dict)
-            ],
+            # The schema spells the skill-level field `security`; only this
+            # reader used `securityRequirements`, so the list was empty for
+            # every real card. Both are read, newer spelling first.
+            security_requirements=_security_requirements(data),
         )
 
 
@@ -191,6 +208,14 @@ class A2AAgentCard:
     capabilities: dict[str, Any] = field(default_factory=dict)
     #: Card-level JWS signatures (0.3 section 5.5.6). Carried, not verified here.
     signatures: list[dict[str, Any]] = field(default_factory=list)
+    #: Card-level SecurityRequirement list: which of `securitySchemes` a caller
+    #: must satisfy, and with which scopes. `securitySchemes` says what auth
+    #: mechanisms EXIST; this says which are REQUIRED, so a consumer gating an
+    #: invocation on declared scopes needs it. Both keys were added to
+    #: `known_keys` without a field to land in, so they were filtered out of
+    #: `metadata` and dropped entirely -- where before they at least survived as
+    #: raw metadata.
+    security_requirements: list[dict[str, Any]] = field(default_factory=list)
     #: Whether an authenticated client can fetch a richer card. Top-level in
     #: 0.3, moved under capabilities in 1.0; either spelling sets this.
     supports_extended_card: bool = False
@@ -228,9 +253,16 @@ class A2AAgentCard:
             auth = A2AAuthentication.from_security_schemes(schemes)
         if (auth is None or not auth.schemes) and isinstance(data.get("authentication"), dict):
             legacy = A2AAuthentication.from_dict(data["authentication"])
-            # Keep a credentials URL the 0.3 map did not carry.
-            if auth is not None and auth.credentials is None:
-                legacy.schemes = auth.schemes or legacy.schemes
+            if auth is not None:
+                # Merge, don't replace. The 0.3 map can yield a credentials URL
+                # (a scheme's tokenUrl) with no scheme names, and the 0.2 object
+                # the reverse, so taking either wholesale drops whichever half
+                # the other side held. The old guard read
+                # `auth.credentials is None`, which skipped the merge in exactly
+                # the case it was written to preserve -- a 0.3-derived
+                # credentials URL -- and threw the token URL away.
+                legacy.schemes = legacy.schemes or auth.schemes
+                legacy.credentials = legacy.credentials or auth.credentials
             auth = legacy
 
         # `additionalInterfaces` is the 0.3 name; `supportedInterfaces` is 1.0.
@@ -295,6 +327,7 @@ class A2AAgentCard:
             interfaces=interfaces,
             capabilities=caps,
             signatures=[s for s in data.get("signatures", []) if isinstance(s, dict)],
+            security_requirements=_security_requirements(data),
             supports_extended_card=extended,
             icon_url=data.get("iconUrl"),
             documentation_url=data.get("documentationUrl"),

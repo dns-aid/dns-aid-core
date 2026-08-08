@@ -2061,13 +2061,13 @@ async def _verify_agent_signatures(
     """
     agents_with_sig = [a for a in agents if a.sig]
 
-    from dns_aid.core.jwks import SignatureStatus as _Status
+    from dns_aid.core.jwks import SignatureStatus, verify_record_signature_detailed
 
     for _a in agents:
         if _a.signature_status is not None:
             continue
         if _a.sig is None:
-            _a.signature_status = str(_Status.NOT_SIGNED)
+            _a.signature_status = str(SignatureStatus.NOT_SIGNED)
 
     if not agents_with_sig:
         logger.debug("No agents with JWS signatures to verify")
@@ -2078,8 +2078,6 @@ async def _verify_agent_signatures(
         agents_count=len(agents_with_sig),
         domain=domain,
     )
-
-    from dns_aid.core.jwks import SignatureStatus, verify_record_signature_detailed
 
     async def _verify_one(agent: AgentRecord) -> None:
         if agent.sig is None:

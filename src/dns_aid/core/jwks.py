@@ -31,6 +31,7 @@ import json
 import threading
 import time
 import warnings
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -44,6 +45,8 @@ from cryptography.hazmat.primitives.asymmetric.ec import (
     EllipticCurvePrivateKey,
     EllipticCurvePublicKey,
 )
+
+from dns_aid.core.sig_validity import DEFAULT_SIG_VALIDITY_SECONDS
 
 logger = structlog.get_logger(__name__)
 
@@ -110,7 +113,7 @@ class SignatureStatus(StrEnum):
     # chooses which genuine signature to replay, so they choose one without the
     # svcb claim; reporting that as plain "verified" is a false statement about
     # what was proven, whatever require_signed_params is set to.
-    VERIFIED_ENDPOINT_ONLY = "verified_endpoint_only"  # signature valid AND bound to this record
+    VERIFIED_ENDPOINT_ONLY = "verified_endpoint_only"  # valid, but only the endpoint is attested
     INVALID = "invalid"  # a key was retrieved; the signature did not verify
     UNBOUND = "unbound"  # signature valid but describes a different record
     EXPIRED = "expired"  # signature lapsed; re-publish
@@ -120,7 +123,7 @@ class SignatureStatus(StrEnum):
     # budget ran out first. Distinct from NOT_SIGNED (no signature) and from an
     # unset status (never in scope), because a caller that asked for
     # verification and silently received nothing cannot tell the difference.
-    NOT_CHECKED = "not_checked"  # record carries no sig parameter
+    NOT_CHECKED = "not_checked"  # asked for, but the verification budget ran out
     # RETAINED FOR WIRE COMPATIBILITY, NO LONGER PRODUCED. Verification used to
     # be skipped for a DNSSEC-validated record and labelled with this. The skip
     # rested on the AD flag with no chain validation, so it is gone and the
@@ -190,7 +193,44 @@ _jwks_negative: dict[str, float] = {}
 # once; they all missed the cache, all missed the negative cache, and all
 # fetched, so "one fetch per zone, not one per agent" was false for the batch
 # and the negative cache could not help -- nothing had been written yet.
-_jwks_inflight: dict[str, asyncio.Lock] = {}
+#
+# Keyed by event loop, weakly, because an asyncio.Lock binds itself to the loop
+# that first CONTENDS on it and refuses to be awaited from any other. The MCP
+# server runs every tool call under its own asyncio.run(), so a module-level
+# dict of bare locks handed loop B a lock owned by loop A and raised
+# "bound to a different event loop" on the second contended fetch for a zone --
+# which _verify_one swallows as signature_status='no_key', silently reporting
+# every agent in the zone unverified from then on. The bug hid from the tests
+# because an UNCONTENDED acquire() takes a fast path that never touches the
+# loop; only the second concurrent waiter does. A finished loop is collected
+# and takes its locks with it.
+_jwks_inflight: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _inflight_lock(key: str) -> asyncio.Lock:
+    """The single-flight lock for one zone, bound to the running loop."""
+    loop = asyncio.get_running_loop()
+    per_loop = _jwks_inflight.get(loop)
+    if per_loop is None:
+        per_loop = {}
+        _jwks_inflight[loop] = per_loop
+
+    lock = per_loop.get(key)
+    if lock is None:
+        # Bound growth, but never evict a lock that is currently HELD: the next
+        # arrival for that zone would call setdefault, get a fresh lock, and
+        # fetch the same JWKS concurrently with the holder -- losing exactly the
+        # one-fetch-per-zone property this dict exists to provide. Insertion
+        # order makes this FIFO over the evictable entries.
+        if len(per_loop) >= _JWKS_CACHE_MAX:
+            for stale in [k for k, held in per_loop.items() if not held.locked()]:
+                del per_loop[stale]
+                if len(per_loop) < _JWKS_CACHE_MAX:
+                    break
+        lock = per_loop.setdefault(key, asyncio.Lock())
+    return lock
 
 
 # 90 days. The one default for signature validity, defined here beside the payload
@@ -264,11 +304,23 @@ def svcb_digest(params: Mapping[str, str | None]) -> str:
 
 
 def params_from_record(record: Any) -> dict[str, str | None]:
-    """Read the covered SvcParams back off a discovered record."""
-    return {name: getattr(record, field, None) for name, field in SIGNED_PARAM_FIELDS.items()}
+    """Read the covered SvcParams back off a record, as the wire will carry them.
 
-
-DEFAULT_SIG_VALIDITY_SECONDS = 7_776_000
+    Empty collapses to absent because ``SvcbRecord.to_params()`` tests each
+    optional param for truthiness and so cannot emit one: a publisher passing
+    ``realm=""`` signed a digest over ``{"realm": ""}`` and then published a
+    record carrying no realm at all, which the verifier read back as absent.
+    The signature was over something the wire could not represent, so the
+    publisher's own record verified as ``unbound``. Normalising here keeps the
+    two sides reading the same value, and costs nothing that is reachable:
+    ``svcb_digest`` still separates empty from absent for any caller that can
+    actually express the difference.
+    """
+    params: dict[str, str | None] = {}
+    for name, field in SIGNED_PARAM_FIELDS.items():
+        value = getattr(record, field, None)
+        params[name] = value if value else None
+    return params
 
 
 @dataclass
@@ -734,12 +786,7 @@ async def fetch_jwks(domain: str) -> dict[str, Any] | None:
         _jwks_cache.pop(_cache_key(domain), None)  # expired — drop it
 
     key = _cache_key(domain)
-    lock = _jwks_inflight.get(key)
-    if lock is None:
-        while len(_jwks_inflight) >= _JWKS_CACHE_MAX:
-            _jwks_inflight.pop(next(iter(_jwks_inflight)), None)
-        lock = _jwks_inflight.setdefault(key, asyncio.Lock())
-    async with lock:
+    async with _inflight_lock(key):
         # Re-read under the lock: a concurrent caller may have filled either
         # cache while this one waited.
         cached = _jwks_cache.get(key)

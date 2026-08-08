@@ -187,6 +187,16 @@ def publish(
             "before this elapses or the signature verifies as expired.",
         ),
     ] = None,
+    sig_kid: Annotated[
+        str | None,
+        typer.Option(
+            "--sig-kid",
+            help="Key identifier to publish in the JWS header, naming which key in your "
+            "JWKS signed this record. Required for an overlapping key rollover: without "
+            "it a verifier tries every key in the document and cannot tell the outgoing "
+            "key from the incoming one. Must match a 'kid' in your published JWKS.",
+        ),
+    ] = None,
     allow_underscore_target: Annotated[
         bool,
         typer.Option(
@@ -271,6 +281,10 @@ def publish(
             )
             raise typer.Exit(1)
 
+    if sig_kid is not None and not sign:
+        error_console.print("[red]✗ --sig-kid requires --sign[/red]")
+        raise typer.Exit(1)
+
     if sign and private_key:
         import os
         from pathlib import Path
@@ -313,6 +327,7 @@ def publish(
             sign=sign,
             private_key_path=private_key,
             **({"sig_validity_seconds": sig_validity} if sig_validity is not None else {}),
+            sig_kid=sig_kid,
             allow_underscore_target=allow_underscore_target,
             publish_walkable_alias=walkable,
         )
@@ -581,7 +596,13 @@ def discover(
                             require_dnssec=require_dnssec,
                             min_dnssec=min_dnssec,
                             verify_dane=verify_dane,
-                            verify_signatures=verify_signatures,
+                            # discover() turns require_signed into
+                            # verify_signatures internally, so the effective
+                            # value is what decides whether the check ran.
+                            # Passing the caller's meant `--require-signed`
+                            # alone performed a DNSSEC lookup per agent and then
+                            # suppressed the verdict it produced.
+                            verify_signatures=verify_signatures or require_signed,
                         )
                         else {}
                     ),
@@ -680,7 +701,7 @@ def discover(
         require_dnssec=require_dnssec,
         min_dnssec=min_dnssec,
         verify_dane=verify_dane,
-        verify_signatures=verify_signatures,
+        verify_signatures=verify_signatures or require_signed,
     )
     if show_dnssec:
         table.add_column("DNSSEC")
@@ -1857,7 +1878,7 @@ def keys_generate(
 
     console.print("\n[dim]Next steps:[/dim]")
     console.print("  1. Export JWKS: dns-aid keys export-jwks -i public.pem")
-    console.print("  2. Publish JWKS to: https://yourdomain/.well-known/dns-aid-jwks.json")
+    console.print("  2. Publish JWKS to: https://dns-aid.yourdomain/.well-known/dns-aid-jwks.json")
     console.print("  3. Sign agents: dns-aid publish --sign --private-key private.pem ...")
 
 
@@ -1880,7 +1901,10 @@ def keys_export_jwks(
     Export a public key as a JWKS document.
 
     The JWKS document should be published at:
-    https://yourdomain/.well-known/dns-aid-jwks.json
+    https://dns-aid.yourdomain/.well-known/dns-aid-jwks.json
+
+    Verifiers try that host first. The zone apex still works but is deprecated
+    and costs a failed lookup on every verification.
 
     Example:
         # Export to stdout
@@ -1941,7 +1965,11 @@ def keys_export_jwks(
         console.print(jwks_json)
 
     console.print("\n[dim]Publish this file at:[/dim]")
-    console.print("  https://yourdomain/.well-known/dns-aid-jwks.json")
+    console.print("  https://dns-aid.yourdomain/.well-known/dns-aid-jwks.json")
+    console.print(
+        "[dim]  (the zone apex still verifies but is deprecated — it costs a "
+        "failed lookup per verification)[/dim]"
+    )
 
 
 # ============================================================================

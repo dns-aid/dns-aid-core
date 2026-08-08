@@ -15,6 +15,16 @@ import structlog
 from dns_aid.backends import VALID_BACKEND_NAMES, create_backend
 from dns_aid.backends.base import DNSBackend
 from dns_aid.core.models import AgentRecord, Protocol, PublishResult
+
+# Signature validity lives in a leaf module so importing the publish path does
+# not drag in `cryptography` (which jwks imports at module scope) just to read
+# three integers. Re-exported here because callers already import them from
+# publisher, and because the payload and the publisher must not disagree.
+from dns_aid.core.sig_validity import (
+    DEFAULT_SIG_VALIDITY_SECONDS,
+    MAX_SIG_VALIDITY_SECONDS,
+    MIN_SIG_VALIDITY_SECONDS,
+)
 from dns_aid.utils.validation import (
     _underscore_bypass_env_enabled,
     validate_agent_name,
@@ -70,25 +80,6 @@ def get_default_backend() -> DNSBackend:
     return _default_backend
 
 
-# How long a JWS record signature asserts the binding it covers, in seconds.
-#
-# This is deliberately NOT the DNS record TTL. The TTL states how long a
-# resolver may cache the answer and is tuned for propagation speed; the JWS
-# `exp` states how long the assertion holds and is tuned for re-signing
-# cadence. Deriving one from the other made every signature expire at the
-# cache-refresh interval -- a 3600s TTL produced a signature that was dead an
-# hour after publication while the record itself stayed in DNS for months, and
-# the more aggressively an operator tuned the TTL the faster their signatures
-# broke.
-#
-# 90 days matches the ACME renewal rhythm deployments already automate.
-# Re-exported from jwks so the payload and the publisher cannot disagree.
-from dns_aid.core.jwks import DEFAULT_SIG_VALIDITY_SECONDS  # noqa: E402
-
-MIN_SIG_VALIDITY_SECONDS = 3_600  # 1 hour
-MAX_SIG_VALIDITY_SECONDS = 34_128_000  # ~13 months, the maximum certificate lifetime
-
-
 async def publish(
     name: str,
     domain: str,
@@ -116,6 +107,7 @@ async def publish(
     sign: bool = False,
     private_key_path: str | None = None,
     sig_validity_seconds: int = DEFAULT_SIG_VALIDITY_SECONDS,
+    sig_kid: str | None = None,
     allow_underscore_target: bool = False,
     publish_walkable_alias: bool = False,
 ) -> PublishResult:
@@ -143,6 +135,14 @@ async def publish(
             seconds (default 90 days, bounds 1 hour to ~13 months). Only used
             when sign=True. Re-publish before this elapses; a lapsed signature
             verifies as expired.
+        sig_kid: Key identifier published in the JWS protected header, naming
+            which key in the zone's JWKS produced this signature. Only used when
+            sign=True. Required for an overlapping key rollover: without it a
+            verifier must try every key in the document, so the outgoing and
+            incoming keys cannot be told apart and no signature can be
+            attributed to a signer. Omitted from the header when None, which
+            keeps signatures byte-identical to those published before this
+            existed.
         backend: DNS backend to use (defaults to global backend)
         cap_uri: URI, URN, or compact JSON-Ref locator for the capability
             descriptor (DNS-AID draft-02 'cap' SvcParamKey)
@@ -244,17 +244,13 @@ async def publish(
     if well_known_path is not None:
         well_known_path = validate_well_known_path(well_known_path)
 
-    # Generate JWS signature if requested
-    sig = None
+    # Validate and load the signing material BEFORE the record is built, so an
+    # unusable key or an out-of-range validity fails before anything else runs.
+    # The signing itself happens after the record exists — see below.
+    private_key = None
     if sign:
         if not private_key_path:
             raise ValueError("private_key_path is required when sign=True")
-
-        from dns_aid.core.jwks import (
-            RecordPayload,
-            load_private_key_from_pem,
-            sign_record,
-        )
 
         if not (MIN_SIG_VALIDITY_SECONDS <= sig_validity_seconds <= MAX_SIG_VALIDITY_SECONDS):
             raise ValueError(
@@ -262,42 +258,15 @@ async def publish(
                 f"{MAX_SIG_VALIDITY_SECONDS}, got {sig_validity_seconds}"
             )
 
+        from dns_aid.core.jwks import load_private_key_from_pem
+
         logger.info(
             "Signing record with JWS",
             private_key_path=private_key_path,
             sig_validity_seconds=sig_validity_seconds,
+            sig_kid=sig_kid,
         )
         private_key = load_private_key_from_pem(private_key_path)
-        # JWS payload binds to the flat draft-02 FQDN ({name}.{domain}).
-        # Verifiers reconstruct the same FQDN before validating the signature.
-        fqdn = f"{name}.{domain}"
-        # Signature validity is independent of `ttl`: the DNS TTL governs
-        # caching, not how long the signed assertion is true. See
-        # DEFAULT_SIG_VALIDITY_SECONDS.
-        payload = RecordPayload.from_agent_record(
-            fqdn=fqdn,
-            target=endpoint,
-            port=port,
-            protocol=protocol.value,
-            validity_seconds=sig_validity_seconds,
-            # Cover every DNS-AID SvcParam, not just the endpoint tuple. Binding
-            # only fqdn/target/port/alpn let a genuine signature be replayed onto
-            # a record whose cap and cap-sha256 had been swapped for an
-            # attacker's document, and still report verified.
-            params={
-                "cap": cap_uri,
-                "cap-sha256": cap_sha256,
-                "bap": bap,
-                "policy": policy_uri,
-                "realm": realm,
-                "connect-class": connect_class,
-                "connect-meta": connect_meta,
-                "enroll-uri": enroll_uri,
-                "well-known": well_known_path,
-            },
-        )
-        sig = sign_record(payload, private_key)
-        logger.info("Record signed successfully", fqdn=fqdn)
 
     # Create agent record
     agent = AgentRecord(
@@ -323,9 +292,39 @@ async def publish(
         enroll_uri=enroll_uri,
         ipv4_hint=ipv4_hint,
         ipv6_hint=ipv6_hint,
-        sig=sig,
         publish_walkable_alias=publish_walkable_alias,
     )
+
+    if private_key is not None:
+        from dns_aid.core.jwks import RecordPayload, params_from_record, sign_record
+
+        # Sign the record that will actually be published, NOT the arguments it
+        # was built from. The model normalises several of these fields on the
+        # way in -- connect_class is lower-cased, target_host loses a trailing
+        # dot -- so signing the raw kwargs signed one value and published
+        # another. The digests differed, payload_matches went False, and the
+        # publisher's own genuine record verified as `unbound`: the status
+        # documented to consumers as a lifted signature pasted onto a spoofed
+        # record. params_from_record is the same reader the verifier uses, so
+        # the two sides cannot drift again.
+        #
+        # The payload binds to the flat draft-02 FQDN ({name}.{domain}), which
+        # verifiers reconstruct before validating. Validity is independent of
+        # `ttl`: the DNS TTL governs caching, not how long the assertion holds.
+        payload = RecordPayload.from_agent_record(
+            fqdn=agent.fqdn,
+            target=agent.target_host,
+            port=agent.port,
+            protocol=agent.protocol.value,
+            validity_seconds=sig_validity_seconds,
+            # Cover every DNS-AID SvcParam, not just the endpoint tuple. Binding
+            # only fqdn/target/port/alpn let a genuine signature be replayed onto
+            # a record whose cap and cap-sha256 had been swapped for an
+            # attacker's document, and still report verified.
+            params=params_from_record(agent),
+        )
+        agent = agent.model_copy(update={"sig": sign_record(payload, private_key, kid=sig_kid)})
+        logger.info("Record signed successfully", fqdn=agent.fqdn, sig_kid=sig_kid)
 
     # Get backend
     dns_backend = backend or get_default_backend()

@@ -621,7 +621,11 @@ def discover_agents_via_dns(
         text_match: Free-text filter across agent name and description.
         verify_signatures: Verify JWS record signatures and report the outcome
             WITHOUT filtering on it. Use this to see signature_status and decide
-            for yourself. Skipped for agents already authenticated by DNSSEC.
+            for yourself. Performed for every signed record, including ones
+            already authenticated by DNSSEC — a DNSSEC-validated record can
+            still carry an invalid or unbound signature, and that is worth
+            knowing. Costs one DNSSEC lookup per agent plus a JWKS fetch
+            per zone.
         require_signed: Keep only agents whose record authentication succeeded.
         require_signed_params: Also require the signature to cover the DNS-AID
           parameters (cap, cap-sha256, policy, realm, well-known) and not only
@@ -819,7 +823,13 @@ def discover_agents_via_dns(
                             require_dnssec=require_dnssec,
                             min_dnssec=min_dnssec,
                             verify_dane=verify_dane,
-                            verify_signatures=verify_signatures,
+                            # discover() turns require_signed into
+                            # verify_signatures internally, so the effective
+                            # value is what decides whether the check ran.
+                            # Passing the caller's meant require_signed alone
+                            # performed a DNSSEC lookup per agent and then
+                            # suppressed the verdict it produced.
+                            verify_signatures=verify_signatures or require_signed,
                         )
                         else {}
                     ),

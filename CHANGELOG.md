@@ -150,8 +150,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounded and self-healing. The refetch bypasses the cache rather than evicting it, so one
   unmatched `kid` no longer degrades concurrent lookups for the same domain. Signatures published without a
   `kid` still verify against the whole key set, and the header is byte-identical to before
-  when no `kid` is supplied.
+  when no `kid` is supplied. A `kid` is reachable from the publishing side via
+  `publish(sig_kid=...)` and `dns-aid publish --sig-kid`; without those nothing this project
+  emitted could carry one, so the selection and refresh machinery was unreachable end to end
+  and a staged rollover was not actually achievable.
 
+- **Signature validity constants moved to `dns_aid.core.sig_validity`.** The default lived
+  in `jwks` and the bounds in `publisher`, so `publisher` imported `jwks` at module scope to
+  re-export one integer — pulling the whole `cryptography` backend into every import of the
+  publish path, including CLI startup and MCP server boot, whether or not anything would be
+  signed. Both modules re-export the names, so existing imports are unaffected.
 
 - **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
   against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
@@ -176,6 +184,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`publish(sign=True)` signs the record as published, not the arguments it was built
+  from.** `AgentRecord` normalises several fields on the way in — `connect_class` is
+  lower-cased, `target_host` loses a trailing dot — so signing the raw keyword arguments
+  signed one value and published another. The `svcb` digests differed, `payload_matches`
+  went False, and a publisher's own genuine record verified as `unbound`: the status
+  documented to consumers as a lifted signature pasted onto a spoofed record. Publishing
+  `connect_class="Direct"` was enough to trigger it. The payload now reads the constructed
+  record through `params_from_record` — the same reader the verifier uses — so the two
+  sides cannot drift again. An empty parameter also signs as absent, because
+  `SvcbRecord.to_params()` tests for truthiness and so cannot put one on the wire.
+- **The per-zone JWKS lock is no longer shared across event loops.** An `asyncio.Lock`
+  binds to the loop that first contends on it and refuses to be awaited from any other,
+  and the MCP server runs every tool call under its own `asyncio.run()`. The second
+  contended fetch for a zone raised `RuntimeError: bound to a different event loop`, which
+  `_verify_one` recorded as `signature_status='no_key'` — so every agent in that zone
+  silently reported unverified and `require_signed=True` returned nothing from then on.
+  The locks are now keyed by running loop, weakly, so a finished loop takes its locks with
+  it. A held lock is also never evicted, which previously let two coroutines fetch the same
+  document concurrently.
+- **`--require-signed` no longer suppresses the DNSSEC verdict it computed.** `discover()`
+  turns `require_signed` into `verify_signatures` internally, so the check runs; the CLI
+  and MCP reporting surfaces evaluated the gate with the caller's value instead of the
+  effective one and omitted `dnssec_validated` from JSON while hiding the table column.
+  A check that ran and produced an answer was reported as "not checked".
+- **DANE advisory mode no longer requires a validating resolver.** The AD-flag gate on the
+  TLSA RRset was applied before the advisory branch, so a correctly DANE-configured host
+  behind a non-validating resolver reported the same `None` as a host publishing no TLSA
+  at all. Advisory mode answers "is DANE configured", not "does this certificate match",
+  so the gate now sits on the certificate-matching path where the trust decision is made.
+- **IPv6 literals are bracketed before going into a probe URL.** `_check_endpoint` and the
+  HSTS probe interpolated a bare vetted address, producing
+  `https://2606:4700::6810:85e5:443/health`, which httpx rejects — so `dns-aid verify`
+  reported every healthy IPv6-only agent as unreachable.
+- **A2A card `security` requirements survive parsing again.** `security` and
+  `securityRequirements` were added to `known_keys` without a field to land in, so they
+  were filtered out of `metadata` and dropped entirely, where previously they survived as
+  raw metadata. Both spellings are now parsed into `A2AAgentCard.security_requirements`,
+  and `A2ASkill` reads the schema's `security` spelling rather than only the draft's. The
+  0.2/0.3 authentication merge also keeps a credentials URL derived from `securitySchemes`
+  instead of discarding it — the guard skipped the merge in exactly the case it was
+  written to preserve.
 - **The `sig` SvcParam (`key65405`) is now read off DNS records.** It was parsed out of
   the SVCB correctly and then discarded: the extraction below the parser handled nine of
   the ten keys in `DNS_AID_KEY_MAP` and omitted `sig`, so `AgentRecord.sig` was always
