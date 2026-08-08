@@ -111,6 +111,12 @@ MAX_CONCURRENT_DANE = 8
 MAX_CONCURRENT_SIG_VERIFY = 16
 SIG_VERIFY_BUDGET_SECONDS = 45.0
 DANE_TOTAL_BUDGET_SECONDS = 60.0
+# The chain walk is bounded the same way, and needs it more than either: one
+# walk is a DNSKEY and a DS lookup per zone cut, up to MAX_CHAIN_LABELS deep,
+# so an unbounded gather over a zone with many agents is a query storm aimed at
+# the resolver -- and at the root and TLD servers behind it.
+MAX_CONCURRENT_CHAIN = 8
+CHAIN_TOTAL_BUDGET_SECONDS = 60.0
 
 
 def _dnssec_check_runs(
@@ -220,12 +226,46 @@ async def _apply_post_discovery(
     # label, and turning it on unannounced would change both the latency and
     # the result set of every existing caller.
     if require_secure_chain and dnssec_scope:
-        from dns_aid.core.dnssec_chain import ChainStatus, validate_chain
+        from dns_aid.core.dnssec_chain import ChainResult, ChainStatus, validate_chain
 
-        chains = await asyncio.gather(
-            *[validate_chain(a.fqdn, "SVCB") for a in dnssec_scope],
-            return_exceptions=True,
-        )
+        sem = asyncio.Semaphore(MAX_CONCURRENT_CHAIN)
+
+        async def _walk(fqdn: str) -> ChainResult:
+            async with sem:
+                return await validate_chain(fqdn, "SVCB")
+
+        tasks = [asyncio.ensure_future(_walk(a.fqdn)) for a in dnssec_scope]
+        try:
+            done, pending = await asyncio.wait(tasks, timeout=CHAIN_TOTAL_BUDGET_SECONDS)
+        except BaseException:
+            # Cancelling discover() out from under us must not leave the walks
+            # running with nobody holding them.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            logger.warning(
+                "DNSSEC chain budget exhausted; remaining names left unproved",
+                unproved=len(pending),
+                budget_seconds=CHAIN_TOTAL_BUDGET_SECONDS,
+            )
+
+        # A cancelled or failed walk yields no proof, and no proof fails closed.
+        # Reading a timeout as "fine" would hand an attacker a way to pass the
+        # gate by being slow.
+        chains: list[ChainResult | BaseException] = []
+        for task in tasks:
+            if task in done and not task.cancelled():
+                exc = task.exception()
+                chains.append(exc if exc is not None else task.result())
+            else:
+                chains.append(TimeoutError("chain walk exceeded the budget"))
+
         for agent, chain in zip(dnssec_scope, chains, strict=True):
             if isinstance(chain, BaseException):
                 agent.dnssec_chain_status = str(ChainStatus.INDETERMINATE)
