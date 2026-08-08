@@ -1107,7 +1107,7 @@ class TestEnrichFromHttpIndex:
         )
         _enrich_from_http_index(agent, http_agent)
         assert agent.endpoint_override == "https://chat.example.com/mcp"
-        assert agent.endpoint_source == "http_index"
+        assert agent.endpoint_source == "dns_svcb_enriched"
 
     def test_does_not_override_existing_endpoint(self):
         from dns_aid.core.models import AgentRecord, Protocol

@@ -1419,7 +1419,14 @@ def _enrich_from_http_index(agent: AgentRecord, http_agent: HttpIndexAgent) -> N
         parsed = urlparse(http_agent.endpoint)
         if parsed.path and parsed.path != "/":
             agent.endpoint_override = http_agent.endpoint
-            agent.endpoint_source = "http_index"
+            # `dns_svcb_enriched`, NOT `http_index`. This record came from a real
+            # SVCB answer and only its endpoint path was enriched from the index.
+            # Labelling it as a catalog source removed it from dnssec_scope, and
+            # because `all({}.values())` is True that made require_dnssec pass
+            # with zero DNSSEC queries -- and min_dnssec, require_secure_chain and
+            # the DANE gate all read the same field. One relabel silently voided
+            # four guarantees on a genuine DNS record.
+            agent.endpoint_source = "dns_svcb_enriched"
             logger.debug(
                 "Merged HTTP index endpoint path",
                 agent=agent.name,

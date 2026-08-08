@@ -841,3 +841,63 @@ class TestDaneLive:
         """Placeholder: discover a live all-ARD catalog with require_dnssec=True and
         assert it returns the ARD agents without raising DNSSECError."""
         pytest.skip("live ARD catalog required")
+
+
+class TestEnrichmentDoesNotVoidDnssec:
+    """A DNS record enriched from an HTTP index is still a DNS record.
+
+    `_enrich_from_http_index` relabelled `endpoint_source` to `http_index` when
+    the index supplied an endpoint with a path. That value is in
+    CATALOG_ENDPOINT_SOURCES, which is the exemption list for DNSSEC -- so a
+    genuine SVCB record dropped out of `dnssec_scope`. Because `all({}.values())`
+    is True, `require_dnssec=True` was then satisfied with zero DNSSEC queries,
+    and `min_dnssec`, `require_secure_chain` and the DANE gate all read the same
+    field. One relabel silently voided four guarantees.
+
+    The correct label already existed: `dns_svcb_enriched` records both facts --
+    it came from DNS, and its endpoint was enriched -- and is not exempt.
+    """
+
+    def test_the_enriched_label_is_not_dnssec_exempt(self):
+        from dns_aid.core.models import CATALOG_ENDPOINT_SOURCES
+
+        assert "dns_svcb_enriched" not in CATALOG_ENDPOINT_SOURCES
+        assert "http_index" in CATALOG_ENDPOINT_SOURCES, "the exemption list itself is unchanged"
+
+    async def test_enrichment_keeps_the_record_in_dnssec_scope(self):
+        from dns_aid.core.discoverer import _enrich_from_http_index
+        from dns_aid.core.http_index import HttpIndexAgent
+
+        agent = _dns_agent("chat", validated=False)
+        agent.endpoint_source = "dns_svcb"
+        index_entry = HttpIndexAgent(
+            name="chat",
+            fqdn="chat.example.com",
+            endpoint="https://edge.example.com/mcp/v1",
+        )
+
+        _enrich_from_http_index(agent, index_entry)
+
+        assert agent.endpoint_override == "https://edge.example.com/mcp/v1"
+        assert agent.endpoint_source == "dns_svcb_enriched", (
+            "relabelling to a catalog source removes the record from dnssec_scope"
+        )
+
+    async def test_require_dnssec_still_raises_for_an_enriched_record(self):
+        """The end state that matters: the guarantee survives enrichment."""
+        from dns_aid.core.discoverer import _apply_post_discovery
+        from dns_aid.core.models import DNSSECError
+
+        agent = _dns_agent("chat", validated=False)
+        agent.endpoint_source = "dns_svcb_enriched"
+        calls = []
+
+        async def counted(fqdn):
+            calls.append(fqdn)
+            return (False, False)
+
+        with patch("dns_aid.core.validator._check_dnssec_with_evidence", counted):
+            with pytest.raises(DNSSECError):
+                await _apply_post_discovery([agent], True, False, False, "example.com")
+
+        assert calls, "a DNSSEC query must actually be issued for an enriched DNS record"
