@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-08
+
 ### Added
 
 - **`AgentRecord.signature_status`** reports why verification reached its answer:
@@ -2570,7 +2572,8 @@ Explicit version floors added to our `pyproject.toml` because upstream parents (
 - [RFC 9460 - SVCB and HTTPS Resource Records](https://www.rfc-editor.org/rfc/rfc9460.html)
 - [RFC 4033-4035 - DNSSEC](https://www.rfc-editor.org/rfc/rfc4033.html)
 
-[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.4...HEAD
+[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.27.0...v0.28.0
 [0.24.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.3...v0.24.4
 [0.24.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.2...v0.24.3
 [0.24.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.1...v0.24.2
