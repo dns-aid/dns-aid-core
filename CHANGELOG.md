@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `mcp` dependency is capped below `2.0.0`, fixing an immediate startup crash on
+  fresh installs.** `mcp` 2.0.0 removed `mcp.server.fastmcp` (`FastMCP` moved to
+  `mcp.server.mcpserver.MCPServer`), so any install resolving the previously unbounded
+  `mcp>=1.28.1` to 2.x died at import time with
+  `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` — before `main()` ran, for
+  both the `dns-aid-mcp` entrypoint and `python -m dns_aid.mcp.server`. The Docker image
+  resolves dependencies at build time without a lockfile, so it surfaced there as a
+  container that started and immediately exited. Both the `mcp` and `all` extras now
+  require `mcp>=1.28.1,<2.0.0`. The ceiling will be raised once `dns_aid/mcp/server.py`
+  and `dns_aid/sdk/protocols/mcp.py` are migrated to the 2.x API.
 - **Cloudflare TXT records now write each value as its own RFC 1035 `<character-string>`**
   (quoted, with escaping) instead of space-joining all values into a single string.
   The discoverer iterates character-strings individually, so the previous join
