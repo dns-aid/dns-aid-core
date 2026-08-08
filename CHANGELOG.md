@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The MCP server now runs on both mcp 1.x and 2.x.** `mcp` 2.0.0 removed
+  `mcp.server.fastmcp` outright (`FastMCP` became
+  `mcp.server.mcpserver.MCPServer`), and `dns_aid/mcp/server.py` imported it
+  unguarded — so an install that resolved mcp 2.x died at import, before
+  `main()` ran, for both the `dns-aid-mcp` entrypoint and
+  `python -m dns_aid.mcp.server`. The import now falls back to `MCPServer`, and
+  because 2.x moved the streamable-HTTP options (`json_response`, `host`,
+  `port`, `stateless_http`, …) off the constructor and onto
+  `streamable_http_app()`, the server passes them to whichever the installed
+  major expects. If neither import succeeds the error names the extra *and* the
+  supported version range instead of raising a bare `ModuleNotFoundError`.
+  Verified against both majors: 22 tools registered and `GET /health` returns
+  200 under mcp 1.29.0 and 2.0.0 alike.
+- **The SDK's MCP client reports an unsupported mcp version accurately.**
+  Previously any import failure produced "Missing 'mcp' extra: install
+  dns-aid[mcp]", which sent users with mcp 2.x installed to reinstall a package
+  they already had. The handler now distinguishes the two cases and states the
+  supported range. The `mcp` dependency stays capped below 2.0.0 for this
+  reason: mcp 2.x's `streamable_http_client` dropped the
+  `headers`/`timeout`/`auth`/`httpx_client_factory` arguments for a single
+  `http_client` typed `httpx2.AsyncClient` — a different distribution from
+  `httpx` — while the SDK's public API takes an `httpx.AsyncClient` and its
+  telemetry rides on httpx event hooks. Lifting the ceiling requires porting the
+  SDK's HTTP layer, tracked separately.
+
+### Added
+
+- **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
+  against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
+  private-use SvcParamKeys (`key65280`–`key65534`), so `CloudflareBackend` sets
+  `supports_private_svcb_keys = True`. DNS-AID custom params (cap, cap-sha256, bap,
+  policy, realm, … → `key65400`–`key65409`) are written directly to the SVCB record
+  instead of being demoted to TXT, matching the NS1 and NIOS backends.
+
 ### Fixed
 
 - **The `mcp` dependency is capped below `2.0.0`, fixing an immediate startup crash on

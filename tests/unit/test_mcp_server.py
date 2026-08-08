@@ -343,3 +343,38 @@ class TestPublishBapScalar:
             backend="mock",
         )
         assert result["success"] is True
+
+
+class TestMcpMajorCompatibility:
+    """The server must run on both mcp majors.
+
+    mcp 2.0.0 removed `mcp.server.fastmcp` outright. An unguarded import of it
+    turned a fresh install that resolved mcp 2.x into a process that died before
+    main() ran — the "container starts then immediately exits" report in #230.
+    """
+
+    def test_server_class_matches_detected_major(self):
+        """_MCP_MAJOR agrees with the class actually imported."""
+        from dns_aid.mcp import server
+
+        assert server._MCP_MAJOR in (1, 2)
+        expected = "FastMCP" if server._MCP_MAJOR == 1 else "MCPServer"
+        assert type(server.mcp).__name__ == expected
+
+    def test_tools_are_registered_on_either_major(self):
+        """Tool registration is unaffected by which major is installed."""
+        from dns_aid.mcp import server
+
+        assert len(server.mcp._tool_manager.list_tools()) > 0
+
+    def test_streamable_http_app_builds(self):
+        """json_response must reach the right place for the installed major.
+
+        1.x takes it in the constructor and its streamable_http_app() accepts no
+        arguments; 2.x rejects it in the constructor and accepts it here. Passing
+        it to the wrong one raises TypeError, so simply building the app catches
+        a mismatch.
+        """
+        from dns_aid.mcp import server
+
+        assert server._streamable_http_app() is not None

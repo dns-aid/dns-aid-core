@@ -45,16 +45,50 @@ _CALLER_DOMAIN_ENV_VAR = "DNS_AID_CALLER_DOMAIN"
 # surfaces a clear remediation message instead of crashing at first use.
 try:
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
-    from mcp.shared.exceptions import McpError
+
+    # mcp 2.0.0 renamed McpError -> MCPError. mcp.types is unaffected by the 2.x
+    # package split, so the names below resolve identically on both majors.
+    try:  # mcp >= 1.28.1, < 2
+        from mcp.shared.exceptions import McpError
+    except ImportError:  # mcp >= 2
+        # mypy resolves against whichever major is installed, so the other
+        # branch is always unknown to it.
+        from mcp.shared.exceptions import (  # type: ignore[attr-defined,no-redef]
+            MCPError as McpError,
+        )
+
     from mcp.types import (
         CallToolResult,
         ListToolsResult,
         TextContent,
     )
 
-    _MCP_SDK_AVAILABLE = True
-    _MCP_IMPORT_ERROR: str | None = None
+    # The streamable-HTTP client is the one piece that does NOT carry over.
+    # mcp 2.x renamed streamablehttp_client -> streamable_http_client AND
+    # replaced its headers/timeout/auth/httpx_client_factory arguments with a
+    # single `http_client` typed httpx2.AsyncClient. httpx2 is a separate
+    # distribution from httpx (httpx.AsyncClient is not httpx2.AsyncClient), and
+    # this handler's public API takes an httpx.AsyncClient whose event hooks
+    # carry the cost/TTFB telemetry — so 2.x cannot be adapted here without
+    # porting the SDK's HTTP layer. It also yields TransportStreams rather than
+    # the (read, write, get_session_id) tuple unpacked below.
+    #
+    # pyproject caps mcp below 2.0.0 for this reason. This detection exists so a
+    # forced 2.x install reports the real blocker instead of failing with an
+    # opaque TypeError partway through an invocation.
+    try:  # mcp >= 1.28.1, < 2
+        from mcp.client.streamable_http import streamablehttp_client
+
+        _MCP_SDK_AVAILABLE = True
+        _MCP_IMPORT_ERROR: str | None = None
+    except ImportError:  # mcp >= 2
+        streamablehttp_client = None  # type: ignore[assignment]
+        _MCP_SDK_AVAILABLE = False
+        _MCP_IMPORT_ERROR = (
+            "mcp 2.x is installed, but its streamable_http_client requires an "
+            "httpx2.AsyncClient, while this handler is built on httpx. dns-aid "
+            "supports mcp >=1.28.1,<2.0.0 on the client path"
+        )
 except ImportError as exc:
     _MCP_SDK_AVAILABLE = False
     _MCP_IMPORT_ERROR = str(exc)
@@ -212,8 +246,11 @@ class MCPProtocolHandler(ProtocolHandler):
                 status=InvocationStatus.ERROR,
                 error_type="ImportError",
                 error_message=(
-                    "Missing 'mcp' extra: install dns-aid[mcp] to use modern "
-                    f"MCP transport. Original error: {_MCP_IMPORT_ERROR}"
+                    "The MCP streamable-HTTP transport is unavailable. If the "
+                    "'mcp' package is not installed, run "
+                    "`pip install 'dns-aid[mcp]'`; if it is installed, its "
+                    "version is out of range (supported: mcp >=1.28.1,<2.0.0). "
+                    f"Reason: {_MCP_IMPORT_ERROR}"
                 ),
             )
 

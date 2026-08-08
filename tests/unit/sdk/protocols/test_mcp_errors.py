@@ -62,7 +62,45 @@ async def test_missing_mcp_extra_returns_clear_remediation(
     assert raw.status == InvocationStatus.ERROR
     assert raw.error_type == "ImportError"
     assert "dns-aid[mcp]" in (raw.error_message or "")
-    assert "Missing 'mcp' extra" in (raw.error_message or "")
+    # The underlying import error is echoed so a missing package and an
+    # unsupported version are distinguishable from the message alone.
+    assert "No module named 'mcp'" in (raw.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_unsupported_mcp_version_is_distinguishable_from_missing_package(
+    handler: MCPProtocolHandler, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed-but-unsupported mcp must not be reported as a missing extra.
+
+    mcp 2.x is importable but its streamable_http_client requires httpx2, so the
+    handler marks the transport unavailable. Telling that user to install the
+    [mcp] extra they already have sends them the wrong way; the message has to
+    name the version range.
+    """
+    import dns_aid.sdk.protocols.mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "_MCP_SDK_AVAILABLE", False)
+    monkeypatch.setattr(
+        mcp_module,
+        "_MCP_IMPORT_ERROR",
+        "mcp 2.x is installed, but its streamable_http_client requires an httpx2.AsyncClient",
+    )
+
+    async with httpx.AsyncClient() as client:
+        raw = await handler.invoke(
+            client=client,
+            endpoint="https://example.com/mcp",
+            method="tools/list",
+            arguments=None,
+            timeout=5.0,
+        )
+
+    assert raw.success is False
+    assert raw.error_type == "ImportError"
+    message = raw.error_message or ""
+    assert "mcp >=1.28.1,<2.0.0" in message, "the supported range must be stated"
+    assert "httpx2" in message, "the actual blocker must reach the user"
 
 
 @pytest.mark.asyncio

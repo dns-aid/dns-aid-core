@@ -56,7 +56,37 @@ structlog.configure(
     cache_logger_on_first_use=True,
 )
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+# The server class moved in mcp 2.0.0: `mcp.server.fastmcp.FastMCP` became
+# `mcp.server.mcpserver.MCPServer`, and the old module was removed outright.
+# Importing it unguarded is what turned a fresh install that resolved mcp 2.x
+# into a container that started and immediately exited (#230), with a bare
+# ModuleNotFoundError and no indication of the cause.
+#
+# _MCP_MAJOR is needed beyond the import because the two majors are not
+# drop-in: 1.x takes the streamable-HTTP options (json_response, host, port,
+# stateless_http, ...) in the constructor and its streamable_http_app() takes
+# no arguments, while 2.x rejects them in the constructor and accepts them on
+# streamable_http_app(). See _build_server() and the http transport in main().
+try:  # mcp >= 1.28.1, < 2
+    from mcp.server.fastmcp import FastMCP as MCPServer  # noqa: E402
+
+    _MCP_MAJOR = 1
+except ImportError:  # pragma: no cover - exercised by the mcp 2.x CI matrix leg
+    try:  # mcp >= 2
+        # mypy resolves against whichever major is installed, so the other
+        # branch is always unknown to it.
+        from mcp.server.mcpserver import MCPServer  # type: ignore[no-redef] # noqa: E402
+
+        _MCP_MAJOR = 2
+    except ImportError as exc:  # pragma: no cover - defensive
+        raise ImportError(
+            "dns-aid's MCP server requires the `mcp` package. Install the MCP "
+            "extra with `pip install 'dns-aid[mcp]'`. Supported versions are "
+            "mcp >=1.28.1 (providing mcp.server.fastmcp.FastMCP) and mcp >=2.0.0 "
+            "(providing mcp.server.mcpserver.MCPServer); neither import "
+            f"succeeded, so the installed mcp is out of range. Underlying error: {exc}"
+        ) from exc
+
 from mcp.types import ToolAnnotations  # noqa: E402
 
 from dns_aid.utils.validation import (  # noqa: E402
@@ -101,11 +131,7 @@ def _shutdown_executor() -> None:
 atexit.register(_shutdown_executor)
 
 
-# Initialize MCP server
-mcp = FastMCP(
-    "DNS-AID",
-    json_response=True,
-    instructions="""DNS-AID enables AI agents to discover and connect to other agents using DNS.
+_INSTRUCTIONS = """DNS-AID enables AI agents to discover and connect to other agents using DNS.
 
 Use these tools to:
 - Publish your agent to DNS so others can discover it
@@ -116,8 +142,35 @@ Use these tools to:
 DNS-AID uses SVCB records (RFC 9460). Under draft-02 an agent's primary
 record lives at the flat owner name {agent-name}.{domain}.
 
-Example: chat.example.com""",
-)
+Example: chat.example.com"""
+
+
+def _build_server() -> MCPServer:
+    """Construct the MCP server for whichever mcp major is installed.
+
+    mcp 1.x accepts the streamable-HTTP options in the constructor; mcp 2.x
+    moved them to ``streamable_http_app()`` and raises TypeError if they are
+    passed here. ``_streamable_http_app()`` is the matching half of this split.
+    """
+    if _MCP_MAJOR == 1:
+        return MCPServer("DNS-AID", json_response=True, instructions=_INSTRUCTIONS)
+    return MCPServer("DNS-AID", instructions=_INSTRUCTIONS)
+
+
+def _streamable_http_app():
+    """Build the Starlette app, passing transport options where they belong.
+
+    Mirrors ``_build_server()``: under 1.x json_response was already applied via
+    the constructor and this factory takes no arguments, so passing it here
+    would raise TypeError.
+    """
+    if _MCP_MAJOR == 1:
+        return mcp.streamable_http_app()
+    return mcp.streamable_http_app(json_response=True)
+
+
+# Initialize MCP server
+mcp = _build_server()
 
 
 def _run_async(coro, timeout: float = 120):
@@ -2585,7 +2638,7 @@ Security Notes:
         print(f"  Ready check:  http://{host}:{port}/ready")
         print()
         uvicorn.run(
-            mcp.streamable_http_app(),
+            _streamable_http_app(),
             host=host,
             port=port,
             log_level="info",
