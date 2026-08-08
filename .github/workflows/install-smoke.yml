@@ -1,0 +1,105 @@
+# Installs the package the way a user does — a fresh `pip install` that resolves
+# dependencies from their declared floors, with no lockfile — and checks that the
+# result actually starts.
+#
+# Every other workflow avoids a fresh resolution: ci.yml and security.yml use
+# `uv sync --frozen`, release.yml installs the bare wheel with no extras, and
+# fuzz.yml uses `pip install --no-deps`. That gap is why mcp 2.0.0 removing
+# `mcp.server.fastmcp` reached users as a container that started and immediately
+# exited (#230) while CI stayed green.
+#
+# This breaks on an upstream release rather than on a commit, so the primary
+# trigger is the nightly schedule. Pull requests only run it when they touch
+# dependency metadata, since a contributor cannot fix an upstream publication.
+name: Install smoke test
+
+on:
+  schedule:
+    # Nightly at 04:00 UTC, an hour after ci.yml, so an upstream release that
+    # breaks a fresh resolve is caught within a day rather than at the next release.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/install-smoke.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/install-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-smoke:
+    name: Fresh install (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Boundary versions of the supported range: resolution differs most
+        # between the oldest and newest interpreter because of environment markers.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Deliberately pip, not uv, and deliberately not --frozen: the point is to
+      # resolve from the floors in pyproject.toml exactly as a user's install does.
+      - name: Install from source with no lockfile
+        run: |
+          python -m pip install --upgrade pip
+          pip install '.[mcp,cli]'
+
+      # Printed before the smoke test so a failure is diagnosable from the log
+      # alone — the first question is always "which version did it resolve?".
+      - name: Record resolved versions
+        run: pip list
+
+      - name: Smoke test — console script entrypoint
+        run: dns-aid-mcp --help
+
+      # Downstream sidecars spawn the server this way, and it imports through
+      # dns_aid/mcp/__init__.py, so it fails independently of the console script.
+      - name: Smoke test — module entrypoint
+        run: python -m dns_aid.mcp.server --help
+
+      - name: Smoke test — HTTP transport serves /health
+        run: |
+          set -euo pipefail
+          dns-aid-mcp --transport http --host 127.0.0.1 --port 8000 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:8000/health; then
+              break
+            fi
+            # If the process is already gone, the server crashed on startup and
+            # polling for the rest of the timeout would only delay the report.
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "::error::server exited during startup"
+              wait "$server_pid" || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          status=$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8000/health)
+          echo "GET /health -> $status"
+          cat /tmp/health.json
+          test "$status" = "200"
