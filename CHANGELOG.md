@@ -7,8 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The MCP server now runs on both mcp 1.x and 2.x.** `mcp` 2.0.0 removed
+  `mcp.server.fastmcp` outright (`FastMCP` became
+  `mcp.server.mcpserver.MCPServer`), and `dns_aid/mcp/server.py` imported it
+  unguarded — so an install that resolved mcp 2.x died at import, before
+  `main()` ran, for both the `dns-aid-mcp` entrypoint and
+  `python -m dns_aid.mcp.server`. The import now falls back to `MCPServer`, and
+  because 2.x moved the streamable-HTTP options (`json_response`, `host`,
+  `port`, `stateless_http`, …) off the constructor and onto
+  `streamable_http_app()`, the server passes them to whichever the installed
+  major expects. If neither import succeeds the error names the extra *and* the
+  supported version range instead of raising a bare `ModuleNotFoundError`.
+  Verified against both majors: 22 tools registered and `GET /health` returns
+  200 under mcp 1.29.0 and 2.0.0 alike.
+- **The SDK's MCP client reports an unsupported mcp version accurately.**
+  Previously any import failure produced "Missing 'mcp' extra: install
+  dns-aid[mcp]", which sent users with mcp 2.x installed to reinstall a package
+  they already had. The handler now distinguishes the two cases and states the
+  supported range. The `mcp` dependency stays capped below 2.0.0 because mcp 2.x
+  renamed `mcp.types`' camelCase result fields to snake_case: the classes still
+  import, but `CallToolResult.isError`, `CallToolResult.structuredContent`,
+  `ListToolsResult.nextCursor` and `Tool.inputSchema` all raise `AttributeError`,
+  and the streamable-HTTP transport changed shape. Lifting the ceiling needs a
+  field-compatibility shim, tracked separately. Note the transport's
+  `http_client` parameter is annotated `httpx2.AsyncClient`, but that is
+  advisory — httpx2 and httpx expose identical `AsyncClient` constructor
+  parameters and an httpx client is accepted, so no HTTP-layer port is required.
+
+### Added
+
+- **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
+  against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
+  private-use SvcParamKeys (`key65280`–`key65534`), so `CloudflareBackend` sets
+  `supports_private_svcb_keys = True`. DNS-AID custom params (cap, cap-sha256, bap,
+  policy, realm, … → `key65400`–`key65409`) are written directly to the SVCB record
+  instead of being demoted to TXT, matching the NS1 and NIOS backends.
+
 ### Fixed
 
+- **The `mcp` dependency is capped below `2.0.0`, fixing an immediate startup crash on
+  fresh installs.** `mcp` 2.0.0 removed `mcp.server.fastmcp` (`FastMCP` moved to
+  `mcp.server.mcpserver.MCPServer`), so any install resolving the previously unbounded
+  `mcp>=1.28.1` to 2.x died at import time with
+  `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` — before `main()` ran, for
+  both the `dns-aid-mcp` entrypoint and `python -m dns_aid.mcp.server`. The Docker image
+  resolves dependencies at build time without a lockfile, so it surfaced there as a
+  container that started and immediately exited. Both the `mcp` and `all` extras now
+  require `mcp>=1.28.1,<2.0.0`. The ceiling will be raised once `dns_aid/mcp/server.py`
+  and `dns_aid/sdk/protocols/mcp.py` are migrated to the 2.x API.
 - **`pip install dns-aid[all]` now installs everything it claims to.** The `all`
   extra restated every requirement by hand and had drifted out of sync: it was
   missing `cel-python` and `common-expression-language` (so `[all]` users got no
