@@ -29,3 +29,18 @@ updates:
       codeql-action:
         patterns:
           - "github/codeql-action*"
+
+  # The Dockerfile pins its base image by digest for reproducibility, but the
+  # python:3.11-slim tag is rebuilt regularly and old index digests eventually
+  # stop resolving — at which point `docker build` fails at the first
+  # instruction with "not found". That is not hypothetical: the previously
+  # pinned digest had already gone dead, so the image could not be built at all
+  # until it was repinned. A digest pin only stays valid if something refreshes
+  # it, so let Dependabot own that.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels:
+      - "dependencies"
+      - "automated"

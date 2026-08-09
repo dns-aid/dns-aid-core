@@ -43,7 +43,7 @@ jobs:
 
       - name: Install fuzz dependencies (hash-pinned)
         # Regenerate after bumps:
-        #   printf 'atheris\ndnspython>=2.6.0\npydantic>=2.5.0\nhttpx>=0.27.0\nstructlog>=24.0.0\npython-dotenv>=1.2.2\ncryptography>=46.0.7\n' | \
+        #   printf 'atheris\ndnspython>=2.6.0\npydantic>=2.5.0\nhttpx>=0.27.0\nstructlog>=24.0.0\npython-dotenv>=1.2.2\ncryptography>=50.0.0\n' | \
         #     uv pip compile --generate-hashes --python-version 3.11 \
         #     --python-platform linux -o .github/workflows/requirements-fuzz.txt -
         run: |

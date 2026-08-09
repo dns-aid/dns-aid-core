@@ -52,9 +52,23 @@ dependencies = [
 cli = [
     "typer>=0.12.0",
     "rich>=13.0.0",
+    "pygments>=2.20.0", # CVE-2026-4539 (low) — ReDoS in GUID regex, via rich/cel
 ]
 mcp = [
-    "mcp>=1.28.1",
+    # Upper-bounded on the SDK client path, not the server. dns_aid.mcp.server
+    # runs on both majors (see the dual-path import there), but
+    # dns_aid.sdk.protocols.mcp does not: mcp 2.x renamed mcp.types' camelCase
+    # result fields to snake_case, so CallToolResult.isError/.structuredContent,
+    # ListToolsResult.nextCursor and Tool.inputSchema all raise AttributeError
+    # there. The classes still import, which makes this easy to miss. The
+    # streamable-HTTP transport also changed shape (renamed, new argument set,
+    # yields TransportStreams instead of a 3-tuple).
+    #
+    # Not a reason: the transport's `http_client` is annotated
+    # httpx2.AsyncClient, but httpx2 and httpx expose identical AsyncClient
+    # constructor parameters and an httpx client is accepted, so no HTTP-layer
+    # port is needed. Raise this ceiling once the field-rename shim lands.
+    "mcp>=1.28.1,<2.0.0",
     "uvicorn>=0.30.0",
     # Direct floors on transitive deps pulled by `mcp` to close Dependabot alerts
     # (mcp's upstream constraints are looser than the patched versions need).
@@ -63,10 +77,12 @@ mcp = [
 ]
 route53 = [
     "boto3>=1.34.0",
+    "urllib3>=2.7.0",   # CVE-2026-44431 + CVE-2026-44432 (high) — via boto3/requests
 ]
 cloud-dns = [
     "google-auth>=2.30.0",
     "requests>=2.33.0",
+    "urllib3>=2.7.0",   # CVE-2026-44431 + CVE-2026-44432 (high) — via boto3/requests
 ]
 infoblox = [
     # Uses httpx from core deps
@@ -83,6 +99,7 @@ nios = [
 akamai-edgedns = [
     "edgegrid-python>=2.0.7",
     "requests>=2.33.0",
+    "urllib3>=2.7.0",   # CVE-2026-44431 + CVE-2026-44432 (high) — via boto3/requests
 ]
 ddns = [
     # Uses dnspython from core deps
@@ -112,6 +129,7 @@ cel = [
     # Rust backend (~2µs/eval); falls back to cel-python (~200µs/eval) if unavailable
     "common-expression-language>=0.5.0",
     "cel-python>=0.5.0",
+    "pygments>=2.20.0", # CVE-2026-4539 (low) — ReDoS in GUID regex, via rich/cel
 ]
 pqc = [
     # Post-quantum cryptography (ML-DSA-65 for HTTP Message Signatures)
@@ -135,37 +153,28 @@ dev = [
     "pygments>=2.20.0",  # CVE-2026-4539 (low) — ReDoS in GUID regex, via rich/pytest/cel
     "urllib3>=2.7.0",    # CVE-2026-44431 + CVE-2026-44432 (high) — header leak + decompression bomb
 ]
+# `all` is defined by self-reference (PEP 508) rather than by restating every
+# requirement. Restating them is what let it drift: `all` was silently missing
+# requests, the two CEL packages and pqcrypto, so `pip install dns-aid[all]`
+# shipped without the CEL policy engine or PQC/ML-DSA signing. Listing the
+# extras instead means a dependency added to any extra is inherited here
+# automatically. Empty extras are listed deliberately, so they stay covered once
+# they gain dependencies.
+#
+# `dev` is deliberately EXCLUDED. `all` is a published, user-facing extra, and
+# folding `dev` in would give every `[all]` user the test/lint toolchain plus
+# cyclonedx-bom and its ~20-package SBOM/schema/URI-validation tree, none of
+# which has runtime relevance. The previous hand-written `all` did leak pytest,
+# mypy and ruff; that was a bug being preserved, not a precedent.
+#
+# Note the CVE floors on transitive deps that `dev` used to carry for `all`
+# (urllib3, pygments) now live on the runtime extras that actually pull them,
+# so excluding `dev` does not drop them. lxml's floor stays in `dev` because
+# only cyclonedx-bom pulls it.
+#
+# tests/unit/test_packaging.py guards all of this.
 all = [
-    # CLI
-    "typer>=0.12.0",
-    "rich>=13.0.0",
-    # MCP
-    "mcp>=1.28.1",
-    "uvicorn>=0.30.0",
-    # Transitive floors via mcp (Dependabot)
-    "pyjwt>=2.13.0",
-    "python-multipart>=0.0.27",
-    # Backends: Route53, Cloudflare, NS1, Cloud DNS, Infoblox BloxOne, NIOS, Akamai EdgeDNS, DDNS
-    "boto3>=1.34.0",
-    "google-auth>=2.30.0",
-    "edgegrid-python>=2.0.7",
-    # JWS
-    "cryptography>=50.0.0",
-    # OpenTelemetry (spec 005 — upper bound pinned per FR-027)
-    "opentelemetry-api>=1.20.0,<2.0.0",
-    "opentelemetry-sdk>=1.20.0,<2.0.0",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0,<2.0.0",
-    # Dev
-    "pytest>=9.0.3",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=4.0.0",
-    "mypy>=1.8.0",
-    "ruff>=0.3.0",
-    "boto3-stubs[route53]>=1.34.0",
-    # Transitive floors (Dependabot)
-    "lxml>=6.1.0",
-    "pygments>=2.20.0",
-    "urllib3>=2.7.0",
+    "dns-aid[cli,mcp,route53,cloudflare,ns1,cloud-dns,infoblox,nios,akamai-edgedns,ddns,jws,sdk,otel,cel,pqc]",
 ]
 
 [project.scripts]

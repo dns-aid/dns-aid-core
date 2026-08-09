@@ -9,6 +9,8 @@ instead of opaque stack traces or HTTP 406 with no remediation hint.
 
 from __future__ import annotations
 
+import inspect
+
 import httpx
 import pytest
 
@@ -62,7 +64,69 @@ async def test_missing_mcp_extra_returns_clear_remediation(
     assert raw.status == InvocationStatus.ERROR
     assert raw.error_type == "ImportError"
     assert "dns-aid[mcp]" in (raw.error_message or "")
-    assert "Missing 'mcp' extra" in (raw.error_message or "")
+    # The underlying import error is echoed so a missing package and an
+    # unsupported version are distinguishable from the message alone.
+    assert "No module named 'mcp'" in (raw.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_unsupported_mcp_version_is_distinguishable_from_missing_package(
+    handler: MCPProtocolHandler, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed-but-unsupported mcp must not be reported as a missing extra.
+
+    mcp 2.x is importable but its result types renamed their camelCase fields,
+    so the handler marks the transport unavailable. Telling that user to install
+    the [mcp] extra they already have sends them the wrong way; the message has
+    to name the version range.
+    """
+    import dns_aid.sdk.protocols.mcp as mcp_module
+
+    # Only _MCP_SDK_AVAILABLE is forced. _MCP_IMPORT_ERROR is deliberately NOT
+    # monkeypatched: asserting on a string this test just injected would test
+    # nothing. The module-level detection produces it, so this exercises real code.
+    monkeypatch.setattr(mcp_module, "_MCP_SDK_AVAILABLE", False)
+
+    async with httpx.AsyncClient() as client:
+        raw = await handler.invoke(
+            client=client,
+            endpoint="https://example.com/mcp",
+            method="tools/list",
+            arguments=None,
+            timeout=5.0,
+        )
+
+    assert raw.success is False
+    assert raw.error_type == "ImportError"
+    message = raw.error_message or ""
+    # Must name the supported range, so an installed-but-unsupported mcp is
+    # distinguishable from a missing package.
+    assert "mcp >=1.28.1,<2.0.0" in message, "the supported range must be stated"
+    assert "dns-aid[mcp]" in message, "the install remedy must still be offered"
+
+
+def test_unsupported_version_reason_names_the_real_blocker() -> None:
+    """The reason string must cite the field renames, not the HTTP library.
+
+    An earlier version of this message blamed httpx2, which is wrong: httpx2 and
+    httpx expose identical AsyncClient constructor parameters and mcp 2.x
+    accepts an httpx client. Naming the wrong cause sends anyone attempting the
+    port down a rewrite that is not required. The real blocker is that mcp 2.x
+    renamed mcp.types' camelCase result fields to snake_case.
+    """
+    import dns_aid.sdk.protocols.mcp as mcp_module
+
+    source = inspect.getsource(mcp_module)
+    # Anchor on the assignment itself: there is more than one
+    # `except ImportError:  # mcp >= 2` in this module.
+    start = source.index("_MCP_IMPORT_ERROR = (")
+    reason_block = source[start : source.index(")", source.index('"', start))]
+
+    assert "httpx2" not in reason_block, (
+        "the 2.x reason must not blame httpx2 — it is not the blocker"
+    )
+    for field in ("isError", "structuredContent", "nextCursor", "inputSchema"):
+        assert field in reason_block, f"the reason should name the renamed field {field}"
 
 
 @pytest.mark.asyncio
