@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-08-09
+
 ### Changed
 
 - **The MCP server now runs on both mcp 1.x and 2.x.** `mcp` 2.0.0 removed
@@ -35,15 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `http_client` parameter is annotated `httpx2.AsyncClient`, but that is
   advisory — httpx2 and httpx expose identical `AsyncClient` constructor
   parameters and an httpx client is accepted, so no HTTP-layer port is required.
-
-### Added
-
-- **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
-  against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
-  private-use SvcParamKeys (`key65280`–`key65534`), so `CloudflareBackend` sets
-  `supports_private_svcb_keys = True`. DNS-AID custom params (cap, cap-sha256, bap,
-  policy, realm, … → `key65400`–`key65409`) are written directly to the SVCB record
-  instead of being demoted to TXT, matching the NS1 and NIOS backends.
 
 ### Removed
 
@@ -2695,7 +2688,8 @@ Explicit version floors added to our `pyproject.toml` because upstream parents (
 - [RFC 9460 - SVCB and HTTPS Resource Records](https://www.rfc-editor.org/rfc/rfc9460.html)
 - [RFC 4033-4035 - DNSSEC](https://www.rfc-editor.org/rfc/rfc4033.html)
 
-[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.28.1...HEAD
+[0.28.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.28.0...v0.28.1
 [0.28.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.27.0...v0.28.0
 [0.24.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.3...v0.24.4
 [0.24.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.2...v0.24.3
