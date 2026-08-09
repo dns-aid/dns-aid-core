@@ -87,13 +87,11 @@ jobs:
         # Each CVE is documented. Re-evaluate when fix versions are released.
         run: |
           uv run --with pip-audit pip-audit \
-            --ignore-vuln CVE-2026-4539 \
             --ignore-vuln CVE-2025-8869 \
             --ignore-vuln CVE-2026-1703 \
             --ignore-vuln CVE-2026-34073 \
             --ignore-vuln CVE-2026-25645 \
             --ignore-vuln CVE-2026-3219
-        # CVE-2026-4539  pygments 2.19.2   — ReDoS in AdlLexer, local-only, no fix released
         # CVE-2025-8869  pip 25.2          — tar symlink traversal, mitigated by Python >=3.12 PEP 706
         # CVE-2026-1703  pip 25.2          — wheel path traversal, limited to install dir prefixes
         # CVE-2026-34073 cryptography 46.0.5 — name constraint bypass, uncommon topology, fix: 46.0.6
