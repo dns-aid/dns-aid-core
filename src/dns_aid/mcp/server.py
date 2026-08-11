@@ -689,10 +689,12 @@ def discover_agents_via_dns(
         trust_dnssec_pointers: Follow an off-domain catalog pointer when the pointer
             record is DNSSEC-validated. Off by default: the AD flag is only
             trustworthy through a validating resolver on a secure path.
-        text_match: Free-text filter across agent name and description. Note
-            that ``description`` is only populated on the HTTP index path
-            (``use_http_index=True``); DNS-only discovery leaves it None, so
-            on that path this filter effectively matches on name alone.
+        text_match: Free-text filter across an agent's ``description``,
+            ``use_cases`` and ``capabilities``. It does NOT match on the agent
+            name. Note also that ``description`` is only populated on the HTTP
+            index path (``use_http_index=True``) — DNS-only discovery leaves
+            it None, so on that path this filter sees capabilities and
+            use_cases only.
         verify_signatures: Verify JWS record signatures and report the outcome
             WITHOUT filtering on it. Use this to see signature_status and decide
             for yourself. Performed for every signed record, including ones

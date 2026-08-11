@@ -328,15 +328,23 @@ boundaries, independent of DNSSEC:
   the SVCB record (`bap`, or `alpn`) after resolution, and the JWS payload
   binds `(fqdn, target, port, alpn)` to the record so a valid signature
   cannot be lifted onto a spoofed record.
-- **Discovered capabilities are held to the capability grammar.** Every
-  ingest path — the TXT `capabilities=` fallback, the capability document,
-  the legacy HTTP index and the ARD catalog — filters entries to the
-  identifier charset before they reach an `AgentRecord`, so a remote zone
-  cannot carry free text into a consumer's context through a field that is
-  structurally an identifier list. Malformed entries are dropped rather than
-  rejecting the record, and foreign catalog formats keep their own length
-  bounds. This bounds the field; per §1.3 it is not a prose filter, and
-  free-text fields such as `description` are not made safe by it.
+- **Identifier-typed fields are held to a grammar at the model boundary.**
+  `AgentRecord.capabilities` is written from at least eight places on the
+  discovery path (TXT `capabilities=`, capability document, A2A agent card,
+  ARD catalog entry, ARD card, legacy HTTP index), every one carrying data
+  authored by the queried domain. The grammar is enforced by a validator on
+  the field itself, with `validate_assignment` enabled so post-construction
+  enrichment is covered too — enforcing it at each call site was tried and
+  was wrong at half of them, and a source added later would leak by default.
+  `realm` is narrowed the same way, after the SvcParam quote-breakout check
+  that must keep raising. Violating entries are dropped, never raised on, so
+  a publisher cannot break discovery of its own zone.
+- **Free-text fields are bounded, not filtered.** `description` and
+  `use_cases` have no grammar to hold them to, and instruction-shaped
+  language in them cannot be reliably detected. They are length-capped and
+  documented as untrusted at the API boundary. Per §1.3 that is the honest
+  treatment: filtering them would imply a safety they do not have. A
+  consumer must still treat their contents as data, never as instruction.
 
 ## 3. Operational Security
 

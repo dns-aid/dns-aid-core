@@ -29,8 +29,6 @@ from typing import Any
 import httpx
 import structlog
 
-from dns_aid.utils.validation import sanitize_discovered_capabilities
-
 logger = structlog.get_logger(__name__)
 
 # Maximum response size for capability document fetches (256KB).
@@ -202,18 +200,12 @@ async def fetch_cap_document(
             logger.debug("Cap document is not a JSON object", cap_uri=cap_uri)
             return None
 
-        # The document is written by whichever domain the cap URI points at,
-        # and its capabilities end up in the caller's context. Keep only what
-        # is shaped like a capability identifier.
-        raw_capabilities = _extract_capabilities_multi_format(data)
-        capabilities = sanitize_discovered_capabilities(raw_capabilities)
-        if len(capabilities) != len(raw_capabilities):
-            logger.warning(
-                "Dropped malformed capability entries from cap document",
-                cap_uri=cap_uri,
-                dropped=len(raw_capabilities) - len(capabilities),
-                kept=len(capabilities),
-            )
+        # Returned raw. The grammar is enforced by AgentRecord's capabilities
+        # validator; filtering here would empty the list for a prose-bearing
+        # document and make the discoverer's tier cascade fall through to the
+        # A2A card parsed from this same document, reinstating the value it
+        # had just removed.
+        capabilities = _extract_capabilities_multi_format(data)
         use_cases = _extract_string_list(data, "use_cases")
 
         known_keys = {"capabilities", "version", "description", "use_cases"}

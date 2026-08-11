@@ -390,11 +390,7 @@ _CAPABILITY_CHARSET = re.compile(r"^[a-zA-Z0-9_-]+$")
 CAPABILITY_MAX_LENGTH = 64
 
 
-def sanitize_discovered_capabilities(
-    capabilities: list[str] | None,
-    *,
-    max_length: int = CAPABILITY_MAX_LENGTH,
-) -> list[str]:
+def sanitize_discovered_capabilities(capabilities: list[str] | None) -> list[str]:
     """Filter capabilities received from a remote party to the identifier grammar.
 
     A capability is an identifier, not prose. ``capabilities`` arrives from a
@@ -425,17 +421,20 @@ def sanitize_discovered_capabilities(
     ``snake_case_instruction`` still passes. This bounds and de-fangs the
     field; it is not a prose detector, and nothing reliable is.
 
+    One grammar applies to every source. An earlier revision let a foreign
+    catalog format keep its own, looser length bound so conformance would not
+    be narrowed. That was wrong: the ARD reader *truncates* an oversized
+    string rather than dropping it, so a relaxed limit reshaped a 4096-byte
+    blob into a 1024-byte "identifier" that then satisfied the charset check.
+    Truncation manufactures an identifier nobody published, so an entry that
+    exceeds the grammar is dropped whatever format carried it.
+
     Args:
         capabilities: Capability strings as received from a remote source.
-        max_length: Per-entry length limit. Defaults to the DNS-AID
-            capability grammar's own 64. Callers ingesting a foreign catalog
-            format pass that format's bound instead, so conformance is not
-            silently narrowed by this filter.
 
     Returns:
-        The subset matching the capability charset and within ``max_length``,
-        de-duplicated, and capped at ``_MAX_DISCOVERED_CAPABILITIES`` entries.
-        Never raises.
+        The subset matching the capability grammar, de-duplicated, and capped
+        at ``_MAX_DISCOVERED_CAPABILITIES`` entries. Never raises.
     """
     if not capabilities:
         return []
@@ -448,7 +447,7 @@ def sanitize_discovered_capabilities(
             continue
 
         candidate = cap.strip()
-        if not candidate or len(candidate) > max_length:
+        if not candidate or len(candidate) > CAPABILITY_MAX_LENGTH:
             continue
         if not _CAPABILITY_CHARSET.match(candidate):
             continue

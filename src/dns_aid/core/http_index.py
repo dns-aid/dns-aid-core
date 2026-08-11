@@ -178,7 +178,8 @@ class Capability:
             cost=data.get("cost"),
             rate_limit=data.get("rate_limit") or data.get("rateLimit"),
             authentication=data.get("authentication"),
-            capabilities=[str(c) for c in capabilities if c],
+            # sanitize_discovered_capabilities already guarantees non-empty str.
+            capabilities=capabilities,
         )
 
 
@@ -428,13 +429,12 @@ def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, s
         fqdn = publisher
 
     description = _truncate(entry.get("description") or display_name)
-    # _ard_str_list bounds size only; the charset check is what stops a
-    # catalog entry carrying prose into a caller's context. The length bound
-    # stays ARD's own — this filter narrows the grammar, not the spec.
-    capabilities = sanitize_discovered_capabilities(
-        _ard_str_list(entry.get("capabilities")),
-        max_length=_MAX_ARD_STR_LEN,
-    )
+    # _ard_str_list truncates an oversized string rather than dropping it, so
+    # applying ARD's own 1024-byte bound here would reshape a blob into a
+    # long "identifier" that satisfies the charset check. One grammar, and an
+    # entry that exceeds it is dropped. Parse-layer hygiene only — the
+    # guarantee is AgentRecord's capabilities validator.
+    capabilities = sanitize_discovered_capabilities(_ard_str_list(entry.get("capabilities")))
     use_cases = _ard_str_list(entry.get("representativeQueries"))
     version = entry.get("version")
     trust_manifest = entry.get("trustManifest")
