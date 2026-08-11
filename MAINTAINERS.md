@@ -8,7 +8,7 @@ This file lists the current maintainers of the DNS-AID project. The project cont
 |------|--------|-------------|------|-------|
 | Igor Racic | [@iracic82](https://github.com/iracic82) | Infoblox | Project Lead | 2024-12 |
 | Ingmar Van Glabbeek | [@ivanglabbeek](https://github.com/ivanglabbeek) | Infoblox | DNS Standards & Policy Layer Maintainer | 2026-04 |
-| Nick Williams | [@NWillAU900](https://github.com/NWillAU900) | Infoblox | DNS Standards Lead | 2026-05 |
+| Nic Williams | [@NWillAU900](https://github.com/NWillAU900) | Infoblox | DNS Standards Lead | 2026-05 |
 
 ## Desired Roles
 
