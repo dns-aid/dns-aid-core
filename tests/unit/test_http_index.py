@@ -853,6 +853,9 @@ class TestArdHardening:
         )
         agent = parse_http_index(_ard_catalog([entry]))[0]
         assert len(agent.description) == _MAX_ARD_STR_LEN
+        # Capabilities pass through the capability charset filter on ingest,
+        # but keep ARD's own length bound rather than the tighter DNS-AID one,
+        # so a conforming catalog is not silently narrowed.
         assert len(agent.capability.capabilities[0]) == _MAX_ARD_STR_LEN
 
     def test_malformed_port_is_clean_skip_not_silent_drop(self):

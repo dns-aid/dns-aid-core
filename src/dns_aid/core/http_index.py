@@ -35,6 +35,8 @@ from urllib.parse import unquote, urlparse
 import httpx
 import structlog
 
+from dns_aid.utils.validation import sanitize_discovered_capabilities
+
 logger = structlog.get_logger(__name__)
 
 # HTTP index URL patterns to try (in order)
@@ -167,6 +169,9 @@ class Capability:
         capabilities = data.get("capabilities", [])
         if isinstance(capabilities, str):
             capabilities = [capabilities]
+        # Index content is authored by the domain being queried and is
+        # surfaced to callers, so entries must look like identifiers.
+        capabilities = sanitize_discovered_capabilities(capabilities)
         return cls(
             modality=data.get("modality"),
             protocols=protocols,
@@ -423,7 +428,13 @@ def _ard_entry_to_agent(entry: dict[str, Any]) -> tuple[HttpIndexAgent | None, s
         fqdn = publisher
 
     description = _truncate(entry.get("description") or display_name)
-    capabilities = _ard_str_list(entry.get("capabilities"))
+    # _ard_str_list bounds size only; the charset check is what stops a
+    # catalog entry carrying prose into a caller's context. The length bound
+    # stays ARD's own — this filter narrows the grammar, not the spec.
+    capabilities = sanitize_discovered_capabilities(
+        _ard_str_list(entry.get("capabilities")),
+        max_length=_MAX_ARD_STR_LEN,
+    )
     use_cases = _ard_str_list(entry.get("representativeQueries"))
     version = entry.get("version")
     trust_manifest = entry.get("trustManifest")

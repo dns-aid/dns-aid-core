@@ -47,6 +47,7 @@ from dns_aid.core.models import (
     Protocol,
     TrustManifest,
 )
+from dns_aid.utils.validation import sanitize_discovered_capabilities
 
 logger = structlog.get_logger(__name__)
 
@@ -1116,7 +1117,18 @@ async def _query_capabilities(fqdn: str) -> list[str]:
     except Exception:
         pass  # TXT record is optional
 
-    return capabilities
+    # The zone owner writes this string and the result reaches the caller's
+    # context, so a comma-split alone is not enough — an entry has to look
+    # like a capability identifier, not a sentence.
+    cleaned = sanitize_discovered_capabilities(capabilities)
+    if len(cleaned) != len(capabilities):
+        logger.warning(
+            "Dropped malformed capability entries from TXT record",
+            fqdn=fqdn,
+            dropped=len(capabilities) - len(cleaned),
+            kept=len(cleaned),
+        )
+    return cleaned
 
 
 def _build_index_tasks(
