@@ -146,12 +146,19 @@ class TestSecuritySchemes:
         assert auth.schemes == ["oauth2"]
         assert auth.credentials == "https://t/"
 
-    def test_the_openapi_shape(self):
+    def test_openapi_http_bearer_uses_bearer_auth_type(self):
         auth = A2AAuthentication.from_security_schemes(
             {"svc": {"type": "http", "scheme": "bearer"}}
         )
 
-        assert auth.schemes == ["http"]
+        assert auth.schemes == ["bearer"]
+
+    def test_proto_http_bearer_uses_bearer_auth_type(self):
+        auth = A2AAuthentication.from_security_schemes(
+            {"svc": {"httpAuthSecurityScheme": {"scheme": "Bearer"}}}
+        )
+
+        assert auth.schemes == ["bearer"]
 
     def test_openid_connect_url_is_taken_as_the_credential_endpoint(self):
         auth = A2AAuthentication.from_security_schemes(
