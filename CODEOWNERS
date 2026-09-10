@@ -29,3 +29,8 @@ GOVERNANCE.md @iracic82 @ivanglabbeek
 MAINTAINERS.md @iracic82 @ivanglabbeek
 SECURITY.md @iracic82 @ivanglabbeek
 TRADEMARKS.md @iracic82 @ivanglabbeek
+
+# Python dependency manifests — both maintainers approve so Dependabot pip
+# bumps surface to the same reviewer pair as github-actions bumps in .github/
+pyproject.toml @iracic82 @ivanglabbeek
+uv.lock @iracic82 @ivanglabbeek
