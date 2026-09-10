@@ -803,9 +803,10 @@ async def _query_single_agent(
             enroll_uri = custom_params.get("enroll-uri")
             # The JWS record signature (`sig`, key65405). Parsing is
             # unconditional and independent of DNSSEC: the value is carried on
-            # the record whether or not it will later be verified. Whether JWS
-            # verification actually runs is decided in _verify_agent_signatures,
-            # which skips agents whose owner name validated under DNSSEC.
+            # the record whether or not it will later be verified. Verification
+            # itself runs for every agent carrying a sig -- see
+            # _verify_agent_signatures for why a DNSSEC-validated record does
+            # not suppress it.
             # Every name in DNS_AID_KEY_MAP must be extracted here; the
             # completeness test in tests/unit/core/test_svcb_param_coverage.py
             # fails if a key is added to the map without being wired up.
