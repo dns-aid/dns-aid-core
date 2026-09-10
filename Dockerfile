@@ -14,7 +14,7 @@
 
 # Use multi-stage build for smaller final image
 # Pin base image with digest for reproducible builds
-FROM python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff AS builder
+FROM python:3.14-slim@sha256:a7fb1e634c4a578f9e0bd6327f11a3cde11b7a9395f48e24360c0988bcc5c2bc AS builder
 
 WORKDIR /app
 
@@ -54,7 +54,7 @@ RUN uv export --locked --no-dev \
     && pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
 
 # Production image
-FROM python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff AS production
+FROM python:3.14-slim@sha256:a7fb1e634c4a578f9e0bd6327f11a3cde11b7a9395f48e24360c0988bcc5c2bc AS production
 
 LABEL org.opencontainers.image.title="DNS-AID MCP Server"
 LABEL org.opencontainers.image.description="DNS-based Agent Identification and Discovery"
