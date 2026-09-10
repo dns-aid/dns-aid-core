@@ -623,8 +623,15 @@ class TestNS1BackendGetRecord:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_get_record_returns_none_on_http_error(self):
-        """Test get_record returns None on HTTP error (not programming error)."""
+    async def test_get_record_propagates_network_error(self):
+        """A network error must propagate, NOT be masked as 'record absent'.
+
+        Only a 404 means the record is missing. Swallowing a ConnectError to
+        None makes a transient failure indistinguishable from absence, which
+        lets callers such as publisher._unpublish disarm their masked-failure
+        guard and de-index a still-live agent. Guard the raising contract so a
+        future refactor can't silently re-introduce the swallow.
+        """
         backend = NS1Backend(api_key="key")
         backend._zone_cache["example.com"] = {"zone": "example.com"}
 
@@ -632,12 +639,43 @@ class TestNS1BackendGetRecord:
         mock_client.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
 
         with patch.object(backend, "_get_client", return_value=mock_client):
-            result = await backend.get_record(
-                zone="example.com",
-                name="_chat._a2a._agents",
-                record_type="SVCB",
+            with pytest.raises(httpx.ConnectError):
+                await backend.get_record(
+                    zone="example.com",
+                    name="_chat._a2a._agents",
+                    record_type="SVCB",
+                )
+
+    @pytest.mark.asyncio
+    async def test_get_record_propagates_server_error(self):
+        """A 5xx must propagate rather than be masked as 'record absent'."""
+        backend = NS1Backend(api_key="key")
+        backend._zone_cache["example.com"] = {"zone": "example.com"}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                "500 Internal Server Error",
+                request=httpx.Request("GET", "https://api.nsone.net"),
+                response=httpx.Response(500),
             )
-            assert result is None
+        )
+        # json() must never be consulted once raise_for_status has fired.
+        mock_response.json = MagicMock(
+            side_effect=AssertionError("json() should not be called on an error response")
+        )
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with pytest.raises(httpx.HTTPStatusError):
+                await backend.get_record(
+                    zone="example.com",
+                    name="_chat._a2a._agents",
+                    record_type="SVCB",
+                )
 
 
 class TestNS1BackendListRecords:
