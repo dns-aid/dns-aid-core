@@ -28,21 +28,33 @@ keywords:
 
 references:
   - type: standard
-    title: "DNS-AID: DNS-based Agent Identification and Discovery"
+    title: "DNS for AI Discovery"
     authors:
       - family-names: Mozley
-        given-names: Andrew
+        given-names: Jim
+        affiliation: "Infoblox, Inc."
       - family-names: Williams
-        given-names: Brandon
+        given-names: Nic
+        affiliation: "Infoblox, Inc."
+      - family-names: Sarikaya
+        given-names: Behcet
+      - family-names: Schott
+        given-names: Roland
+        affiliation: "Deutsche Telekom"
+      - family-names: Damick
+        given-names: Jeffrey
+        affiliation: Amazon
     url: "https://datatracker.ietf.org/doc/draft-mozleywilliams-dnsop-dnsaid/"
     identifiers:
       - type: other
-        value: "draft-mozleywilliams-dnsop-dnsaid-01"
+        value: "draft-mozleywilliams-dnsop-dnsaid-02"
         description: "IETF Internet-Draft"
     notes: >
-      This software implements the DNS-AID specification (draft-01):
+      This software implements the DNS-AID specification (draft-02):
       SVCB/HTTPS record discovery, TXT capability records,
-      underscored naming (_agent._protocol._agents.domain),
+      the flat owner name ({agent-name}.{domain}) with the walkable
+      underscored AliasMode (_agent._protocol._agents.domain) as the
+      optional enumerable form,
       custom SVCB parameters (cap, cap-sha256, bap, policy, realm,
       connect-class, connect-meta, enroll-uri),
       DNSSEC validation, and DANE certificate matching.

@@ -177,6 +177,52 @@ zone "example.com" {
 };
 ```
 
+### 1.3 Trust Boundary: Record Authenticity vs Referent Safety
+
+STRIDE above covers the DNS and cryptographic planes. It deliberately stops at
+a boundary that deployers must not assume away.
+
+DNSSEC and JWS record signing authenticate **the pointer**. They establish that
+a record was published by the zone's key holder and was not altered in transit.
+They say nothing whatsoever about whether the **content the record points at**
+is safe to act on.
+
+| Guarantee | Provided by | NOT provided |
+|-----------|-------------|--------------|
+| This record came from this zone | DNSSEC, JWS `sig` | That the zone is honest |
+| This endpoint is the published one | SVCB + DNSSEC | That the endpoint is benign |
+| This descriptor is the published one | `cap-sha256` | That its contents are safe |
+
+No signature can close this gap. Signing agent-supplied metadata proves only
+that its author signed their own claim; an attacker who controls a domain can
+publish a correctly DNSSEC-signed record pointing at a hostile endpoint, and
+every cryptographic check will pass, because none of them is a check on
+honesty.
+
+This matters because DNS-AID exists to enable discovery of agents at domains
+with which the consumer has no prior relationship. Cross-domain discovery is
+the value proposition, and it is also what makes a domain's own assertions
+untrusted input by default.
+
+**Requirements for consumers:**
+
+- Content retrieved from a discovered agent — tool descriptions, capability
+  documents, agent cards — MUST be treated as untrusted data authored by that
+  domain, never as instructions, however the record was authenticated.
+- A "verified" result in this protocol means endpoint authority was verified.
+  Implementations MUST NOT present it to users as a statement that the agent
+  or its content is safe.
+- Structured fields carrying identifiers (capabilities, protocol names,
+  realms) MUST be validated against their grammar on ingest, not only on
+  publish. See §2.2.
+- Free-text fields cannot be made safe by filtering. Instruction-shaped
+  language cannot be reliably detected, and an implementation that claims to
+  strip it provides false assurance. Bound it, label it as untrusted, and
+  leave the trust decision to the orchestrator.
+
+This applies to any conforming implementation that fetches and surfaces
+agent-provided metadata, not only to this one.
+
 ## 2. Protocol-Specific Security
 
 ### 2.1 SVCB Record Security
@@ -199,23 +245,45 @@ network.example.com. 3600 IN SVCB 1 mcp.example.com. (
 
 **Requirements:**
 - TXT records MUST be DNSSEC-signed
-- Capability values MUST be validated against known capabilities
+- Capability values MUST be validated against the capability grammar **on
+  ingest**, not only when publishing
 - Version strings MUST follow semantic versioning
 
 **Validation:**
+
+A capability is an identifier, not free text. Validate discovered values
+against that grammar rather than against a fixed vocabulary — an enumerated
+allow-list cannot work for a protocol whose purpose is open-world capability
+discovery, and earlier revisions of this document wrongly showed one.
+
 ```python
-VALID_CAPABILITIES = {"chat", "code", "search", "image", "voice"}
+CAPABILITY_CHARSET = re.compile(r"^[a-zA-Z0-9_-]+$")
 
-def validate_capabilities(txt_record: str) -> list[str]:
-    """Validate TXT record capabilities."""
-    caps = parse_capabilities(txt_record)
-
-    for cap in caps:
-        if cap not in VALID_CAPABILITIES:
-            raise ValueError(f"Unknown capability: {cap}")
-
-    return caps
+def sanitize(caps: list[str], max_length: int = 64) -> list[str]:
+    """Keep entries shaped like identifiers; drop the rest."""
+    return [
+        c for c in (c.strip() for c in caps)
+        if c and len(c) <= max_length and CAPABILITY_CHARSET.match(c)
+    ]
 ```
+
+Three properties matter more than the exact grammar:
+
+- **Validate on ingest, not only on publish.** Validating what you write while
+  trusting what you read leaves the read path fully open. Discovered values
+  reach the consumer's context, which for an LLM-driven client is its
+  reasoning.
+- **Drop, do not raise.** These values arrive from whichever domain was
+  queried. Rejecting a whole record over one bad entry lets any publisher
+  break discovery of its own zone, and on a shared index, of every agent
+  listed beside it.
+- **Do not narrow a foreign format's bounds.** When ingesting a catalog format
+  with its own limits, apply the character grammar but keep that format's
+  length bound, or conforming catalogs silently lose data.
+
+This constrains the field; it is not a prose filter. Separator characters are
+legal, so a short `snake_case_instruction` still satisfies the grammar. Bounding
+the field is achievable. Detecting instructions is not — see §1.3.
 
 ### 2.3 Endpoint Security
 
@@ -260,6 +328,23 @@ boundaries, independent of DNSSEC:
   the SVCB record (`bap`, or `alpn`) after resolution, and the JWS payload
   binds `(fqdn, target, port, alpn)` to the record so a valid signature
   cannot be lifted onto a spoofed record.
+- **Identifier-typed fields are held to a grammar at the model boundary.**
+  `AgentRecord.capabilities` is written from at least eight places on the
+  discovery path (TXT `capabilities=`, capability document, A2A agent card,
+  ARD catalog entry, ARD card, legacy HTTP index), every one carrying data
+  authored by the queried domain. The grammar is enforced by a validator on
+  the field itself, with `validate_assignment` enabled so post-construction
+  enrichment is covered too — enforcing it at each call site was tried and
+  was wrong at half of them, and a source added later would leak by default.
+  `realm` is narrowed the same way, after the SvcParam quote-breakout check
+  that must keep raising. Violating entries are dropped, never raised on, so
+  a publisher cannot break discovery of its own zone.
+- **Free-text fields are bounded, not filtered.** `description` and
+  `use_cases` have no grammar to hold them to, and instruction-shaped
+  language in them cannot be reliably detected. They are length-capped and
+  documented as untrusted at the API boundary. Per §1.3 that is the honest
+  treatment: filtering them would imply a safety they do not have. A
+  consumer must still treat their contents as data, never as instruction.
 
 ## 3. Operational Security
 

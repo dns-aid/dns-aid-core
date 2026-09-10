@@ -375,6 +375,95 @@ def validate_capabilities(capabilities: list[str] | None) -> list[str]:
     return validated
 
 
+# A remote party controls how many capabilities it advertises, so the read
+# side caps the list as well as each entry. Matched to the ARD catalog's own
+# per-entry array bound so ingesting a conforming catalog is unaffected —
+# this filter narrows the character grammar, not the list length.
+_MAX_DISCOVERED_CAPABILITIES = 256
+
+# Character grammar only. CAPABILITY_PATTERN bundles charset with the 64-char
+# DNS-AID limit; the read side needs them separable because a foreign catalog
+# (ARD) carries its own, looser string bound and we do not silently narrow it.
+_CAPABILITY_CHARSET = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+# Default per-entry limit: the DNS-AID capability grammar's own bound.
+CAPABILITY_MAX_LENGTH = 64
+
+
+def sanitize_discovered_capabilities(capabilities: list[str] | None) -> list[str]:
+    """Filter capabilities received from a remote party to the identifier grammar.
+
+    A capability is an identifier, not prose. ``capabilities`` arrives from a
+    TXT record, a capability document, or an HTTP index — all written by
+    whichever domain was queried — and is surfaced to callers, which for the
+    MCP tools means an LLM's context. Entries that do not match
+    ``CAPABILITY_PATTERN`` are therefore dropped, so free text from a remote
+    zone cannot ride this field into a consumer's reasoning.
+
+    This is the read-side counterpart to :func:`validate_capabilities`, and it
+    deliberately differs in two respects.
+
+    It drops bad entries instead of raising. Raising is correct when an
+    operator publishes a typo. On discovery the values are
+    attacker-influenceable, so a raise would let any publisher break discovery
+    of its own zone — and, on a shared index, of every agent listed beside it.
+    A malformed entry is dropped; the rest of the record still resolves.
+
+    It also preserves case. The publish side lowercases because it is
+    normalising an operator's input before writing it. Discovery is reporting
+    what a remote party published, and identifiers such as the ARD catalog's
+    ``WeatherTool`` are case-carrying — folding them would corrupt data this
+    function has no mandate to rewrite.
+
+    The charset is the control that matters: prose needs spaces and
+    punctuation, and an identifier grammar has neither. Note the limit of
+    that claim — separator characters are legal, so a short
+    ``snake_case_instruction`` still passes. This bounds and de-fangs the
+    field; it is not a prose detector, and nothing reliable is.
+
+    One grammar applies to every source. An earlier revision let a foreign
+    catalog format keep its own, looser length bound so conformance would not
+    be narrowed. That was wrong: the ARD reader *truncates* an oversized
+    string rather than dropping it, so a relaxed limit reshaped a 4096-byte
+    blob into a 1024-byte "identifier" that then satisfied the charset check.
+    Truncation manufactures an identifier nobody published, so an entry that
+    exceeds the grammar is dropped whatever format carried it.
+
+    Args:
+        capabilities: Capability strings as received from a remote source.
+
+    Returns:
+        The subset matching the capability grammar, de-duplicated, and capped
+        at ``_MAX_DISCOVERED_CAPABILITIES`` entries. Never raises.
+    """
+    if not capabilities:
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+
+    for cap in capabilities:
+        if not isinstance(cap, str):
+            continue
+
+        candidate = cap.strip()
+        if not candidate or len(candidate) > CAPABILITY_MAX_LENGTH:
+            continue
+        if not _CAPABILITY_CHARSET.match(candidate):
+            continue
+
+        if candidate in seen:
+            continue
+
+        cleaned.append(candidate)
+        seen.add(candidate)
+
+        if len(cleaned) >= _MAX_DISCOVERED_CAPABILITIES:
+            break
+
+    return cleaned
+
+
 def validate_version(version: str) -> str:
     """
     Validate version string.

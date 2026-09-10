@@ -11,15 +11,27 @@ as specified in IETF draft-mozleywilliams-dnsop-dnsaid-02.
 from __future__ import annotations
 
 import os
+import re
 from enum import StrEnum
 from typing import Any, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from dns_aid.utils.validation import validate_connect_class
+from dns_aid.utils.validation import sanitize_discovered_capabilities, validate_connect_class
 
 logger = structlog.get_logger(__name__)
+
+# Remote-sourced field bounds. Identifier-typed fields get a grammar;
+# genuinely free-text fields get a length bound only, because
+# instruction-shaped prose cannot be reliably detected (see
+# docs/rfc/security-considerations.md §1.3).
+#
+# Looser than the capability grammar: dots and colons appear in real
+# tenant-scoping schemes. Still admits no whitespace, which prose needs.
+_REALM_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_MAX_FREE_TEXT_LEN = 1024
+_MAX_USE_CASES = 64
 
 # Capability provenance — single source of truth.
 #
@@ -869,7 +881,68 @@ class AgentRecord(BaseModel):
         "in this release.",
     )
 
-    model_config = {"arbitrary_types_allowed": True}
+    # validate_assignment is load-bearing, not tidiness. Discovery enriches a
+    # record in place — the agent-card and ARD-card readers assign
+    # ``capabilities`` after construction — so a validator that only ran at
+    # __init__ would miss precisely the paths that carry remote data.
+    model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _filter_capabilities(cls, v: object) -> object:
+        """Hold capabilities to the identifier grammar however they were set.
+
+        This field is written from at least eight places on the discovery path
+        (SVCB/TXT, capability document, A2A agent card, ARD catalog entry, ARD
+        card, legacy HTTP index), every one of them carrying data authored by
+        whichever domain was queried, and its contents are rendered into a
+        consuming LLM's context. Enforcing that at each call site is
+        enforcement by discipline: it was already wrong at four of the eight,
+        and any source added later would leak by default.
+
+        Enforcing it here also keeps the discoverer's capability tier cascade
+        (cap_uri -> agent card -> TXT) operating on raw values. Filtering
+        inside that cascade emptied a tier's result and made the next tier
+        believe nothing had been found, which re-introduced the unfiltered
+        value under a different provenance label — a filter acting as a
+        trigger. At the field boundary the cascade's own logic is unchanged.
+
+        Dropping rather than raising is deliberate: these values are
+        attacker-influenceable, and raising would let any publisher break
+        discovery of its own zone, and of every agent beside it on a shared
+        index. The publish path keeps ``validate_capabilities``, which raises,
+        because an operator typo should be loud.
+        """
+        if isinstance(v, list):
+            return sanitize_discovered_capabilities(v)
+        return v
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _bound_description(cls, v: object) -> object:
+        """Bound a discovered description; do not attempt to filter it.
+
+        This field is genuinely free text — a human-readable summary — so
+        there is no grammar to hold it to, and instruction-shaped language in
+        it cannot be reliably detected. Per the security considerations §1.3
+        the honest treatment is to bound it and label it untrusted at the API
+        boundary, not to sanitise it and imply a safety it does not have.
+        Bounding still denies an unbounded context-stuffing payload.
+        """
+        if isinstance(v, str) and len(v) > _MAX_FREE_TEXT_LEN:
+            return v[:_MAX_FREE_TEXT_LEN]
+        return v
+
+    @field_validator("use_cases", mode="before")
+    @classmethod
+    def _bound_use_cases(cls, v: object) -> object:
+        """Bound discovered use-case strings. Free text, same reasoning as description."""
+        if isinstance(v, list):
+            return [
+                item[:_MAX_FREE_TEXT_LEN] if isinstance(item, str) else item
+                for item in v[:_MAX_USE_CASES]
+            ]
+        return v
 
     @field_validator("name", mode="before")
     @classmethod
@@ -960,6 +1033,38 @@ class AgentRecord(BaseModel):
         from dns_aid.utils.validation import validate_svcparam_value
 
         return validate_svcparam_value(v)
+
+    # Ordered deliberately after _enforce_safe_svcparams_on_agent. Pydantic
+    # runs same-mode validators in definition order, and quote-breakout
+    # injection in a realm must keep RAISING — that is a publish-path
+    # contract with its own test. This runs on what survives, and only
+    # narrows a clean-but-non-identifier value.
+    @field_validator("realm", mode="after")
+    @classmethod
+    def _filter_realm(cls, v: str | None) -> str | None:
+        """Hold a discovered realm to an opaque-identifier shape.
+
+        ``realm`` is published by the queried domain and emitted to MCP
+        callers, so it is an identifier-typed field that free text can ride.
+        The quote-breakout check above stops presentation injection but
+        happily passes a sentence, which is the payload shape that matters
+        once the value reaches a model's context.
+
+        The grammar is looser than ``capabilities`` — dots and colons appear
+        in real tenant-scoping schemes — but admits no whitespace, which is
+        what prose requires. Every realm value in this repository's tests,
+        docs and fixtures satisfies it.
+
+        A clean-but-non-conforming value becomes ``None`` rather than
+        raising, for the same reason capabilities are dropped: a publisher
+        must not be able to break discovery of its own zone.
+        """
+        if v is None:
+            return None
+        candidate = v.strip()
+        if not candidate or not _REALM_PATTERN.match(candidate):
+            return None
+        return candidate
 
     @property
     def fqdn(self) -> str:

@@ -853,7 +853,12 @@ class TestArdHardening:
         )
         agent = parse_http_index(_ard_catalog([entry]))[0]
         assert len(agent.description) == _MAX_ARD_STR_LEN
-        assert len(agent.capability.capabilities[0]) == _MAX_ARD_STR_LEN
+        # Capabilities are additionally held to the DNS-AID capability grammar
+        # on ingest, which is tighter than the generic ARD string bound. The
+        # entry is dropped rather than truncated: _ard_str_list truncates, and
+        # a truncated blob would satisfy the charset check as a 1024-byte
+        # "identifier" nobody published.
+        assert agent.capability.capabilities == []
 
     def test_malformed_port_is_clean_skip_not_silent_drop(self):
         entries = [
