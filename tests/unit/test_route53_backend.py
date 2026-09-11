@@ -376,6 +376,94 @@ class TestRoute53BackendDeleteRecord:
             assert result is False
 
 
+class TestRoute53BackendGetRecord:
+    """Tests for single record lookup."""
+
+    @pytest.mark.asyncio
+    async def test_get_record_found(self):
+        """get_record returns the record when the exact name/type matches."""
+        backend = Route53Backend(zone_id="Z123")
+
+        mock_client = MagicMock()
+        mock_client.list_resource_record_sets.return_value = {
+            "ResourceRecordSets": [
+                {
+                    "Name": "_chat._a2a._agents.example.com.",
+                    "Type": "SVCB",
+                    "TTL": 3600,
+                    "ResourceRecords": [{"Value": '1 chat.example.com. alpn="a2a"'}],
+                }
+            ]
+        }
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            result = await backend.get_record("example.com", "_chat._a2a._agents", "SVCB")
+
+        assert result is not None
+        assert result["type"] == "SVCB"
+        assert result["values"] == ['1 chat.example.com. alpn="a2a"']
+
+    @pytest.mark.asyncio
+    async def test_get_record_not_found_empty(self):
+        """An empty result set is the one signal that means 'record absent'."""
+        backend = Route53Backend(zone_id="Z123")
+
+        mock_client = MagicMock()
+        mock_client.list_resource_record_sets.return_value = {"ResourceRecordSets": []}
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            result = await backend.get_record("example.com", "_missing._agents", "SVCB")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_record_not_found_on_next_record(self):
+        """Route 53 may return the next record by sort order; a name/type mismatch is absent."""
+        backend = Route53Backend(zone_id="Z123")
+
+        mock_client = MagicMock()
+        mock_client.list_resource_record_sets.return_value = {
+            "ResourceRecordSets": [
+                {
+                    "Name": "_other._agents.example.com.",
+                    "Type": "TXT",
+                    "TTL": 3600,
+                    "ResourceRecords": [{"Value": "x"}],
+                }
+            ]
+        }
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            result = await backend.get_record("example.com", "_chat._agents", "SVCB")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_record_propagates_api_error(self):
+        """A real API error must propagate, NOT be masked as 'record absent'.
+
+        Route 53 signals a missing record with an empty result set, never an
+        exception. Swallowing a genuine failure (auth/throttling/network) to
+        None makes a transient error indistinguishable from absence, which lets
+        callers such as publisher._unpublish disarm their masked-failure guard
+        and de-index a still-live agent. Guard the raising contract so a future
+        refactor can't silently re-introduce the swallow.
+        """
+        from botocore.exceptions import ClientError
+
+        backend = Route53Backend(zone_id="Z123")
+
+        mock_client = MagicMock()
+        mock_client.list_resource_record_sets.side_effect = ClientError(
+            {"Error": {"Code": "Throttling", "Message": "Rate exceeded"}},
+            "ListResourceRecordSets",
+        )
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            with pytest.raises(ClientError):
+                await backend.get_record("example.com", "_chat._a2a._agents", "SVCB")
+
+
 class TestRoute53BackendListRecords:
     """Tests for record listing."""
 
