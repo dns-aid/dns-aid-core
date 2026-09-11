@@ -153,6 +153,13 @@ class A2AAuthentication:
                         kind = key[: -len("SecurityScheme")]
                         inner = value
                         break
+            # A2A wraps Bearer as HTTP auth, while the SDK registry uses the concrete type.
+            if (
+                isinstance(kind, str)
+                and kind.casefold() in {"http", "httpauth"}
+                and str(inner.get("scheme", "")).casefold() == "bearer"
+            ):
+                kind = "bearer"
             if kind and kind not in found:
                 found.append(kind)
             for url_field in ("tokenUrl", "openIdConnectUrl", "authorizationUrl"):
