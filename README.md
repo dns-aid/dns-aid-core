@@ -38,6 +38,7 @@ Changes to protocol behavior should be discussed within the IETF.
 - [Getting Started Guide](docs/getting-started.md) — install, first agent publication, backend setup
 - [API Reference](docs/api-reference.md) — Python SDK, CLI, and MCP server tool reference
 - [ARD ai-catalog discovery](docs/ard-catalog.md) — interop with [Agentic Resource Discovery](https://agenticresourcediscovery.org/spec/): catalog discovery, the host-anywhere DNS pointer, and card dereferencing
+- [Site agent convention](docs/site-agent.md) — experimental: advertising the domain's own website as an agent (`site` name, `webmcp` bap token)
 - [Architecture](docs/architecture.md) — protocol layers, metadata resolution, integration points
 - [Integrations](docs/integrations.md) — backend-specific setup notes
 - [Demo Guide](docs/demo-guide.md) — end-to-end walkthrough for talks and presentations
