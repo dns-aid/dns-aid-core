@@ -255,6 +255,13 @@ nested catalogs recurse (depth ≤ 3); registry entries and non-agent artifacts 
 entry's `trustManifest` is preserved on `AgentRecord.trust_manifest` (pass-through — dns-aid does
 not verify signatures, attestation digests, or identity↔publisher alignment).
 
+For zones whose authoritative DNS server does not expose SVCB, per-agent
+resolution falls back to a `v=1` TXT record at the same FQDN. The returned
+`AgentRecord` carries `endpoint_source="dns_txt_fallback"`. See
+[architecture.md](architecture.md#svcb--https--txt-fallback-ladder) for
+the resolution ladder and [`docs/rfc/wire-format.abnf`](rfc/wire-format.abnf)
+for the wire grammar.
+
 #### Returns
 
 `DiscoveryResult` - Contains list of discovered agents and query metadata.
@@ -588,7 +595,7 @@ agent = AgentRecord(
 | `policy_uri` | `str` | No | `None` | URI to agent policy document |
 | `realm` | `str` | No | `None` | Multi-tenant scope identifier |
 | `capability_source` | `str` | No | `None` | Where capabilities came from: `cap_uri`, `well_known`, `agent_card`, `http_index`, `ard_catalog`, `txt_fallback`, `none` |
-| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `http_index`, `http_index_fallback`, `ard_card` (real endpoint from a fetched ARD agent/server card), `ard_inline`, `direct`, `directory` |
+| `endpoint_source` | `str` | No | `None` | Where endpoint came from: `dns_svcb`, `dns_svcb_enriched`, `dns_txt_fallback` (TXT-encoded fallback for SVCB-less zones), `http_index`, `http_index_fallback`, `ard_card` (real endpoint from a fetched ARD agent/server card), `ard_inline`, `direct`, `directory` |
 | `trust_manifest` | `TrustManifest` | No | `None` | Publisher trust claims from an ARD ai-catalog entry (identity, attestations, provenance, signature) — pass-through, not verified |
 | `catalog_trust` | `str \| None` | No | `None` | ARD-sourced records only — how the catalog was trusted: `tls_domain` (on-domain), `dnssec` (DNSSEC-validated off-domain pointer), or `jws` (JWS-signed off-domain). `None` for pure-DNS records. |
 | `dnssec_validated` | `bool` | No | `False` | `True` when this agent's DNS response carried the resolver **AD flag**. Set for DNS-plane agents when `require_dnssec` / `min_dnssec` / `verify_dane` is used; ARD / HTTP-catalog agents are exempt and stay `False`. AD-flag based — not independent DNSKEY→DS→RRSIG chain validation. |

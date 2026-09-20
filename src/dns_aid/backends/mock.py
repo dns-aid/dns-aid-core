@@ -221,13 +221,20 @@ class MockBackend(DNSBackend):
 
         MockBackend accepts all params (like NIOS) to enable full protocol
         testing without private-use key restrictions.
+
+        Consults the shared TXT-fallback gate first so the experimental
+        fallback path is exercised consistently across backend
+        implementations.
         """
-        records: list[str] = []
         zone = agent.domain
         # draft-02: flat primary owner — relative record name is just the agent name.
         name = agent.name
         walkable_name = f"{agent.name}._agents"
 
+        if self._txt_fallback_enabled():
+            return await self._publish_via_txt_fallback(agent, zone, name)
+
+        records: list[str] = []
         svcb_fqdn = await self.create_svcb_record(
             zone=zone,
             name=name,
