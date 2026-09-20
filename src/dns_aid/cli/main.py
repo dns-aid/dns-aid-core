@@ -23,11 +23,15 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
+import time
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from dns_aid.core.models import AgentRecord
 
 app = typer.Typer(
     name="dns-aid",
@@ -174,6 +178,25 @@ def publish(
         str | None,
         typer.Option("--private-key", help="Path to EC P-256 private key PEM for signing"),
     ] = None,
+    sig_validity: Annotated[
+        int | None,
+        typer.Option(
+            "--sig-validity",
+            help="How long the JWS signature stays valid, in seconds (default 90 days). "
+            "Independent of --ttl, which only governs resolver caching. Re-publish "
+            "before this elapses or the signature verifies as expired.",
+        ),
+    ] = None,
+    sig_kid: Annotated[
+        str | None,
+        typer.Option(
+            "--sig-kid",
+            help="Key identifier to publish in the JWS header, naming which key in your "
+            "JWKS signed this record. Required for an overlapping key rollover: without "
+            "it a verifier tries every key in the document and cannot tell the outgoing "
+            "key from the incoming one. Must match a 'kid' in your published JWKS.",
+        ),
+    ] = None,
     allow_underscore_target: Annotated[
         bool,
         typer.Option(
@@ -231,8 +254,6 @@ def publish(
     # Get backend
     dns_backend = _get_backend(backend)
 
-    console.print("\n[bold]Publishing agent to DNS...[/bold]\n")
-
     # bap is a single versioned-protocol identifier per draft-02 §FutureWork
     # (Bulk Agent Protocol). Pass through unchanged; whitespace-trimmed.
     bap_value = bap.strip() if bap else None
@@ -241,6 +262,42 @@ def publish(
     if sign and not private_key:
         error_console.print("[red]✗ --sign requires --private-key[/red]")
         raise typer.Exit(1)
+
+    if sig_validity is not None:
+        from dns_aid.core.publisher import (
+            MAX_SIG_VALIDITY_SECONDS,
+            MIN_SIG_VALIDITY_SECONDS,
+        )
+
+        # Rejected here rather than deep in the publisher so the operator gets
+        # the range back instead of a traceback from a library boundary.
+        if not sign:
+            error_console.print("[red]✗ --sig-validity requires --sign[/red]")
+            raise typer.Exit(1)
+        if not (MIN_SIG_VALIDITY_SECONDS <= sig_validity <= MAX_SIG_VALIDITY_SECONDS):
+            error_console.print(
+                f"[red]✗ --sig-validity must be between {MIN_SIG_VALIDITY_SECONDS} "
+                f"and {MAX_SIG_VALIDITY_SECONDS} seconds[/red]"
+            )
+            raise typer.Exit(1)
+
+    if sig_kid is not None and not sign:
+        error_console.print("[red]✗ --sig-kid requires --sign[/red]")
+        raise typer.Exit(1)
+
+    if sign and private_key:
+        import os
+        from pathlib import Path
+
+        key_path = Path(private_key)
+        if not key_path.is_file():
+            error_console.print(f"[red]✗ private key not found: {private_key}[/red]")
+            raise typer.Exit(1)
+        if not os.access(key_path, os.R_OK):
+            error_console.print(f"[red]✗ private key is not readable: {private_key}[/red]")
+            raise typer.Exit(1)
+
+    console.print("\n[bold]Publishing agent to DNS...[/bold]\n")
 
     result = run_async(
         do_publish(
@@ -269,6 +326,8 @@ def publish(
             ipv6_hint=",".join(ipv6hint) if ipv6hint else None,
             sign=sign,
             private_key_path=private_key,
+            **({"sig_validity_seconds": sig_validity} if sig_validity is not None else {}),
+            sig_kid=sig_kid,
             allow_underscore_target=allow_underscore_target,
             publish_walkable_alias=walkable,
         )
@@ -411,6 +470,18 @@ def discover(
             help="Only return records whose JWS signature verified (auto-enables --verify-signatures).",
         ),
     ] = False,
+    require_signed_params: Annotated[
+        bool,
+        typer.Option(
+            "--require-signed-params",
+            help=(
+                "Also require the signature to cover the DNS-AID parameters "
+                "(cap, cap-sha256, policy, realm, well-known), not just the endpoint. "
+                "Refuses records signed before the svcb claim, whose capability "
+                "pointer can be swapped while the signature still verifies."
+            ),
+        ),
+    ] = False,
     require_signature_algorithm: Annotated[
         list[str] | None,
         typer.Option(
@@ -441,7 +512,9 @@ def discover(
         dns-aid discover example.com --name chat --require-signed
         dns-aid discover example.com --capabilities payment-processing --auth-type oauth2
     """
+    from dns_aid.core.discoverer import _dnssec_check_runs
     from dns_aid.core.discoverer import discover as do_discover
+    from dns_aid.core.models import CATALOG_ENDPOINT_SOURCES
 
     # Human-readable status header — suppressed in --json mode so stdout stays
     # a single machine-parseable JSON document.
@@ -468,6 +541,7 @@ def discover(
                 min_dnssec=min_dnssec,
                 text_match=text_match,
                 require_signed=require_signed,
+                require_signed_params=require_signed_params,
                 require_signature_algorithm=require_signature_algorithm,
                 verify_dane=verify_dane,
             )
@@ -501,7 +575,80 @@ def discover(
                     # ARD-sourced / opt-in keys only — omitted otherwise so legacy
                     # output stays byte-identical.
                     **({"catalog_trust": a.catalog_trust} if a.catalog_trust is not None else {}),
-                    **({"dane_verified": a.dane_verified} if a.dane_verified is not None else {}),
+                    # DNSSEC and DANE are reported only when the check actually
+                    # ran, so absence means "not checked" and a present value is
+                    # a real result. dnssec_validated is a plain bool that
+                    # defaults to False, so emitting it unconditionally would
+                    # report "not checked" as "failed validation". DANE is
+                    # emitted even when None, because None is the meaningful
+                    # answer here: RFC 6698 section 10.1 demotes a TLSA match to
+                    # unknown without a DNSSEC-validated chain, and silently
+                    # omitting it made a demotion look identical to no TLSA
+                    # record at all.
+                    **(
+                        {"dnssec_validated": a.dnssec_validated}
+                        # Per agent, not per query. Catalog / ARD records are
+                        # exempt from the DNSSEC check by design, so their
+                        # dnssec_validated is the model default False, not a
+                        # verdict -- reporting "not checked" as "failed".
+                        if a.endpoint_source not in CATALOG_ENDPOINT_SOURCES
+                        and _dnssec_check_runs(
+                            require_dnssec=require_dnssec,
+                            min_dnssec=min_dnssec,
+                            verify_dane=verify_dane,
+                            # discover() turns require_signed into
+                            # verify_signatures internally, so the effective
+                            # value is what decides whether the check ran.
+                            # Passing the caller's meant `--require-signed`
+                            # alone performed a DNSSEC lookup per agent and then
+                            # suppressed the verdict it produced.
+                            verify_signatures=verify_signatures or require_signed,
+                        )
+                        else {}
+                    ),
+                    **({"dnssec_signed": a.dnssec_signed} if a.dnssec_signed is not None else {}),
+                    **(
+                        {"dane_verified": a.dane_verified}
+                        if (verify_dane or a.dane_verified is not None)
+                        else {}
+                    ),
+                    # Signature outcome. Emitted only when the record carries a
+                    # sig or verification actually ran, so output for unsigned
+                    # records stays byte-identical to previous releases.
+                    # ``signature_status`` is the actionable field: "expired"
+                    # and "invalid" are both a False ``signature_verified`` but
+                    # call for different responses, and "no_key" means nothing
+                    # was verified rather than that the record was rejected.
+                    **({"sig": a.sig} if a.sig is not None else {}),
+                    **(
+                        {"signature_verified": a.signature_verified}
+                        if a.signature_status is not None
+                        else {}
+                    ),
+                    **(
+                        {"signature_status": a.signature_status}
+                        if a.signature_status is not None
+                        else {}
+                    ),
+                    # Only meaningful once a signature verified. False says the
+                    # signature covers the endpoint tuple but NOT cap, cap-sha256,
+                    # policy, realm or well-known, so the capability pointer is
+                    # unattested and the publisher should re-sign.
+                    **(
+                        {"signature_covers_params": a.signature_covers_params}
+                        if a.signature_verified is True
+                        else {}
+                    ),
+                    **(
+                        {"signature_algorithm": a.signature_algorithm}
+                        if a.signature_algorithm is not None
+                        else {}
+                    ),
+                    **(
+                        {"signature_expires_at": a.signature_expires_at}
+                        if a.signature_expires_at is not None
+                        else {}
+                    ),
                     **(
                         {"trust_manifest": a.trust_manifest.model_dump()}
                         if a.trust_manifest is not None
@@ -518,6 +665,14 @@ def discover(
 
     if result.count == 0:
         console.print(f"[yellow]No agents found at {domain}[/yellow]")
+        if require_signed:
+            # The most confusing empty result: records were found and then
+            # dropped by the trust gate. Say so, rather than letting it read
+            # as "nothing published here".
+            console.print(
+                "[dim]--require-signed was set, so any agent whose signature did not "
+                "verify was dropped. Re-run without it to see the reason.[/dim]"
+            )
         console.print(f"\n[dim]Query: {result.query}[/dim]")
         console.print(f"[dim]Time: {result.query_time_ms:.2f}ms[/dim]")
         return
@@ -530,17 +685,61 @@ def discover(
     table.add_column("Endpoint")
     table.add_column("Capabilities")
     table.add_column("Cap Source")
+    # Only shown when signature verification actually ran. Without this the
+    # outcome was invisible: --require-signed could drop every agent and the
+    # operator had no way to see whether the signatures had merely expired or
+    # had genuinely failed.
+    show_signature = verify_signatures or require_signed
+    if show_signature:
+        table.add_column("Signature")
+    # Same rule as the JSON payload: only shown when the check ran, so a blank
+    # column can never be mistaken for a failed validation.
+    # The fourth call site. It open-coded the gate, so `discover d
+    # --verify-signatures` emitted dnssec_validated in --json while hiding the
+    # column in the table: same command, two surfaces, opposite answers.
+    show_dnssec = _dnssec_check_runs(
+        require_dnssec=require_dnssec,
+        min_dnssec=min_dnssec,
+        verify_dane=verify_dane,
+        verify_signatures=verify_signatures or require_signed,
+    )
+    if show_dnssec:
+        table.add_column("DNSSEC")
+    if verify_dane:
+        table.add_column("DANE")
 
     for agent in result.agents:
-        table.add_row(
+        row = [
             agent.name,
             agent.protocol.value,
             agent.endpoint_url,
             ", ".join(agent.capabilities) if agent.capabilities else "-",
             agent.capability_source or "-",
-        )
+        ]
+        if show_signature:
+            row.append(_format_signature(agent))
+        if show_dnssec:
+            # Catalog / ARD agents are exempt from the DNSSEC check, so their
+            # dnssec_validated is the model default rather than a verdict.
+            # Rendering it printed "unvalidated" for records nobody checked.
+            if agent.endpoint_source in CATALOG_ENDPOINT_SOURCES:
+                row.append("[dim]n/a[/dim]")
+            else:
+                row.append(_format_dnssec(agent.dnssec_validated, agent.dnssec_signed))
+        if verify_dane:
+            row.append(_format_dane(agent.dane_verified))
+        table.add_row(*row)
 
     console.print(table)
+    if show_dnssec and any(
+        a.dnssec_validated is False and a.endpoint_source not in CATALOG_ENDPOINT_SOURCES
+        for a in result.agents
+    ):
+        console.print(
+            "\n[dim]Some records are unvalidated. 'signed; resolver' means the zone does "
+            "sign its records but your resolver is not validating them -- use a validating "
+            "resolver. 'zone unsigned' means the zone owner has not enabled DNSSEC.[/dim]"
+        )
     console.print(f"\n[dim]Query: {result.query}[/dim]")
     console.print(f"[dim]Time: {result.query_time_ms:.2f}ms[/dim]")
 
@@ -554,6 +753,109 @@ def discover(
 _EXIT_TRANSIENT = 75  # EX_TEMPFAIL — directory unreachable / 5xx / timeout / 429
 _EXIT_AUTH = 77  # EX_NOPERM — directory rejected credentials (401/403)
 _EXIT_CONFIG = 78  # EX_CONFIG — directory_api_url not set
+
+
+EXPIRY_WARN_DAYS = 14
+
+
+def _format_dnssec(value: bool | None, signed: bool | None = None) -> str:
+    """Render the DNSSEC outcome.
+
+    False is deliberately NOT rendered as "no". The flag follows the AD bit,
+    which a resolver only sets when it validates, so False covers two very
+    different situations: the zone is genuinely unsigned, or the zone is signed
+    and the caller's resolver simply does not validate. Rendering it as "no"
+    asserted the first when it is frequently the second. "unvalidated" is true
+    in both cases and points at the right question.
+    """
+    if value is True:
+        return "[green]validated[/green]"
+    if value is False:
+        # RRSIG evidence turns one ambiguous answer into two actionable ones:
+        # the zone owner has not signed, or the caller's resolver will not
+        # validate. Same flag value, opposite owner.
+        if signed is True:
+            return "[yellow]unvalidated[/yellow]\n[dim](signed; resolver)[/dim]"
+        if signed is False:
+            return "[yellow]unvalidated[/yellow]\n[dim](zone unsigned)[/dim]"
+        return "[yellow]unvalidated[/yellow]"
+    return "[dim]not checked[/dim]"
+
+
+def _format_dane(value: bool | None) -> str:
+    """Render the DANE outcome.
+
+    Unlike DNSSEC, False here is a real negative: a TLSA record was published,
+    every association was evaluated, and none matched the presented certificate.
+
+    None is the wider surface and is deliberately not a rejection. It covers no
+    TLSA record at all; a match demoted for want of a DNSSEC-validated chain
+    (RFC 6698 section 10.1); a record whose associations this client cannot
+    evaluate, which is usages 0 and 2 pinning a trust anchor it cannot inspect,
+    or an unsupported selector or matching type; an association left unevaluated
+    because the comparison raised; and an endpoint skipped when the aggregate
+    DANE budget ran out.
+
+    Collapsing any of those into False would report an unreachable or
+    unevaluatable endpoint as a forged certificate binding.
+    """
+    if value is True:
+        return "[green]verified[/green]"
+    if value is False:
+        return "[red]no match[/red]"
+    return "[yellow]unknown[/yellow]"
+
+
+def _format_signature(agent: AgentRecord) -> str:
+    """Render the signature outcome for the discover table.
+
+    Keyed on ``signature_status`` rather than ``signature_verified`` because
+    the boolean cannot separate the two cases an operator responds to
+    differently: an expired signature is fixed by re-publishing, a genuinely
+    invalid one warrants investigation. ``no_key`` is neither -- nothing was
+    verified, so it is reported as unknown rather than as a rejection.
+    """
+    status = agent.signature_status
+    if status is None:
+        return "[dim]-[/dim]"
+
+    if status in ("verified", "verified_endpoint_only") and agent.signature_expires_at is not None:
+        remaining = agent.signature_expires_at - time.time()
+        # A lapsed window is expired whatever the verifier concluded: the JWS
+        # validated against a key that has since aged past its own exp claim.
+        # Rendering that as "verified (-3d left)" reads as healthy.
+        if remaining <= 0:
+            return "[yellow]expired (re-publish)[/yellow]"
+        # Guarded on `is not None`, not truthiness. Epoch zero is a real
+        # timestamp, and a falsy check sent it to the plain verified branch.
+        days = int(remaining // 86400)
+        # Verification stays green right up to the moment it flips to expired,
+        # so the window is the only notice a publisher gets. Amber inside two
+        # weeks, which is time to re-publish before anything starts failing.
+        # The endpoint-only qualifier has to survive the countdown path.
+        # signature_expires_at is never None for a bound signature, so putting
+        # the qualifier only in the table below made it unreachable and every
+        # real endpoint-only record rendered as plain green "verified".
+        scope = " endpoint only," if status == "verified_endpoint_only" else ""
+        if scope:
+            return f"[yellow]verified ({scope.strip(' ,')}, {days}d left, re-sign)[/yellow]"
+        if days <= EXPIRY_WARN_DAYS:
+            return f"[yellow]verified ({days}d left, re-publish)[/yellow]"
+        return f"[green]verified ({days}d left)[/green]"
+
+    rendering = {
+        "verified": ("green", f"verified ({agent.signature_algorithm or 'ES256'})"),
+        "verified_endpoint_only": ("yellow", "verified (endpoint only, re-sign)"),
+        "skipped_dnssec": ("green", "n/a (DNSSEC)"),
+        "expired": ("yellow", "expired (re-publish)"),
+        "invalid": ("red", "invalid"),
+        "unbound": ("red", "does not match record"),
+        "no_key": ("yellow", "no JWKS reachable"),
+        "not_signed": ("dim", "unsigned"),
+        "not_checked": ("yellow", "not checked (budget)"),
+    }
+    colour, label = rendering.get(status, ("dim", str(status)))
+    return f"[{colour}]{label}[/{colour}]"
 
 
 @app.command()
@@ -1576,7 +1878,7 @@ def keys_generate(
 
     console.print("\n[dim]Next steps:[/dim]")
     console.print("  1. Export JWKS: dns-aid keys export-jwks -i public.pem")
-    console.print("  2. Publish JWKS to: https://yourdomain/.well-known/dns-aid-jwks.json")
+    console.print("  2. Publish JWKS to: https://dns-aid.yourdomain/.well-known/dns-aid-jwks.json")
     console.print("  3. Sign agents: dns-aid publish --sign --private-key private.pem ...")
 
 
@@ -1599,7 +1901,10 @@ def keys_export_jwks(
     Export a public key as a JWKS document.
 
     The JWKS document should be published at:
-    https://yourdomain/.well-known/dns-aid-jwks.json
+    https://dns-aid.yourdomain/.well-known/dns-aid-jwks.json
+
+    Verifiers try that host first. The zone apex still works but is deprecated
+    and costs a failed lookup on every verification.
 
     Example:
         # Export to stdout
@@ -1660,7 +1965,11 @@ def keys_export_jwks(
         console.print(jwks_json)
 
     console.print("\n[dim]Publish this file at:[/dim]")
-    console.print("  https://yourdomain/.well-known/dns-aid-jwks.json")
+    console.print("  https://dns-aid.yourdomain/.well-known/dns-aid-jwks.json")
+    console.print(
+        "[dim]  (the zone apex still verifies but is deprecated — it costs a "
+        "failed lookup per verification)[/dim]"
+    )
 
 
 # ============================================================================
@@ -1795,7 +2104,17 @@ def main(
 
     Publish and discover AI agents using DNS infrastructure.
     """
+    import sys
+
+    import structlog
     from dotenv import load_dotenv
+
+    # The CLI never adopted configure_logging, so structlog kept its default
+    # factory and wrote diagnostics to stdout. That made `--json` unparseable:
+    # log lines landed ahead of the document, so piping to a parser failed on
+    # the first byte. Only the stream moves here. Level, processors and
+    # --quiet behave exactly as before.
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
 
     load_dotenv()
 

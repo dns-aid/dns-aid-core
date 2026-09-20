@@ -40,7 +40,6 @@ build/
 Dockerfile
 Makefile
 cliff.toml
-requirements.lock
 uv.lock
 
 # --- Spec Kit / IDE / agent tooling ---

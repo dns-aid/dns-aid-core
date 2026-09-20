@@ -424,24 +424,26 @@ class NS1Backend(DNSBackend):
         client = await self._get_client()
         domain, fqdn = self._normalize(zone, name)
 
-        try:
-            response = await client.get(f"/zones/{domain}/{fqdn}/{record_type}")
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            data = response.json()
-
-            return {
-                "name": name,
-                "fqdn": fqdn,
-                "type": record_type,
-                "ttl": data.get("ttl", 0),
-                "values": self._extract_values(data.get("answers", [])),
-            }
-
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.debug("Record not found", fqdn=fqdn, type=record_type, error=str(exc))
+        # A 404 is the one signal that means "record absent" — return None for it.
+        # Every other failure (5xx, auth, network, a malformed body) MUST propagate:
+        # swallowing it to None makes a transient error indistinguishable from
+        # "record absent", which lets callers such as publisher._unpublish disarm
+        # their masked-failure guard and de-index a still-live agent. Applies the
+        # "only the real not-found signal returns None" contract that
+        # CloudflareBackend.get_record also uses.
+        response = await client.get(f"/zones/{domain}/{fqdn}/{record_type}")
+        if response.status_code == 404:
             return None
+        response.raise_for_status()
+        data = response.json()
+
+        return {
+            "name": name,
+            "fqdn": fqdn,
+            "type": record_type,
+            "ttl": data.get("ttl", 0),
+            "values": self._extract_values(data.get("answers", [])),
+        }
 
     async def list_zones(self) -> list[dict]:
         """List all zones accessible with the API key.

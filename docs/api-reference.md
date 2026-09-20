@@ -824,7 +824,7 @@ backend = InfobloxNIOSBackend(
 | `NIOS_WAPI_VERSION` | No | `2.13.7` | WAPI version |
 | `NIOS_VERIFY_SSL` | No | `false` | Verify TLS certificate |
 
-**DNS-AID Compliance**: NIOS WAPI supports ServiceMode SVCB records (priority > 0) with full SVC parameters including custom DNS-AID keys (`key65400`–`key65408`). NIOS natively supports private-use SVCB keys via the `supports_private_svcb_keys` property.
+**DNS-AID Compliance**: NIOS WAPI supports ServiceMode SVCB records (priority > 0) with full SVC parameters including custom DNS-AID keys (`key65400`–`key65409`). NIOS natively supports private-use SVCB keys via the `supports_private_svcb_keys` property.
 
 ### NS1Backend
 
@@ -847,7 +847,63 @@ backend = NS1Backend(
 | `NS1_API_KEY` | Yes | - | NS1 API key with DNS read/write permissions |
 | `NS1_BASE_URL` | No | `https://api.nsone.net/v1` | API base URL (for private/dedicated deployments) |
 
-**DNS-AID Compliance**: NS1 supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65408`). NS1 natively accepts private-use SVCB keys — cap_uri, policy_uri, and realm go directly into the SVCB record without TXT demotion.
+**DNS-AID Compliance**: NS1 supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65409`). NS1 natively accepts private-use SVCB keys — cap_uri, policy_uri, and realm go directly into the SVCB record without TXT demotion.
+
+### AkamaiEdgeDNSBackend
+
+Akamai Edge DNS implementation using the Config DNS API v2 with EdgeGrid authentication.
+
+```python
+from dns_aid.backends.akamai_edgedns import AkamaiEdgeDNSBackend
+
+backend = AkamaiEdgeDNSBackend()  # reads AKAMAI_* env vars or ~/.edgerc
+
+# Or with explicit configuration
+backend = AkamaiEdgeDNSBackend(
+    host="akab-xxxx.luna.akamaiapis.net",
+    client_token="...",
+    client_secret="...",
+    access_token="...",
+)
+```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AKAMAI_HOST` | No* | - | EdgeGrid API hostname |
+| `AKAMAI_CLIENT_TOKEN` | No* | - | EdgeGrid client token |
+| `AKAMAI_CLIENT_SECRET` | No* | - | EdgeGrid client secret |
+| `AKAMAI_ACCESS_TOKEN` | No* | - | EdgeGrid access token |
+| `AKAMAI_EDGERC` | No | `~/.edgerc` | Path to `.edgerc` credentials file |
+| `AKAMAI_EDGERC_SECTION` | No | `default` | Section within `.edgerc` |
+
+\* Either all four `AKAMAI_*` credential variables or an `~/.edgerc` file. Partial env credentials raise an error naming the missing variables rather than silently falling back.
+
+**DNS-AID Compliance**: Akamai Edge DNS supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65408`) via the `supports_private_svcb_keys` property — cap_uri, policy_uri, bap, and realm go directly into the SVCB record without TXT demotion.
+
+**Concurrency**: Akamai serializes modifications per zone. The backend serializes its own writes per zone and automatically retries transient `409 concurrentZoneModification` responses with exponential backoff, so concurrent `publish_agent()` calls are safe.
+
+### CloudflareBackend
+
+Cloudflare DNS REST API v4 implementation.
+
+```python
+from dns_aid.backends.cloudflare import CloudflareBackend
+
+backend = CloudflareBackend()  # reads CLOUDFLARE_API_TOKEN from env
+
+# Or with explicit configuration
+backend = CloudflareBackend(
+    api_token="your-api-token",
+    zone_id="optional-zone-id",  # auto-discovered from domain if omitted
+)
+```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CLOUDFLARE_API_TOKEN` | Yes | - | API token with Zone → DNS → Edit (and Read) permissions |
+| `CLOUDFLARE_ZONE_ID` | No | - | Zone ID (auto-discovered by zone name if omitted) |
+
+**DNS-AID Compliance**: Cloudflare supports ServiceMode SVCB records (priority > 0) with full SVC parameters including private-use keys (`key65400`–`key65409`). Cloudflare natively accepts private-use SVCB keys via the `supports_private_svcb_keys` property — cap_uri, cap_sha256, bap, policy_uri, and realm go directly into the SVCB record without TXT demotion. TXT records are still written for human-readable metadata (capabilities, version, description), each value stored as its own RFC 1035 character-string.
 
 ### DDNSBackend
 
@@ -1142,7 +1198,7 @@ dns-aid call --domain example.com --name network-specialist get_subnets \
 
 | Variable | Description |
 |----------|-------------|
-| `DNS_AID_BACKEND` | Default backend: "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", or "mock" |
+| `DNS_AID_BACKEND` | Default backend: "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", or "mock" |
 | `DNS_AID_LOG_LEVEL` | Logging level: DEBUG, INFO, WARNING, ERROR |
 
 **AWS Route 53:**
@@ -1184,6 +1240,19 @@ Route 53 uses boto3's credential chain. No env vars are required if `~/.aws/cred
 | `DDNS_KEY_SECRET` | TSIG key secret, base64 (required) |
 | `DDNS_KEY_ALGORITHM` | TSIG algorithm (default: hmac-sha256) |
 | `DDNS_PORT` | DNS server port (default: 53) |
+
+**Akamai Edge DNS:**
+
+Akamai supports two credential sources. All four `AKAMAI_*` vars take precedence over `~/.edgerc` when set.
+
+| Variable | Description |
+|----------|-------------|
+| `AKAMAI_HOST` | EdgeGrid API hostname (e.g. `akab-xxxx.luna.akamaiapis.net`) |
+| `AKAMAI_CLIENT_TOKEN` | EdgeGrid client token |
+| `AKAMAI_CLIENT_SECRET` | EdgeGrid client secret |
+| `AKAMAI_ACCESS_TOKEN` | EdgeGrid access token |
+| `AKAMAI_EDGERC` | Path to `.edgerc` credentials file (default: `~/.edgerc`) |
+| `AKAMAI_EDGERC_SECTION` | Section within `.edgerc` (default: `default`) |
 
 ---
 

@@ -7,6 +7,472 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-08-09
+
+### Changed
+
+- **The MCP server now runs on both mcp 1.x and 2.x.** `mcp` 2.0.0 removed
+  `mcp.server.fastmcp` outright (`FastMCP` became
+  `mcp.server.mcpserver.MCPServer`), and `dns_aid/mcp/server.py` imported it
+  unguarded — so an install that resolved mcp 2.x died at import, before
+  `main()` ran, for both the `dns-aid-mcp` entrypoint and
+  `python -m dns_aid.mcp.server`. The import now falls back to `MCPServer`, and
+  because 2.x moved the streamable-HTTP options (`json_response`, `host`,
+  `port`, `stateless_http`, …) off the constructor and onto
+  `streamable_http_app()`, the server passes them to whichever the installed
+  major expects. If neither import succeeds the error names the extra *and* the
+  supported version range instead of raising a bare `ModuleNotFoundError`.
+  Verified against both majors: 22 tools registered and `GET /health` returns
+  200 under mcp 1.29.0 and 2.0.0 alike.
+- **The SDK's MCP client reports an unsupported mcp version accurately.**
+  Previously any import failure produced "Missing 'mcp' extra: install
+  dns-aid[mcp]", which sent users with mcp 2.x installed to reinstall a package
+  they already had. The handler now distinguishes the two cases and states the
+  supported range. The `mcp` dependency stays capped below 2.0.0 because mcp 2.x
+  renamed `mcp.types`' camelCase result fields to snake_case: the classes still
+  import, but `CallToolResult.isError`, `CallToolResult.structuredContent`,
+  `ListToolsResult.nextCursor` and `Tool.inputSchema` all raise `AttributeError`,
+  and the streamable-HTTP transport changed shape. Lifting the ceiling needs a
+  field-compatibility shim, tracked separately. Note the transport's
+  `http_client` parameter is annotated `httpx2.AsyncClient`, but that is
+  advisory — httpx2 and httpx expose identical `AsyncClient` constructor
+  parameters and an httpx client is accepted, so no HTTP-layer port is required.
+
+### Removed
+
+- **`requirements.lock`** — deleted, superseding the 0.5.1 entry below that
+  advertised it as "reproducible builds with pinned dependencies". Nothing ever
+  consumed it: the Dockerfile, the Makefile and the CONTRIBUTING dev setup all
+  install from `pyproject.toml`, and CI resolves either from `uv.lock` via
+  `uv sync --frozen` or from the hash-pinned `.github/workflows/requirements-*.txt`.
+  It was not usable as an install spec either — no hashes,
+  an `-e git+https://…#egg=dns_aid` editable line, and the dev toolchain (mypy,
+  ruff, radon, pip-licenses) mixed in with the runtime dependencies — because it
+  was a `pip freeze` of a development virtualenv rather than a resolved lock.
+  With no consumer and nothing regenerating it, it never moved: in six months
+  the only edits rewrote the editable-install URL across two org renames, and
+  six of its pins fell below the CVE floors `pyproject.toml` declares —
+  `mcp==1.26.0` (floor `>=1.28.1`, PYSEC-2026-3483), `PyJWT==2.11.0`
+  (`>=2.13.0`), `python-multipart==0.0.22` (`>=0.0.27`, CVE-2026-42561),
+  `Pygments==2.19.2` (`>=2.20.0`, CVE-2026-4539), `cryptography==46.0.4`
+  (`>=50.0.0`) and `urllib3==2.6.3` (`>=2.7.0`). The file
+  shipped inside the PyPI sdist, so anyone who took the advertisement at face
+  value and ran `pip install -r requirements.lock` got a knowingly vulnerable
+  set that the weekly `pip-audit` — which audits the `uv.lock` environment —
+  never inspected. `uv.lock` remains the maintained lockfile and is the one the
+  OpenSSF evidence table cites for `external_dependencies` and the `build_*`
+  criteria; regenerating a
+  second, hand-tended pin list would have added a competing source of truth that
+  drifts again the moment nobody remembers it. ([#232](https://github.com/dns-aid/dns-aid-core/issues/232))
+
+### Fixed
+
+- **The `mcp` dependency is capped below `2.0.0`, fixing an immediate startup crash on
+  fresh installs.** `mcp` 2.0.0 removed `mcp.server.fastmcp` (`FastMCP` moved to
+  `mcp.server.mcpserver.MCPServer`), so any install resolving the previously unbounded
+  `mcp>=1.28.1` to 2.x died at import time with
+  `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` — before `main()` ran, for
+  both the `dns-aid-mcp` entrypoint and `python -m dns_aid.mcp.server`. The Docker image
+  resolves dependencies at build time without a lockfile, so it surfaced there as a
+  container that started and immediately exited. Both the `mcp` and `all` extras now
+  require `mcp>=1.28.1,<2.0.0`. The ceiling will be raised once `dns_aid/mcp/server.py`
+  and `dns_aid/sdk/protocols/mcp.py` are migrated to the 2.x API.
+- **`pip install dns-aid[all]` now installs everything it claims to.** The `all`
+  extra restated every requirement by hand and had drifted out of sync: it was
+  missing `cel-python` and `common-expression-language` (so `[all]` users got no
+  CEL policy engine), `pqcrypto` (no PQC/ML-DSA signing), and `requests`, which
+  arrived only transitively via `edgegrid-python` at an unconstrained version,
+  silently dropping the `>=2.33.0` floor that the `cloud-dns` and
+  `akamai-edgedns` extras declare. `all` is now defined by PEP 508
+  self-reference — `dns-aid[cli,mcp,route53,...]` — so a dependency added to any
+  extra is inherited automatically and each version floor is declared in exactly
+  one place. Every user-facing extra is listed, including ones that are
+  currently empty, so they stay covered once they gain dependencies.
+  ([#236](https://github.com/dns-aid/dns-aid-core/issues/236))
+- **`dns-aid[all]` no longer installs the development toolchain.** The previous
+  hand-written `all` leaked `pytest`, `mypy`, `ruff` and `boto3-stubs` into a
+  published, user-facing extra. `all` now aggregates the runtime extras only,
+  which drops 39 packages from a fresh `[all]` install (114 → 75), including
+  `cyclonedx-bom` and its SBOM/JSON-schema/URI-validation tree. Install
+  `dns-aid[dev]` alongside it for the toolchain — `CONTRIBUTING.md`'s documented
+  setup is unaffected. The CVE floors that `dev` previously carried for `[all]`
+  (`urllib3>=2.7.0`, `pygments>=2.20.0`) now sit on the runtime extras that
+  actually pull those packages, so `[all]` keeps them; `lxml`'s floor stays in
+  `dev`, which is the only place `cyclonedx-bom` is pulled from.
+
+  `tests/unit/test_packaging.py` guards four drift modes: a bare requirement
+  restated in `all`, an extra `all` fails to reference, a name in `all` that is
+  not a real extra (uv silently ignores these), and the same package declared
+  with different version specifiers in two places.
+- **The Docker image is now built from the committed lockfile instead of a fresh
+  resolution.** The builder ran `pip wheel ".[mcp,route53,akamai-edgedns]"`,
+  which resolved every dependency from its declared floor at build time with no
+  lockfile and no hashes — so image contents differed between builds of the same
+  commit, and an upstream major release could break the image with no change to
+  this repo. That is precisely how mcp 2.0.0 shipped: the image built cleanly and
+  the container then exited at import. Dependencies are now exported from
+  `uv.lock` with per-artifact hashes and installed with `--require-hashes`, and
+  the final stage installs with `--no-index` so nothing can be fetched outside
+  the wheels the builder produced. `uv export --locked` makes a stale `uv.lock` a
+  build failure rather than a silent fallback to older pins.
+  ([#235](https://github.com/dns-aid/dns-aid-core/issues/235))
+- **The Docker image builds again.** Both `FROM` lines pinned
+  `python:3.11-slim@sha256:6ed5bff4…`, a digest no longer present on Docker Hub
+  (`docker pull` → `not found`), so `docker build` failed at the first
+  instruction regardless of anything else in the file. Repinned to the current
+  multi-arch index digest `sha256:90744cff…`, which covers both linux/amd64 and
+  linux/arm64 so the pin does not break on Apple Silicon builders.
+
+## [0.28.0] - 2026-08-08
+
+### Added
+
+- **`AgentRecord.signature_status`** reports why verification reached its answer:
+  `verified`, `invalid`, `unbound` (a valid signature describing a different record),
+  `expired`, `no_key`, or `not_signed`. `expired` and `invalid` are both `False` but call
+  for different responses — re-publish versus investigate — which a boolean cannot express.
+  See `dns_aid.core.jwks.SignatureStatus`.
+- **The signature outcome is now visible from every interface.** `dns-aid discover` gains a
+  Signature column (shown when `--verify-signatures` or `--require-signed` is set) and emits
+  `sig`, `signature_verified`, `signature_status` and `signature_algorithm` in `--json`. An
+  empty result under `--require-signed` now says the agents were dropped by the trust gate
+  rather than reading as "nothing published". `dns-aid publish` gains `--sig-validity`. The
+  MCP `discover_agents_via_dns` tool gains `verify_signatures`, so an agent can ask for the
+  status without also filtering on it, and returns `signature_verified`, `signature_status`
+  and `signature_algorithm` in its agent payload; the raw JWS is deliberately omitted from
+  the MCP payload and kept in CLI `--json`.
+  Output for unsigned records is unchanged on every interface.
+- **DNSSEC and DANE outcomes are reportable from the CLI and MCP.** `dnssec_validated` was
+  never emitted by either, and `dane_verified` only when non-null, so a caller could see a
+  verified signature and nothing about the two anchors beneath it. Both are now reported once
+  the check has run, and `dane_verified` is emitted even when null, because null is the
+  meaningful answer: without a DNSSEC-validated chain a TLSA match is demoted to unknown
+  (RFC 6698 section 10.1), and omitting it made a demotion look like no TLSA record at all.
+  The CLI renders an unvalidated DNSSEC result as `unvalidated`, not `no`. The flag follows
+  the AD bit, which a non-validating resolver never sets, so `no` asserted that a zone was
+  unsigned when the more common cause is the caller's own resolver.
+- **`--require-signed` no longer cancels out DNSSEC.** JWS verification used to be skipped
+  for a DNSSEC-validated record, and the trust gate treated that skip as a failure, so asking
+  for both of the strongest guarantees at once returned zero agents. `verify_signatures` now
+  always verifies, and the gate requires a real verified JWS. The skip is gone rather than
+  whitelisted: DNSSEC here is the AD flag with no chain validation, so accepting a skip as
+  proof would let an attacker who can forge answers for an unsigned zone set AD=1, attach any
+  `sig`, and pass `require_signed` with no cryptography performed. Cost is one JWKS fetch per
+  zone (cached), not one per agent. A record with no signature at all is still not "signed"
+  (use `min_dnssec` to filter on the DNS chain).
+- **Diagnostics moved from stdout to stderr.** `configure_logging()` sent structlog output to
+  stdout while sending stdlib logging to stderr, so `discover --json` emitted log lines ahead
+  of the document and piping it to a parser failed on the first byte. BREAKING for embedders
+  who capture stdout: pass `configure_logging(stream=...)`, or set `DNS_AID_LOG_STREAM=stdout`
+  to restore the old behaviour.
+- **`RecordPayload.from_agent_record(ttl_seconds=)` is deprecated in favour of
+  `validity_seconds=`.** BREAKING for callers passing it positionally. The old keyword still
+  works and warns, is removed in 0.30.0, and passing both now raises `TypeError` rather than
+  letting the deprecated name win silently. Signature validity is independent of the DNS TTL.
+- **The record signature now covers every DNS-AID SvcParam, not just the endpoint tuple.** A
+  new optional `svcb` claim binds `cap`, `cap-sha256`, `bap`, `policy`, `realm`,
+  `connect-class`, `connect-meta`, `enroll-uri` and `well-known`. Without it a genuine
+  signature could be replayed onto a record whose capability pointer and digest had been
+  swapped, and still report `verified`. Records signed before the claim existed keep
+  verifying and report the new `signature_covers_params` field as `False`; the claim is
+  omitted rather than nulled so their payloads serialise byte-identically. Opt in to refusing
+  reduced coverage with `require_signed_params=True`, planned to become the default in 0.30.0.
+- **DANE now authenticates the TLSA RRset itself** (RFC 6698 Section 4.1) instead of relying
+  solely on the agent's SVCB owner name, which is a different zone whenever the target is
+  off-zone. Both checks are applied: the first proves the pin was not forged, the second that
+  the name dialled was not. The endpoint dial is also SSRF-guarded, matching every other
+  network sink in the package.
+- **TLSA usages 0 and 2 are now reported as unevaluable (`null`) rather than compared against
+  the end-entity certificate** (RFC 7671 Section 5.1). Deployments publishing only `2 1 1`
+  where the trust anchor is the leaf move from `dane_verified: true` to `null`; publish an
+  additional `3 1 1` association to keep a definite verdict.
+- **DANE runs concurrently** (up to 8 at a time) under a 60s aggregate budget, so a wide zone
+  cannot outlive the MCP server's per-call cap. Endpoints not reached keep `dane_verified:
+  null` and the cap is logged rather than passing silently.
+- **An unmatched `kid` whose signature is rejected by every key the publisher serves now
+  reports `invalid` rather than `no_key`.** `no_key` is reserved for "nothing could be
+  checked". Consumers alerting on `invalid` will see new alerts. The verdict no longer depends
+  on whether a network refetch succeeded, which an attacker could influence.
+- **`--sig-validity` without `--sign` now exits 1** instead of being accepted and ignored.
+- **BEHAVIOR NOTE: every signature published today now reports
+  `verified_endpoint_only` rather than `verified`.** The `signature_status`
+  values are `verified`, `verified_endpoint_only`, `expired`, `invalid`,
+  `unbound`, `no_key`, `not_signed`, `not_checked` and `skipped_dnssec`. Two are
+  new. `verified_endpoint_only` means the signature verified but covers only
+  fqdn/target/port/alpn -- cap, cap-sha256, policy, realm and well-known are not
+  attested, which is true of every record signed before the `svcb` claim
+  existed. `not_checked` means verification was requested but the aggregate
+  budget expired first. A consumer matching `signature_status == "verified"`
+  will reject records it previously accepted; `signature_verified is True` is
+  unchanged, and `require_signed` is unaffected. Publishers should re-sign.
+- **DANE probes are restricted to ports 443, 853 and 8443**, overridable with
+  `DNS_AID_DANE_ALLOWED_PORTS` (a comma-separated list, or `any`). target and
+  port come off a forgeable record, so an unrestricted probe was a port scanner
+  attributed to every consumer. The reachability probes are deliberately NOT
+  restricted, because there a refusal would report a healthy agent on 8080 as
+  unreachable.
+- **Non-public addresses are now rejected by an allow-list rather than an
+  enumeration.** This newly blocks RFC 6598 shared address space
+  (`100.64.0.0/10` -- Tailscale, carrier NAT, some Kubernetes fabrics),
+  multicast, `240/4` and `0.0.0.0`, and resolves NAT64 (RFC 6052) and 6to4
+  addresses to the destination they actually reach before the check. If you
+  discover agents on CGNAT addresses, set `DNS_AID_FETCH_ALLOWLIST`.
+- **Every guarded fetch now dials the address that was vetted**, carrying the
+  original name in SNI and the `Host` header. Validating a name and then
+  connecting to it resolved twice and checked only the first, so a one-second
+  TTL could move the destination in between.
+- **A TLSA RRset larger than 32 usable associations is truncated**, and the
+  dropped records count as unevaluated -- so a very large RRset softens the
+  verdict to `null` rather than producing a definite mismatch.
+- **DANE and signature verification run concurrently under aggregate budgets**
+  (8 / 60s and 16 / 45s). Endpoints not reached keep `dane_verified: null`;
+  records not verified report `not_checked`.
+- **The JWKS fetch is single-flighted per zone and negatively cached for 30s**,
+  so one unreachable key host costs one timeout per zone rather than one per
+  agent, and cache keys are normalised for case and trailing dot.
+- **A JWKS key-set change is reported.** Advisory only; it never refuses a
+  signature.
+- **A2A agent cards at protocol version 0.3 are parsed, not just 0.2.** 0.3
+  restructured the card and a 0.2-only reader dropped all of it into untyped
+  metadata. Now typed: `protocolVersion`, `preferredTransport` and the interface
+  list (so a caller can tell JSONRPC from gRPC), `capabilities`, `signatures`,
+  `iconUrl`, `documentationUrl`, and per-skill `examples` and
+  `securityRequirements`. Authentication is read from the 0.3 `securitySchemes`
+  map in both shapes seen in the wild -- OpenAPI style with a `type`, and the
+  proto-derived style with an `oauth2SecurityScheme`-style key -- so `auth_type`
+  is now populated for cards that carry no legacy `authentication` object. Where
+  a card carries both, the 0.3 map wins. The interface list is read under the 0.3
+  name `additionalInterfaces` and the 1.0 name `supportedInterfaces`, and the
+  extended-card flag is recognised whether it sits at the top level (0.3) or
+  under `capabilities` (1.0), because real cards carry either. 0.2 cards parse
+  exactly as before, and absent 0.3 fields read as absent rather than empty.
+- **`AgentRecord.signature_expires_at`** exposes when a verified signature lapses. Verification
+  is binary right up to the moment it flips to expired, so the remaining window was the one
+  signal nobody had. The CLI shows the days left and turns amber inside two weeks.
+- **`AgentRecord.dnssec_signed` separates an unsigned zone from a non-validating resolver.**
+  `dnssec_validated=False` could not distinguish "the zone owner never signed" from "the zone
+  is signed and your resolver will not validate it", which have opposite owners and opposite
+  fixes. RRSIG presence is now recorded from the response the DNSSEC check already fetches
+  (the DO bit is set, so no extra query), and the CLI reports `unvalidated (signed; resolver)`
+  or `unvalidated (zone unsigned)`. **Diagnostic only** — an attacker who can spoof an answer
+  can spoof an RRSIG beside it, so only `dnssec_validated` may inform a trust decision, and
+  `require_dnssec` / `min_dnssec` are unaffected.
+- **Key rollovers can overlap.** `sign_record(..., kid=...)` publishes a key identifier in
+  the JWS protected header, verification selects the matching key from the JWKS, and
+  `export_jwks_multi()` emits several keys in one document so the outgoing and incoming
+  keys coexist while records are re-signed. A signature naming a key absent from the cached
+  document triggers at most one forced refresh per domain per cache window, so a key rolled
+  in mid-cache-window is picked up without waiting for `JWKS_CACHE_TTL`. Because `kid` comes
+  off an unauthenticated DNS record the budget is keyed by domain rather than by `kid`; the
+  cost is that a bogus `kid` may delay a genuine rollover by up to one window, which is
+  bounded and self-healing. The refetch bypasses the cache rather than evicting it, so one
+  unmatched `kid` no longer degrades concurrent lookups for the same domain. Signatures published without a
+  `kid` still verify against the whole key set, and the header is byte-identical to before
+  when no `kid` is supplied. A `kid` is reachable from the publishing side via
+  `publish(sig_kid=...)` and `dns-aid publish --sig-kid`; without those nothing this project
+  emitted could carry one, so the selection and refresh machinery was unreachable end to end
+  and a staged rollover was not actually achievable.
+
+- **Signature validity constants moved to `dns_aid.core.sig_validity`.** The default lived
+  in `jwks` and the bounds in `publisher`, so `publisher` imported `jwks` at module scope to
+  re-export one integer — pulling the whole `cryptography` backend into every import of the
+  publish path, including CLI startup and MCP server boot, whether or not anything would be
+  signed. Both modules re-export the names, so existing imports are unaffected.
+
+- **Cloudflare backend now writes DNS-AID private-use SVCB keys natively.** Verified
+  against the Cloudflare API v4 that SVCB `data.value` accepts RFC 9460 generic
+  private-use SvcParamKeys (`key65280`–`key65534`), so `CloudflareBackend` sets
+  `supports_private_svcb_keys = True`. DNS-AID custom params (cap, cap-sha256, bap,
+  policy, realm, … → `key65400`–`key65409`) are written directly to the SVCB record
+  instead of being demoted to TXT, matching the NS1 and NIOS backends.
+
+### Changed
+
+- **The JWKS document is fetched from `https://dns-aid.<zone>/.well-known/dns-aid-jwks.json`**,
+  derived from the record's own publishing zone rather than the name passed to `discover()`.
+  The previous zone-apex location remains supported as a deprecated fallback, so existing
+  deployments continue to verify (with a warning). Two reasons: a zone that exists only to
+  carry agent records has no web presence at its apex, and a `dns-aid.` host — unlike an
+  apex — may be `CNAME`d to a gateway, CDN, or bucket. The location is derived rather than
+  advertised in the record because this path runs when the DNS answer is unauthenticated,
+  so a pointer could be forged alongside the record it is meant to authenticate. Same shape
+  as MTA-STS (RFC 8461 §3.1).
+  *Migration:* publishers should serve the document at `dns-aid.<zone>`; the apex location
+  costs one extra failed lookup per verification until they do.
+
+### Fixed
+
+- **SSRF address pinning no longer discards the multi-address fallback.** `validate_fetch_url`
+  range-checks every address a name resolves to, but recorded only the first for dialling —
+  and `getaddrinfo(AF_UNSPEC)` applies no `AI_ADDRCONFIG`, so a dual-stack host returns its
+  AAAA first even on a client with no IPv6 route. Pinning that one literal turned a routine
+  deployment into a hard failure where httpcore had previously tried each address in turn:
+  fetching a JWKS from an IPv4-only container failed on the v6 address instead of falling
+  through to the A record, and every agent in the zone came back `signature_status='no_key'`.
+  Same exposure for any multi-homed host whose first address is transiently down. Every
+  vetted address is now recorded in resolution order and tried in turn by `safe_fetch_bytes`,
+  the DANE certificate dial and the reachability probe. Only a transport failure advances to
+  the next address — a non-200, an oversized body or a TLS rejection is the peer's real answer.
+  The security property is unchanged: one bad address in the set still fails the whole URL,
+  so the fallback cannot be used to reach an internal destination.
+- **`publish(sign=True)` signs the record as published, not the arguments it was built
+  from.** `AgentRecord` normalises several fields on the way in — `connect_class` is
+  lower-cased, `target_host` loses a trailing dot — so signing the raw keyword arguments
+  signed one value and published another. The `svcb` digests differed, `payload_matches`
+  went False, and a publisher's own genuine record verified as `unbound`: the status
+  documented to consumers as a lifted signature pasted onto a spoofed record. Publishing
+  `connect_class="Direct"` was enough to trigger it. The payload now reads the constructed
+  record through `params_from_record` — the same reader the verifier uses — so the two
+  sides cannot drift again. An empty parameter also signs as absent, because
+  `SvcbRecord.to_params()` tests for truthiness and so cannot put one on the wire.
+- **The per-zone JWKS lock is no longer shared across event loops.** An `asyncio.Lock`
+  binds to the loop that first contends on it and refuses to be awaited from any other,
+  and the MCP server runs every tool call under its own `asyncio.run()`. The second
+  contended fetch for a zone raised `RuntimeError: bound to a different event loop`, which
+  `_verify_one` recorded as `signature_status='no_key'` — so every agent in that zone
+  silently reported unverified and `require_signed=True` returned nothing from then on.
+  The locks are now keyed by running loop, weakly, so a finished loop takes its locks with
+  it. A held lock is also never evicted, which previously let two coroutines fetch the same
+  document concurrently.
+- **`--require-signed` no longer suppresses the DNSSEC verdict it computed.** `discover()`
+  turns `require_signed` into `verify_signatures` internally, so the check runs; the CLI
+  and MCP reporting surfaces evaluated the gate with the caller's value instead of the
+  effective one and omitted `dnssec_validated` from JSON while hiding the table column.
+  A check that ran and produced an answer was reported as "not checked".
+- **DANE advisory mode no longer requires a validating resolver.** The AD-flag gate on the
+  TLSA RRset was applied before the advisory branch, so a correctly DANE-configured host
+  behind a non-validating resolver reported the same `None` as a host publishing no TLSA
+  at all. Advisory mode answers "is DANE configured", not "does this certificate match",
+  so the gate now sits on the certificate-matching path where the trust decision is made.
+- **IPv6 literals are bracketed before going into a probe URL.** `_check_endpoint` and the
+  HSTS probe interpolated a bare vetted address, producing
+  `https://2606:4700::6810:85e5:443/health`, which httpx rejects — so `dns-aid verify`
+  reported every healthy IPv6-only agent as unreachable.
+- **A2A card `security` requirements survive parsing again.** `security` and
+  `securityRequirements` were added to `known_keys` without a field to land in, so they
+  were filtered out of `metadata` and dropped entirely, where previously they survived as
+  raw metadata. Both spellings are now parsed into `A2AAgentCard.security_requirements`,
+  and `A2ASkill` reads the schema's `security` spelling rather than only the draft's. The
+  0.2/0.3 authentication merge also keeps a credentials URL derived from `securitySchemes`
+  instead of discarding it — the guard skipped the merge in exactly the case it was
+  written to preserve.
+- **The `sig` SvcParam (`key65405`) is now read off DNS records.** It was parsed out of
+  the SVCB correctly and then discarded: the extraction below the parser handled nine of
+  the ten keys in `DNS_AID_KEY_MAP` and omitted `sig`, so `AgentRecord.sig` was always
+  `None` on the DNS discovery path, JWS verification never executed, and
+  `require_signed=True` returned no agents regardless of what had been published.
+  `publish --sign` wrote a signature no consumer could read back. A completeness test now
+  asserts every key in the map reaches a field on a discovered record.
+  *Behavior note:* `require_signed=True` now returns verified agents where it previously
+  returned an empty result.
+- **JWS signature validity is no longer derived from the DNS record TTL.** The publisher
+  passed `ttl` straight into the JWS `exp`, so a signature expired at the resolver
+  cache-refresh interval — one hour with the default TTL, thirty seconds at the floor —
+  while the record itself remained in DNS indefinitely. The relationship was inverted from
+  intent: the shorter the TTL chosen for fast propagation, the faster signatures broke.
+  Validity is now set by `publish(sig_validity_seconds=...)`, default 90 days, bounded to
+  1 hour–13 months. **Records signed by earlier versions should be re-published.**
+- **DANE verification tries every association in the TLSA RRset.** `_check_dane` returned
+  on the first association it examined, so an RRset with more than one record was decided
+  by RRset order. Because a certificate rollover is staged by publishing the outgoing and
+  incoming pins together (RFC 7671 §8.1) and a certificate is valid if it matches any
+  association (RFC 6698; RFC 7671 §5.1), rollovers could not overlap. The failure was
+  closed — a valid certificate rejected, never an invalid one accepted. A non-match now
+  advances to the next association and `False` is returned only after all were compared.
+- **An unverifiable result is no longer reported as a failed one.** A JWKS that could not
+  be fetched, and a TLSA association whose comparison raised, both returned `False` —
+  presenting a CDN blip or connection reset as a forged signature or a failed certificate
+  binding. Both now return `None` (unknown). `require_signed=True` remains fail-closed: it
+  requires `is True`, so `None` is still rejected.
+  *Behavior note:* `AgentRecord.signature_verified` may now be `None` where it was
+  previously `False`. Consumers testing `is True` are unaffected; consumers testing
+  `== False` to mean "rejected" should migrate to `signature_status`.
+
+
+- **Cloudflare TXT records now write each value as its own RFC 1035 `<character-string>`**
+  (quoted, with escaping) instead of space-joining all values into a single string.
+  The discoverer iterates character-strings individually, so the previous join
+  corrupted capability parsing and any value containing a space. Read paths parse the
+  presentation-format `content` back into a list. Like the Route 53 backend's
+  per-value quoting, but additionally escaping embedded quotes and backslashes.
+  The read path uses a DNS master-file tokenizer (not `shlex`): it splits
+  quoted/bare `<character-string>` tokens, decodes `\DDD` decimal octet escapes
+  (how Cloudflare returns non-ASCII) back to UTF-8, and never raises on malformed
+  input — fixing a bare apostrophe dumping the whole value back as one string and
+  non-ASCII values reading back mangled.
+  *Migration note:* TXT records written by the previous Cloudflare backend (unquoted,
+  space-joined) now read back split on whitespace. For `key=value` tokens this is the
+  correct recovery, but a single legacy value that legitimately contained spaces
+  (e.g. a free-text description) will read back fragmented until it is re-published.
+- **Cloudflare record writes converge under concurrent-publish races.** A shared
+  `_write_record` helper treats Cloudflare error 81058 ("identical record already
+  exists") as idempotent success **only on a POST**, and recreates via POST when a
+  PUT 404s because the record was deleted between lookup and update. An 81058 on a
+  PUT now raises: Cloudflare allows multiple records at one name, so a PUT colliding
+  with a *different* record there does not apply the update, and reporting success
+  would falsely claim the write took effect.
+- **Cloudflare API traffic honours rate limits.** All requests route through a shared
+  `_request` helper that retries on HTTP 429 (and on a 200 body carrying a rate-limit
+  error), honouring the `Retry-After` header when present and otherwise backing off
+  exponentially, so reads, writes, and deletes all handle throttling uniformly.
+- **`CloudflareBackend.get_record` no longer masks auth/network/server errors as
+  "record not found."** Only an empty result set means not-found; other errors
+  propagate so reconciliation cannot silently recreate or overwrite records.
+- **`Route53Backend.get_record` and `NS1Backend.get_record` no longer mask
+  auth/network/server errors as "record not found."** Both previously caught all
+  errors and returned `None` — the same value returned for a genuinely absent
+  record — so a transient failure was indistinguishable from absence. That defeats
+  the masked-failure guard in `publisher._unpublish` (which probes existence with
+  `get_record` before deleting), and could let an unpublish report success while
+  the agent's records are still live in DNS. Now only the real not-found signal
+  (an empty result set for Route 53, a `404` for NS1) returns `None`; every other
+  error propagates — the same "only the real not-found signal returns None"
+  contract used by `CloudflareBackend.get_record`.
+
+## [0.27.0] - 2026-07-22
+
+### Added
+
+- **Akamai Edge DNS backend** (`akamai-edgedns`). New DNS backend using the
+  Akamai Config DNS API v2 with EdgeGrid authentication (`edgegrid-python`).
+  Supports private-use SVCB keys natively (`supports_private_svcb_keys = True`),
+  so all DNS-AID custom SvcParams are written directly on the SVCB record without TXT demotion.
+  Install: `pip install dns-aid[akamai-edgedns]`.
+
+### Fixed
+
+- **Akamai Edge DNS backend hardening** — concurrency, injection, and pagination
+  fixes surfaced by live stress-testing against a real Edge DNS zone:
+  - *Concurrent publishes no longer fail.* Akamai serializes modifications per
+    zone; overlapping writes return `409 concurrentZoneModification` ("Please
+    try your request again"), which the backend previously misread as
+    "record exists" and converted to a `PUT` that then failed with
+    `400 does not exist`. A live 12-way concurrent publish succeeded for only
+    1 of 12 agents. Writes are now serialized per zone with an `asyncio.Lock`
+    (removing self-inflicted contention) and transient zone-lock 409s are
+    retried with exponential backoff + jitter — Akamai's prescribed handling.
+    The same 12-way stress now lands 12/12 with zero errors. The POST→PUT
+    upsert convergence is scoped to single-record (`/names/…`) paths so a 409
+    on the bulk `/recordsets` endpoint can never auto-convert to a `PUT`
+    there, which would replace the entire zone's record sets.
+  - *TXT and SVCB rdata are escaped per RFC 1035.* A `"` or `\` in a TXT value
+    or SvcParam value previously broke out of the presentation-format quoting
+    and could inject extra character-strings/SvcParams into the record (or
+    corrupt the publish). Values are now backslash-escaped on write and
+    unescaped on read-back.
+  - *Pagination no longer silently truncates.* When a list response omitted
+    pagination metadata, `totalElements` defaulted to `0` and `list_records`/
+    `list_zones` stopped after the first 100 entries. The API's count is still
+    authoritative when present; a short page terminates otherwise.
+  - URL path segments are percent-encoded (defense-in-depth for direct
+    callers), and retry jitter uses `SystemRandom`.
+
+### Security
+
+- **Bumped `mcp` to `>=1.28.1`** — `mcp 1.26.0` carried CVE-2026-52870 and
+  CVE-2026-52869 (both fixed in 1.27.2) and CVE-2026-59950 (fixed in 1.28.1),
+  which had kept the Dependency Audit gate red.
+
 ## [0.26.7] - 2026-07-08
 
 ### Fixed
@@ -2232,7 +2698,9 @@ Explicit version floors added to our `pyproject.toml` because upstream parents (
 - [RFC 9460 - SVCB and HTTPS Resource Records](https://www.rfc-editor.org/rfc/rfc9460.html)
 - [RFC 4033-4035 - DNSSEC](https://www.rfc-editor.org/rfc/rfc4033.html)
 
-[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.4...HEAD
+[Unreleased]: https://github.com/dns-aid/dns-aid-core/compare/v0.28.1...HEAD
+[0.28.1]: https://github.com/dns-aid/dns-aid-core/compare/v0.28.0...v0.28.1
+[0.28.0]: https://github.com/dns-aid/dns-aid-core/compare/v0.27.0...v0.28.0
 [0.24.4]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.3...v0.24.4
 [0.24.3]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.2...v0.24.3
 [0.24.2]: https://github.com/dns-aid/dns-aid-core/compare/v0.24.1...v0.24.2

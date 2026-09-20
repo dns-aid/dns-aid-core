@@ -29,8 +29,8 @@ Before any release:
 2. **Update CHANGELOG.md** with release date and changes
 3. **Create a PR** with the version bump
 4. **Merge PR** after CI passes and review approval
-5. **Tag the release** on GitHub with release notes
-6. **Publish to PyPI** — pushing a `v*` tag automatically publishes to PyPI via trusted publisher
+5. **Tag the release with a signed tag** — `git tag -s vX.Y.Z -m "vX.Y.Z"` using the maintainer's GPG or SSH signing key (unsigned tags are not used for releases)
+6. **Publish to PyPI** — pushing the `v*` tag automatically publishes to PyPI via trusted publisher
 
 ## Hotfix Process
 

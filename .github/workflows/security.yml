@@ -18,10 +18,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
 
       - name: Run Bandit
         run: uvx --from "bandit[toml]" bandit -r src/dns_aid -c pyproject.toml -f json -o bandit-report.json
@@ -42,15 +42,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
 
       - name: Install dependencies
         run: uv sync --frozen --extra dev --extra cli --extra mcp --extra route53
@@ -69,15 +69,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
 
       - name: Install dependencies
         run: uv sync --frozen --extra dev --extra cli --extra mcp --extra route53
@@ -87,14 +87,11 @@ jobs:
         # Each CVE is documented. Re-evaluate when fix versions are released.
         run: |
           uv run --with pip-audit pip-audit \
-            --ignore-vuln CVE-2026-4539 \
             --ignore-vuln CVE-2025-8869 \
             --ignore-vuln CVE-2026-1703 \
             --ignore-vuln CVE-2026-34073 \
             --ignore-vuln CVE-2026-25645 \
-            --ignore-vuln CVE-2026-3219 \
-            --ignore-vuln CVE-2025-45768
-        # CVE-2026-4539  pygments 2.19.2   — ReDoS in AdlLexer, local-only, no fix released
+            --ignore-vuln CVE-2026-3219
         # CVE-2025-8869  pip 25.2          — tar symlink traversal, mitigated by Python >=3.12 PEP 706
         # CVE-2026-1703  pip 25.2          — wheel path traversal, limited to install dir prefixes
         # CVE-2026-34073 cryptography 46.0.5 — name constraint bypass, uncommon topology, fix: 46.0.6
@@ -102,10 +99,6 @@ jobs:
         # CVE-2026-3219  pip 26.0.1        — runner-image pip; affects the package manager only,
         #                                    not the dns-aid runtime; no user-supplied input flows
         #                                    through pip in CI; awaiting upstream pip fix
-        # CVE-2025-45768 pyjwt 2.12.1      — DISPUTED by maintainer (NVD: "Analyzed", note
-        #                                    that "key length is chosen by the application").
-        #                                    Snyk does not list this CVE; pyjwt's own GHSA
-        #                                    advisories do not list it. Third-party-filed
-        #                                    "weak encryption" claim; actually a usage concern.
-        #                                    DNS-AID does not generate JWTs in the SDK path.
-        #                                    See SECURITY.md + tracking issue #141.
+        # (CVE-2025-45768 pyjwt suppression removed 2026-07-14: OSV bounded the
+        #  affected range to <=2.10.1 on 2026-05-21; we ship 2.13.0, so pip-audit
+        #  no longer reports it. History: SECURITY.md + closed issue #141.)

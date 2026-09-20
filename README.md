@@ -41,6 +41,7 @@ Changes to protocol behavior should be discussed within the IETF.
 - [Architecture](docs/architecture.md) — protocol layers, metadata resolution, integration points
 - [Integrations](docs/integrations.md) — backend-specific setup notes
 - [Demo Guide](docs/demo-guide.md) — end-to-end walkthrough for talks and presentations
+- [Roadmap](docs/roadmap.md) — where the project is headed, near/medium/long term
 - [Privacy Policy](PRIVACY.md) | [Security Policy](SECURITY.md) | [Trademarks](TRADEMARKS.md)
 
 ## Ecosystem and Integrations
@@ -61,7 +62,7 @@ pip install "dns-aid[cli,mcp]"
 pip install "dns-aid[cli,mcp] @ git+https://github.com/dns-aid/dns-aid-core.git"
 ```
 
-For backend-specific extras (`route53`, `cloudflare`, `ns1`, `cloud_dns`, `infoblox`, `ddns`), see the [Getting Started Guide](docs/getting-started.md#install).
+For backend-specific extras (`route53`, `cloudflare`, `ns1`, `cloud_dns`, `infoblox`, `akamai-edgedns`, `ddns`), see the [Getting Started Guide](docs/getting-started.md#install).
 
 ### Python Library
 
@@ -656,15 +657,15 @@ GET https://mcp.example.com/.well-known/agent.json
 └─────────────────────────────┼────────────────────────────────────────┘
                               │
                               ▼
-┌───────────────────────────────────────────────────────────────────────────────────┐
-│                          DNS BACKEND ABSTRACTION                                  │
-│                                                                                   │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐      │
-│  │  Route53  │  │ Infoblox  │  │   DDNS    │  │Cloudflare │  │   Mock    │      │
-│  │  (AWS)    │  │   UDDI    │  │ (RFC2136) │  │           │  │ (Testing) │      │
-│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘      │
-│        │              │              │              │              │             │
-└────────┴──────────────┴──────────────┴──────────────┴──────────────┴─────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────┐
+│                          DNS BACKEND ABSTRACTION                                             │
+│                                                                                              │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐    │
+│  │  Route53  │  │ Infoblox  │  │   DDNS    │  │Cloudflare │  │  Akamai   │  │   Mock    │    │
+│  │  (AWS)    │  │   UDDI    │  │ (RFC2136) │  │           │  │ Edge DNS  │  │ (Testing) │    │
+│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘    │
+│        │              │              │              │              │              │          │
+└────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -750,6 +751,7 @@ DNS-AID supports multiple DNS backends:
 
 | Backend | Description | Install Extra | Status |
 |---------|-------------|---------------|--------|
+| Akamai Edge DNS | Akamai Edge DNS | `dns-aid[akamai-edgedns]` | ✅ Production |
 | Route 53 | AWS Route 53 | `dns-aid[route53]` | ✅ Production |
 | Cloudflare | Cloudflare DNS | `dns-aid[cloudflare]` | ✅ Production |
 | NS1 | NS1 (now IBM) Managed DNS | `dns-aid[ns1]` | ✅ Production |
@@ -849,13 +851,13 @@ private-use range `key65280`–`key65534`. DNS-AID's custom parameters (`cap`, `
 `key65400`–`key65405`) are written **natively on the SVCB record**, not demoted to a TXT
 companion.
 
-| DNS-AID Requirement | Route 53 | Infoblox UDDI |
-|---------------------|----------|---------------|
-| ServiceMode (priority > 0) | ✅ | ✅ |
-| `alpn` / `port` / `mandatory` | ✅ | ✅ |
-| Private-use keys (cap/bap/policy/realm/sig/...) | ✅ | ✅ |
+| DNS-AID Requirement | Akamai Edge DNS | Route 53 | Infoblox UDDI |
+|---------------------|-----------------|----------|---------------|
+| ServiceMode (priority > 0) | ✅ | ✅ | ✅ |
+| `alpn` / `port` / `mandatory` | ✅ | ✅ | ✅ |
+| Private-use keys (cap/bap/policy/realm/sig/...) | ✅ | ✅ | ✅ |
 
-Infoblox UDDI is a **fully DNS-AID-compliant** ServiceMode SVCB backend.
+Infoblox UDDI and Akamai Edge DNS are **fully DNS-AID-compliant** ServiceMode SVCB backends.
 
 #### Verify Records via API
 
@@ -936,7 +938,7 @@ DDNS (Dynamic DNS) is a universal backend that works with any DNS server support
 
 ### Cloudflare Setup
 
-Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to its free tier and excellent API support. DNS-AID fully supports Cloudflare's SVCB record implementation.
+Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to its free tier and excellent API support. DNS-AID fully supports Cloudflare's SVCB record implementation, including **native private-use SVCB keys** — DNS-AID's custom parameters (`cap`, `cap-sha256`, `bap`, `policy`, `realm`, ...) are written directly to the SVCB record (`key65400`–`key65409`), with no TXT demotion.
 
 #### Environment Variables
 
@@ -998,9 +1000,93 @@ Cloudflare DNS is ideal for demos, workshops, and quick prototyping thanks to it
 
 - **Free tier**: DNS hosting is free for unlimited domains
 - **SVCB support**: Full RFC 9460 compliance with SVCB Type 64 records
+- **Native private-use SVCB keys**: DNS-AID custom params go straight into the SVCB record (`key65400`–`key65409`) — no TXT demotion, matching NS1 and NIOS
 - **Global anycast**: Fast DNS resolution worldwide
 - **Simple API**: Well-documented REST API v4
 - **Full DNS-AID compliance**: Supports ServiceMode SVCB with all parameters
+
+### Akamai Edge DNS Setup
+
+Akamai Edge DNS supports ServiceMode SVCB records with full private-use key support, making it fully compliant with the DNS-AID draft. All custom DNS-AID parameters (`cap`, `bap`, `realm`, etc.) are written directly into SVCB — no TXT demotion.
+
+Writes are safe under concurrency: the backend serializes its own writes per zone and automatically retries Akamai's transient `409 concurrentZoneModification` responses with exponential backoff.
+
+#### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AKAMAI_HOST` | No* | - | EdgeGrid API hostname (e.g., `akab-xxxx.luna.akamaiapis.net`) |
+| `AKAMAI_CLIENT_TOKEN` | No* | - | EdgeGrid client token |
+| `AKAMAI_CLIENT_SECRET` | No* | - | EdgeGrid client secret |
+| `AKAMAI_ACCESS_TOKEN` | No* | - | EdgeGrid access token |
+| `AKAMAI_EDGERC` | No | `~/.edgerc` | Path to `.edgerc` credentials file |
+| `AKAMAI_EDGERC_SECTION` | No | `default` | Section within `.edgerc` to use |
+
+\* Required if not using `.edgerc`. Environment variables take precedence over `.edgerc` when both are present.
+
+#### Step-by-Step Setup
+
+1. **Create API credentials** in Akamai Control Center:
+   - Go to **Identity & Access** → **Create API Client**
+   - Grant **DNS—Zone Record Management** read-write permission
+   - Download the `.edgerc` file or note the four credential values
+
+2. **Configure credentials** (choose one):
+
+   Via `.edgerc` file (Akamai standard):
+   ```ini
+   # ~/.edgerc
+   [default]
+   host = akab-xxxx.luna.akamaiapis.net
+   client_token = akab-xxxx
+   client_secret = xxxx
+   access_token = akab-xxxx
+   ```
+
+   Via environment variables:
+   ```bash
+   export AKAMAI_HOST="akab-xxxx.luna.akamaiapis.net"
+   export AKAMAI_CLIENT_TOKEN="akab-xxxx"
+   export AKAMAI_CLIENT_SECRET="xxxx"
+   export AKAMAI_ACCESS_TOKEN="akab-xxxx"
+   ```
+
+3. **Publish your first agent**:
+   ```bash
+   dns-aid publish \
+       --name my-agent \
+       --domain your-domain.com \
+       --protocol mcp \
+       --endpoint agent.your-domain.com \
+       --backend akamai-edgedns
+   ```
+
+4. **Use in Python**:
+   ```python
+   import asyncio
+   from dns_aid.backends.akamai_edgedns import AkamaiEdgeDNSBackend
+   from dns_aid import publish
+
+   async def main():
+       # Initialize backend (reads from ~/.edgerc or environment variables)
+       backend = AkamaiEdgeDNSBackend()
+       await publish(
+           name="my-agent",
+           domain="your-domain.com",
+           protocol="mcp",
+           endpoint="agent.your-domain.com",
+           backend=backend,
+       )
+
+   asyncio.run(main())
+   ```
+
+#### Akamai Edge DNS Features
+
+- **Native SVCB support**: Full RFC 9460 compliance including private-use keys 
+- **Full DNS-AID compliance**: All custom params (`cap`, `bap`, `realm`, etc.) written natively on the SVCB record — no demotion to TXT
+- **DNSSEC**: Built-in zone signing via sign-and-serve
+- **Flexible credentials**: Supports both `.edgerc` file and environment variables
 
 ## How DNS-AID Relates to Other Efforts
 

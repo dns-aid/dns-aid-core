@@ -23,24 +23,28 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev --extra cli --extra mcp --extra route53 --extra otel
+        run: uv sync --frozen --extra dev --extra cli --extra mcp --extra route53 --extra otel --extra akamai-edgedns
 
       - name: Run unit tests
         run: uv run pytest tests/unit/ -v --tb=short
 
       - name: Run tests with coverage
-        run: uv run pytest tests/unit/ --cov=dns_aid --cov-report=xml --cov-report=term-missing
+        # Coverage floor policy (OpenSSF Best Practices, docs/proposals/openssf-best-practices.md):
+        # the floor only ratchets UP; lowering it requires a recorded maintainer
+        # decision. 92 = measured 93% combined statement+branch after the Gold
+        # coverage push (#221, 2026-07-30) minus a small platform-variance margin.
+        run: uv run pytest tests/unit/ --cov=dns_aid --cov-report=xml --cov-report=term-missing --cov-fail-under=92
 
       - name: Upload coverage artifact
         if: matrix.python-version == '3.12'
@@ -70,18 +74,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev --extra cli --extra mcp --extra route53 --extra otel
+        run: uv sync --frozen --extra dev --extra cli --extra mcp --extra route53 --extra otel --extra akamai-edgedns
 
       - name: Run mock integration tests
         run: uv run pytest tests/integration/ -m "not live" -v --tb=short
@@ -91,15 +95,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
 
       - name: Install dependencies
         run: uv sync --frozen --extra dev
@@ -115,18 +119,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev --extra cli --extra mcp --extra route53 --extra otel
+        run: uv sync --frozen --extra dev --extra cli --extra mcp --extra route53 --extra otel --extra akamai-edgedns
 
       - name: Mypy
         run: uv run mypy src/dns_aid
@@ -135,7 +139,7 @@ jobs:
     name: README mcp-name tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Verify README carries the MCP Registry mcp-name tag
         run: |
@@ -148,3 +152,57 @@ jobs:
             exit 1
           fi
           echo "OK: README carries the mcp-name tag."
+
+  mcp-2x-compat:
+    name: MCP server on mcp 2.x
+    runs-on: ubuntu-latest
+    # dns_aid.mcp.server supports both mcp majors, but every other job installs
+    # from uv.lock, which pins the 1.x line — so the 2.x half of the dual-path
+    # import was previously never executed anywhere. Without this job the
+    # fallback is dead code that only runs on a user's machine, which is how the
+    # original breakage reached users in the first place (#230, #234).
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Installed WITHOUT the [mcp] extra so the `mcp>=1.28.1,<2.0.0` ceiling
+      # does not apply, then mcp 2.x is added explicitly. This deliberately
+      # builds an unsupported combination: the point is to prove the server
+      # still works on it, so the ceiling can be lifted with evidence.
+      - name: Install with mcp 2.x
+        run: |
+          python -m pip install --upgrade pip
+          pip install '.[cli]'
+          pip install 'mcp>=2.0.0,<3' uvicorn pytest pytest-asyncio
+
+      - name: Confirm mcp 2.x actually resolved
+        run: |
+          set -euo pipefail
+          version=$(python -c 'from importlib.metadata import version; print(version("mcp"))')
+          echo "mcp==$version"
+          case "$version" in
+            2.*) ;;
+            *) echo "::error::expected mcp 2.x, got $version — this job is not testing what it claims"; exit 1 ;;
+          esac
+
+      - name: Server imports and reports the 2.x path
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from dns_aid.mcp import server
+          assert server._MCP_MAJOR == 2, f"expected major 2, got {server._MCP_MAJOR}"
+          assert type(server.mcp).__name__ == "MCPServer"
+          print(f"OK: {type(server.mcp).__name__}, {len(server.mcp._tool_manager.list_tools())} tools")
+          PY
+
+      - name: Both entrypoints start
+        run: |
+          dns-aid-mcp --help
+          python -m dns_aid.mcp.server --help
+
+      - name: Cross-major compatibility tests
+        run: pytest tests/unit/test_mcp_server.py -q

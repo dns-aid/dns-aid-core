@@ -16,7 +16,7 @@
     "dns_aid_backend": {
       "type": "string",
       "title": "DNS Backend",
-      "description": "Which DNS backend to use: route53, infoblox, cloudflare, ns1, cloud_dns, ddns, or mock. Leave empty to auto-detect from credentials, or use 'mock' for offline testing.",
+      "description": "Which DNS backend to use: route53, infoblox, cloudflare, ns1, cloud_dns, akamai-edgedns, ddns, or mock. Leave empty to auto-detect from credentials, or use 'mock' for offline testing.",
       "required": false
     },
     "dns_aid_policy_mode": {
@@ -122,6 +122,31 @@
       "description": "(RFC 2136 Dynamic DNS only) Base64 TSIG key secret. Stored securely.",
       "required": false,
       "sensitive": true
+    },
+    "akamai_host": {
+      "type": "string",
+      "title": "Akamai EdgeGrid Host",
+      "description": "(Akamai Edge DNS only) EdgeGrid API hostname.",
+      "required": false
+    },
+    "akamai_client_token": {
+      "type": "string",
+      "title": "Akamai Client Token",
+      "description": "(Akamai Edge DNS only) EdgeGrid client token.",
+      "required": false
+    },
+    "akamai_client_secret": {
+      "type": "string",
+      "title": "Akamai Client Secret",
+      "description": "(Akamai Edge DNS only) EdgeGrid client secret.",
+      "required": false,
+      "sensitive": true
+    },
+    "akamai_access_token": {
+      "type": "string",
+      "title": "Akamai Access Token",
+      "description": "(Akamai Edge DNS only) EdgeGrid access token.",
+      "required": false
     }
   },
   "server": {
@@ -147,7 +172,11 @@
         "AWS_SECRET_ACCESS_KEY": "${user_config.aws_secret_access_key}",
         "DDNS_SERVER": "${user_config.ddns_server}",
         "DDNS_KEY_NAME": "${user_config.ddns_key_name}",
-        "DDNS_KEY_SECRET": "${user_config.ddns_key_secret}"
+        "DDNS_KEY_SECRET": "${user_config.ddns_key_secret}",
+        "AKAMAI_HOST": "${user_config.akamai_host}",
+        "AKAMAI_CLIENT_TOKEN": "${user_config.akamai_client_token}",
+        "AKAMAI_CLIENT_SECRET": "${user_config.akamai_client_secret}",
+        "AKAMAI_ACCESS_TOKEN": "${user_config.akamai_access_token}"
       }
     }
   },

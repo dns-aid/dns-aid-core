@@ -43,6 +43,45 @@ class A2AProvider:
 
 
 @dataclass
+class A2AInterface:
+    """One transport a 0.3+ card advertises.
+
+    0.2 described a single `url` and nothing about how to speak to it. 0.3 adds
+    `preferredTransport` beside that url, and `supportedInterfaces` listing every
+    binding with its own url — which is how an agent offers JSONRPC and gRPC at
+    different paths.
+    """
+
+    url: str
+    protocol_binding: str | None = None
+    protocol_version: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> A2AInterface:
+        return cls(
+            url=data.get("url", ""),
+            protocol_binding=data.get("protocolBinding") or data.get("transport"),
+            protocol_version=data.get("protocolVersion"),
+        )
+
+
+def _security_requirements(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read a SecurityRequirement list, accepting either spelling.
+
+    The A2A schema calls this `security`; `securityRequirements` appears in
+    earlier drafts and in cards generated against them. Reading only one meant
+    a card declaring its required scopes parsed as declaring none.
+    """
+    for key in ("security", "securityRequirements"):
+        raw = data.get(key)
+        if isinstance(raw, list):
+            requirements = [r for r in raw if isinstance(r, dict)]
+            if requirements:
+                return requirements
+    return []
+
+
+@dataclass
 class A2ASkill:
     """A single skill/capability the agent can perform."""
 
@@ -52,6 +91,11 @@ class A2ASkill:
     input_modes: list[str] = field(default_factory=lambda: ["text"])
     output_modes: list[str] = field(default_factory=lambda: ["text"])
     tags: list[str] = field(default_factory=list)
+    # 0.3 additions. `examples` is prose or JSON showing how to invoke the
+    # skill; `security_requirements` lets a single skill demand more than the
+    # card-level default.
+    examples: list[str] = field(default_factory=list)
+    security_requirements: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> A2ASkill:
@@ -63,6 +107,11 @@ class A2ASkill:
             input_modes=data.get("inputModes", ["text"]),
             output_modes=data.get("outputModes", ["text"]),
             tags=data.get("tags", []),
+            examples=[e for e in data.get("examples", []) if isinstance(e, str)],
+            # The schema spells the skill-level field `security`; only this
+            # reader used `securityRequirements`, so the list was empty for
+            # every real card. Both are read, newer spelling first.
+            security_requirements=_security_requirements(data),
         )
 
 
@@ -75,11 +124,47 @@ class A2AAuthentication:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> A2AAuthentication:
-        """Parse authentication from JSON dict."""
+        """Parse the 0.2 `authentication` object."""
         return cls(
             schemes=data.get("schemes", []),
             credentials=data.get("credentials"),
         )
+
+    @classmethod
+    def from_security_schemes(cls, schemes: dict[str, Any]) -> A2AAuthentication:
+        """Derive the same shape from a 0.3 `securitySchemes` map.
+
+        0.3 replaced the flat `authentication` object with a named map, and the
+        scheme type is expressed two ways in the wild: OpenAPI style, where the
+        entry carries `type`, and the proto-derived style, where the entry has a
+        single key like `oauth2SecurityScheme`. Both appear on real cards, so
+        both are read rather than guessing which a publisher used.
+        """
+        found: list[str] = []
+        credentials: str | None = None
+        for entry in schemes.values():
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("type")
+            inner = entry
+            if not kind:
+                for key, value in entry.items():
+                    if key.endswith("SecurityScheme") and isinstance(value, dict):
+                        kind = key[: -len("SecurityScheme")]
+                        inner = value
+                        break
+            if kind and kind not in found:
+                found.append(kind)
+            for url_field in ("tokenUrl", "openIdConnectUrl", "authorizationUrl"):
+                if credentials is None and isinstance(inner.get(url_field), str):
+                    credentials = inner[url_field]
+            flows = inner.get("flows")
+            if credentials is None and isinstance(flows, dict):
+                for flow in flows.values():
+                    if isinstance(flow, dict) and isinstance(flow.get("tokenUrl"), str):
+                        credentials = flow["tokenUrl"]
+                        break
+        return cls(schemes=found, credentials=credentials)
 
 
 @dataclass
@@ -108,6 +193,34 @@ class A2AAgentCard:
     description: str | None = None
     provider: A2AProvider | None = None
     skills: list[A2ASkill] = field(default_factory=list)
+    # --- 0.3 additions. All optional, so a 0.2 card parses unchanged. ---
+    #: The card's own declared version, e.g. "0.3". Absent on 0.2 cards.
+    protocol_version: str | None = None
+    #: Transport for the main `url`, e.g. "JSONRPC" or "GRPC".
+    preferred_transport: str | None = None
+    #: Every other binding the agent offers. 0.3 calls this
+    #: `additionalInterfaces`; 1.0 renamed it `supportedInterfaces` and folded
+    #: the main url into it. Both are read, because cards in the wild carry
+    #: either -- the Infoblox ddi-agent card declares protocolVersion 0.3 and
+    #: uses the 1.0 name.
+    interfaces: list[A2AInterface] = field(default_factory=list)
+    #: streaming / pushNotifications / extendedAgentCard.
+    capabilities: dict[str, Any] = field(default_factory=dict)
+    #: Card-level JWS signatures (0.3 section 5.5.6). Carried, not verified here.
+    signatures: list[dict[str, Any]] = field(default_factory=list)
+    #: Card-level SecurityRequirement list: which of `securitySchemes` a caller
+    #: must satisfy, and with which scopes. `securitySchemes` says what auth
+    #: mechanisms EXIST; this says which are REQUIRED, so a consumer gating an
+    #: invocation on declared scopes needs it. Both keys were added to
+    #: `known_keys` without a field to land in, so they were filtered out of
+    #: `metadata` and dropped entirely -- where before they at least survived as
+    #: raw metadata.
+    security_requirements: list[dict[str, Any]] = field(default_factory=list)
+    #: Whether an authenticated client can fetch a richer card. Top-level in
+    #: 0.3, moved under capabilities in 1.0; either spelling sets this.
+    supports_extended_card: bool = False
+    icon_url: str | None = None
+    documentation_url: str | None = None
     authentication: A2AAuthentication | None = None
     default_input_modes: list[str] = field(default_factory=lambda: ["text"])
     default_output_modes: list[str] = field(default_factory=lambda: ["text"])
@@ -130,9 +243,45 @@ class A2AAgentCard:
             skills = [A2ASkill.from_dict(s) for s in data["skills"] if isinstance(s, dict)]
 
         # Parse authentication
+        # 0.3 replaced `authentication` with `securitySchemes`. Prefer the newer
+        # map when present -- a card carrying both (as the Infoblox ddi-agent
+        # card does, for 0.2 compatibility) is describing the same requirement
+        # twice, and the 0.3 form is the richer one.
         auth = None
-        if "authentication" in data and isinstance(data["authentication"], dict):
-            auth = A2AAuthentication.from_dict(data["authentication"])
+        schemes = data.get("securitySchemes")
+        if isinstance(schemes, dict) and schemes:
+            auth = A2AAuthentication.from_security_schemes(schemes)
+        if (auth is None or not auth.schemes) and isinstance(data.get("authentication"), dict):
+            legacy = A2AAuthentication.from_dict(data["authentication"])
+            if auth is not None:
+                # Merge, don't replace. The 0.3 map can yield a credentials URL
+                # (a scheme's tokenUrl) with no scheme names, and the 0.2 object
+                # the reverse, so taking either wholesale drops whichever half
+                # the other side held. The old guard read
+                # `auth.credentials is None`, which skipped the merge in exactly
+                # the case it was written to preserve -- a 0.3-derived
+                # credentials URL -- and threw the token URL away.
+                legacy.schemes = legacy.schemes or auth.schemes
+                legacy.credentials = legacy.credentials or auth.credentials
+            auth = legacy
+
+        # `additionalInterfaces` is the 0.3 name; `supportedInterfaces` is 1.0.
+        raw_interfaces = data.get("additionalInterfaces")
+        if not isinstance(raw_interfaces, list):
+            raw_interfaces = data.get("supportedInterfaces")
+        interfaces = [
+            A2AInterface.from_dict(i)
+            for i in (raw_interfaces or [])
+            if isinstance(i, dict) and i.get("url")
+        ]
+
+        caps = data.get("capabilities") if isinstance(data.get("capabilities"), dict) else {}
+        # Top-level in 0.3, relocated under capabilities in 1.0.
+        extended = bool(
+            data.get("supportsAuthenticatedExtendedCard")
+            or data.get("supportsExtendedAgentCard")
+            or caps.get("extendedAgentCard")
+        )
 
         # Collect unknown fields as metadata
         known_keys = {
@@ -145,6 +294,20 @@ class A2AAgentCard:
             "authentication",
             "defaultInputModes",
             "defaultOutputModes",
+            # 0.3 / 1.0 keys now parsed into typed fields rather than metadata.
+            "protocolVersion",
+            "preferredTransport",
+            "additionalInterfaces",
+            "supportedInterfaces",
+            "securitySchemes",
+            "securityRequirements",
+            "security",
+            "capabilities",
+            "signatures",
+            "supportsAuthenticatedExtendedCard",
+            "supportsExtendedAgentCard",
+            "iconUrl",
+            "documentationUrl",
         }
         metadata = {k: v for k, v in data.items() if k not in known_keys}
 
@@ -159,6 +322,15 @@ class A2AAgentCard:
             default_input_modes=data.get("defaultInputModes", ["text"]),
             default_output_modes=data.get("defaultOutputModes", ["text"]),
             metadata=metadata,
+            protocol_version=data.get("protocolVersion"),
+            preferred_transport=data.get("preferredTransport"),
+            interfaces=interfaces,
+            capabilities=caps,
+            signatures=[s for s in data.get("signatures", []) if isinstance(s, dict)],
+            security_requirements=_security_requirements(data),
+            supports_extended_card=extended,
+            icon_url=data.get("iconUrl"),
+            documentation_url=data.get("documentationUrl"),
         )
 
     @classmethod

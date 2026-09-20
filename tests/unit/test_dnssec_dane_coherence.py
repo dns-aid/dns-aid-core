@@ -98,6 +98,37 @@ _CATALOG_SOURCES = ("ard_card", "ard_inline", "http_index", "http_index_fallback
 # --------------------------------------------------------------------------- #
 # Fix 1 (filter side): min_dnssec exempts catalog/ARD agents, filters the rest
 # --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_hosts():
+    """_fetch_peer_cert SSRF-guards the dial, which resolves the host for real.
+
+    These tests use reserved example.com names and mock the socket, so the guard
+    would reject before any mocked behaviour is reached. Neutralised here rather
+    than per test: the guard has its own coverage, and what is under test is what
+    happens after the dial is permitted.
+    """
+    # These tests run a real TLS server on 127.0.0.1 at an ephemeral port, so
+    # both new guards correctly refuse it: the SSRF check rejects loopback and
+    # the port allow-list rejects the ephemeral port. Both have their own
+    # coverage; what is under test here is the certificate comparison.
+    import os
+
+    prev = os.environ.get("DNS_AID_DANE_ALLOWED_PORTS")
+    os.environ["DNS_AID_DANE_ALLOWED_PORTS"] = "any"
+    try:
+        with patch(
+            "dns_aid.utils.url_safety.validate_fetch_url_async", new=AsyncMock(return_value="")
+        ):
+            yield
+    finally:
+        if prev is None:
+            os.environ.pop("DNS_AID_DANE_ALLOWED_PORTS", None)
+        else:
+            os.environ["DNS_AID_DANE_ALLOWED_PORTS"] = prev
+
+
 class TestMinDnssecCatalogExemption:
     def test_dns_validated_kept(self) -> None:
         a = _dns_agent("v", validated=True)
@@ -158,7 +189,9 @@ class TestApplyPostDiscoveryScope:
 
     async def test_ard_only_require_dnssec_does_not_raise_or_call_check(self) -> None:
         ard = _ard_agent("chat")
-        with patch("dns_aid.core.validator._check_dnssec", new_callable=AsyncMock) as mock_check:
+        with patch(
+            "dns_aid.core.validator._check_dnssec_with_evidence", new_callable=AsyncMock
+        ) as mock_check:
             result = await self._run([ard], require_dnssec=True)
         assert result is False
         assert ard.dnssec_validated is False
@@ -167,9 +200,9 @@ class TestApplyPostDiscoveryScope:
     async def test_dns_all_validated_returns_true_and_stamps(self) -> None:
         a, b = _dns_agent("chat", validated=False), _dns_agent("search", validated=False)
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=True,
+            return_value=(True, True),
         ):
             result = await self._run([a, b], require_dnssec=True)
         assert result is True
@@ -178,9 +211,9 @@ class TestApplyPostDiscoveryScope:
     async def test_dns_unvalidated_raises(self) -> None:
         a = _dns_agent("chat", validated=False)
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=(False, False),
         ):
             with pytest.raises(DNSSECError):
                 await self._run([a], require_dnssec=True)
@@ -189,10 +222,10 @@ class TestApplyPostDiscoveryScope:
         dns_bad = _dns_agent("dnsbad", validated=False)
         ard = _ard_agent("ardagent")
 
-        async def selective(fqdn: str) -> bool:
-            return False  # the only in-scope agent (dns) fails
+        async def selective(fqdn: str) -> tuple[bool, bool]:
+            return False, False  # the only in-scope agent (dns) fails
 
-        with patch("dns_aid.core.validator._check_dnssec", new=selective):
+        with patch("dns_aid.core.validator._check_dnssec_with_evidence", new=selective):
             with pytest.raises(DNSSECError) as exc:
                 await self._run([dns_bad, ard], require_dnssec=True)
         msg = str(exc.value)
@@ -206,9 +239,9 @@ class TestApplyPostDiscoveryScope:
         # min_dnssec must STAMP (so the filter has real data) but never raise.
         a = _dns_agent("chat", validated=False)
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=(False, False),
         ) as mock_check:
             result = await self._run([a], min_dnssec=True)  # require_dnssec=False
         assert result is False
@@ -218,9 +251,9 @@ class TestApplyPostDiscoveryScope:
     async def test_min_dnssec_stamps_true_when_validated(self) -> None:
         a = _dns_agent("chat", validated=False)
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=True,
+            return_value=(True, True),
         ):
             await self._run([a], min_dnssec=True)
         assert a.dnssec_validated is True
@@ -229,9 +262,9 @@ class TestApplyPostDiscoveryScope:
         a = _dns_agent("chat", validated=False)
         with (
             patch(
-                "dns_aid.core.validator._check_dnssec",
+                "dns_aid.core.validator._check_dnssec_with_evidence",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=(True, True),
             ) as mock_dnssec,
             patch(
                 "dns_aid.core.discoverer._verify_agents_dane", new_callable=AsyncMock
@@ -409,6 +442,12 @@ class TestVerifyAgentsDane:
         assert agent.dane_verified is True
 
     async def test_dane_true_without_dnssec_demoted_to_none(self) -> None:
+        """The original control. Do not delete: it caught a real regression.
+
+        A TLSA-RRset DNSSEC gate was added in _check_dane and this demotion was
+        removed as redundant. It is not. The two gates authenticate different
+        things -- the pin, and the name the pin was fetched for.
+        """
         agent = _dns_agent("chat", validated=False)
         with patch(
             "dns_aid.core.validator._check_dane",
@@ -417,6 +456,25 @@ class TestVerifyAgentsDane:
         ):
             await _verify_agents_dane([agent])
         assert agent.dane_verified is None  # DANE without DNSSEC carries no guarantee
+
+    async def test_an_attacker_signed_target_does_not_earn_a_pass(self) -> None:
+        """The concrete attack the demotion stops.
+
+        The SVCB answer is forged, so target points at edge.attacker.net. That
+        zone is genuinely DNSSEC-signed by its owner and publishes a real TLSA
+        pinning their certificate, so the TLSA gate in _check_dane is satisfied.
+        Only the unauthenticated SVCB answer stands between the attacker and a
+        green DANE verdict.
+        """
+        agent = _dns_agent("chat", validated=False)
+        agent.target_host = "edge.attacker.net"
+        with patch(
+            "dns_aid.core.validator._check_dane",
+            new_callable=AsyncMock,
+            return_value=True,  # authentic TLSA, in the ATTACKER's signed zone
+        ):
+            await _verify_agents_dane([agent])
+        assert agent.dane_verified is None
 
     async def test_dane_false_with_dnssec_stays_false(self) -> None:
         agent = _dns_agent("chat", validated=True)
@@ -469,9 +527,9 @@ class TestDiscoverVerifyDaneEndToEnd:
                 new=AsyncMock(),
             ),
             patch(
-                "dns_aid.core.validator._check_dnssec",
+                "dns_aid.core.validator._check_dnssec_with_evidence",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=(True, True),
             ),
             patch(
                 "dns_aid.core.validator._check_dane",
@@ -783,3 +841,63 @@ class TestDaneLive:
         """Placeholder: discover a live all-ARD catalog with require_dnssec=True and
         assert it returns the ARD agents without raising DNSSECError."""
         pytest.skip("live ARD catalog required")
+
+
+class TestEnrichmentDoesNotVoidDnssec:
+    """A DNS record enriched from an HTTP index is still a DNS record.
+
+    `_enrich_from_http_index` relabelled `endpoint_source` to `http_index` when
+    the index supplied an endpoint with a path. That value is in
+    CATALOG_ENDPOINT_SOURCES, which is the exemption list for DNSSEC -- so a
+    genuine SVCB record dropped out of `dnssec_scope`. Because `all({}.values())`
+    is True, `require_dnssec=True` was then satisfied with zero DNSSEC queries,
+    and `min_dnssec` and the DANE gate read the same field. One relabel silently
+    voided three guarantees.
+
+    The correct label already existed: `dns_svcb_enriched` records both facts --
+    it came from DNS, and its endpoint was enriched -- and is not exempt.
+    """
+
+    def test_the_enriched_label_is_not_dnssec_exempt(self):
+        from dns_aid.core.models import CATALOG_ENDPOINT_SOURCES
+
+        assert "dns_svcb_enriched" not in CATALOG_ENDPOINT_SOURCES
+        assert "http_index" in CATALOG_ENDPOINT_SOURCES, "the exemption list itself is unchanged"
+
+    async def test_enrichment_keeps_the_record_in_dnssec_scope(self):
+        from dns_aid.core.discoverer import _enrich_from_http_index
+        from dns_aid.core.http_index import HttpIndexAgent
+
+        agent = _dns_agent("chat", validated=False)
+        agent.endpoint_source = "dns_svcb"
+        index_entry = HttpIndexAgent(
+            name="chat",
+            fqdn="chat.example.com",
+            endpoint="https://edge.example.com/mcp/v1",
+        )
+
+        _enrich_from_http_index(agent, index_entry)
+
+        assert agent.endpoint_override == "https://edge.example.com/mcp/v1"
+        assert agent.endpoint_source == "dns_svcb_enriched", (
+            "relabelling to a catalog source removes the record from dnssec_scope"
+        )
+
+    async def test_require_dnssec_still_raises_for_an_enriched_record(self):
+        """The end state that matters: the guarantee survives enrichment."""
+        from dns_aid.core.discoverer import _apply_post_discovery
+        from dns_aid.core.models import DNSSECError
+
+        agent = _dns_agent("chat", validated=False)
+        agent.endpoint_source = "dns_svcb_enriched"
+        calls = []
+
+        async def counted(fqdn):
+            calls.append(fqdn)
+            return (False, False)
+
+        with patch("dns_aid.core.validator._check_dnssec_with_evidence", counted):
+            with pytest.raises(DNSSECError):
+                await _apply_post_discovery([agent], True, False, False, "example.com")
+
+        assert calls, "a DNSSEC query must actually be issued for an enriched DNS record"

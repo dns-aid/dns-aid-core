@@ -17,7 +17,7 @@
       },
       "environmentVariables": [
         {
-          "description": "DNS backend to use (route53, cloudflare, infoblox, nios, ns1, ddns, mock). Not required for discovery-only operations.",
+          "description": "DNS backend to use (route53, cloudflare, infoblox, nios, ns1, akamai-edgedns, ddns, mock). Not required for discovery-only operations.",
           "isRequired": false,
           "format": "string",
           "isSecret": false,

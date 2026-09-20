@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+import importlib
+from unittest.mock import Mock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -675,3 +676,135 @@ class TestCircuitStateCEL:
             "layer1",
         )
         assert len(v) == 1
+
+
+# =============================================================================
+# Backend selection and the pure-Python fallback backend
+# =============================================================================
+
+
+class TestBackendSelection:
+    """_select_backend priority: Rust first, cel-python fallback, else ImportError."""
+
+    def test_rust_backend_preferred_when_available(self) -> None:
+        from dns_aid.sdk.policy.cel_evaluator import _RustBackend, _select_backend
+
+        backend = _select_backend()
+        # In the dev environment both backends are installed → Rust wins.
+        assert isinstance(backend, _RustBackend)
+
+    def test_python_fallback_when_rust_unavailable(self) -> None:
+        mod = importlib.import_module("dns_aid.sdk.policy.cel_evaluator")
+
+        with patch.object(mod, "_RustBackend", side_effect=ImportError("no cel")):
+            backend = mod._select_backend()
+        assert isinstance(backend, mod._PythonBackend)
+
+    def test_no_backend_available_raises_import_error(self) -> None:
+        mod = importlib.import_module("dns_aid.sdk.policy.cel_evaluator")
+
+        with (
+            patch.object(mod, "_RustBackend", side_effect=ImportError("no cel")),
+            patch.object(mod, "_PythonBackend", side_effect=ImportError("no celpy")),
+        ):
+            with pytest.raises(ImportError, match="No CEL backend available"):
+                mod._select_backend()
+
+    def test_evaluator_records_backend_name(self) -> None:
+        from dns_aid.sdk.policy.cel_evaluator import CELRuleEvaluator
+
+        evaluator = CELRuleEvaluator()
+        assert evaluator.backend_name in ("_RustBackend", "_PythonBackend")
+
+
+class TestPythonBackend:
+    """Exercise the cel-python (celpy) fallback backend directly."""
+
+    def _python_evaluator(self):
+        mod = importlib.import_module("dns_aid.sdk.policy.cel_evaluator")
+
+        with patch.object(mod, "_RustBackend", side_effect=ImportError("no cel")):
+            return mod.CELRuleEvaluator()
+
+    def test_compile_and_execute(self) -> None:
+        from dns_aid.sdk.policy.cel_evaluator import _PythonBackend
+
+        backend = _PythonBackend()
+        prog = backend.compile("request.caller_trust_score >= 50.0")
+        assert bool(backend.execute(prog, {"caller_trust_score": 80.0})) is True
+        assert bool(backend.execute(prog, {"caller_trust_score": 10.0})) is False
+
+    def test_dict_to_cel_map_type_coercion(self) -> None:
+        from celpy import celtypes
+
+        from dns_aid.sdk.policy.cel_evaluator import _PythonBackend
+
+        cel_map = _PythonBackend._dict_to_cel_map(
+            {"b": True, "i": 3, "f": 1.5, "s": "x", "n": None}, celtypes
+        )
+        assert cel_map[celtypes.StringType("b")] == celtypes.BoolType(True)
+        assert isinstance(cel_map[celtypes.StringType("b")], celtypes.BoolType)
+        assert isinstance(cel_map[celtypes.StringType("i")], celtypes.IntType)
+        assert isinstance(cel_map[celtypes.StringType("f")], celtypes.DoubleType)
+        assert cel_map[celtypes.StringType("s")] == celtypes.StringType("x")
+        # Non-primitive values are stringified
+        assert cel_map[celtypes.StringType("n")] == celtypes.StringType("None")
+
+    def test_evaluator_with_python_backend_denies(self) -> None:
+        evaluator = self._python_evaluator()
+        assert evaluator.backend_name == "_PythonBackend"
+        rules = [
+            CELRule(
+                id="trust",
+                expression="request.caller_trust_score >= 50.0",
+                effect="deny",
+                message="Too low",
+            )
+        ]
+        v, _ = evaluator.evaluate(rules, _ctx(caller_trust_score=10.0), "layer1")
+        assert len(v) == 1
+        assert v[0].rule == "cel:trust"
+
+    def test_evaluator_with_python_backend_allows(self) -> None:
+        evaluator = self._python_evaluator()
+        rules = [
+            CELRule(
+                id="proto",
+                expression='request.protocol == "mcp" && request.dnssec_validated',
+                effect="deny",
+            )
+        ]
+        v, _ = evaluator.evaluate(rules, _ctx(protocol="mcp", dnssec_validated=True), "layer1")
+        assert len(v) == 0
+
+    def test_python_backend_bad_expression_fails_open(self) -> None:
+        evaluator = self._python_evaluator()
+        rules = [CELRule(id="bad", expression="!!! invalid CEL ???", effect="deny")]
+        v, w = evaluator.evaluate(rules, _ctx(), "layer1")
+        assert len(v) == 0
+        assert len(w) == 0
+
+
+# =============================================================================
+# Negative compile cache
+# =============================================================================
+
+
+class TestNegativeCompileCache:
+    """Expressions that fail to compile are negatively cached."""
+
+    def test_recompile_of_bad_expression_raises_value_error(self) -> None:
+        from dns_aid.sdk.policy.cel_evaluator import CELRuleEvaluator
+
+        evaluator = CELRuleEvaluator()
+        evaluator._backend = Mock()
+        evaluator._backend.compile = Mock(side_effect=RuntimeError("parse error"))
+
+        with pytest.raises(RuntimeError, match="parse error"):
+            evaluator._compile("bad expression")
+        assert "bad expression" in evaluator._bad_expressions
+
+        # Second attempt short-circuits without touching the backend again
+        with pytest.raises(ValueError, match="Previously failed to compile"):
+            evaluator._compile("bad expression")
+        assert evaluator._backend.compile.call_count == 1

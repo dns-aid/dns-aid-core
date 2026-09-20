@@ -15,6 +15,8 @@ import concurrent.futures
 import ipaddress
 import os
 import socket
+import threading
+from urllib.parse import urlparse, urlunparse
 
 import structlog
 
@@ -43,6 +45,85 @@ def redact_url_for_log(url: str) -> str:
     if parsed.port:
         netloc = f"{netloc}:{parsed.port}"
     return urlunparse(parsed._replace(netloc=netloc))
+
+
+# The address each URL was vetted at, so a caller can dial the literal instead of
+# re-resolving. Validating a NAME and then connecting to the same NAME resolves
+# twice, and only the first is checked: a hostile authoritative server with a
+# one-second TTL answers public, then loopback. Measured retrieving an internal
+# service's certificate through the DANE path.
+_VETTED_IP_MAX = 512
+_last_vetted_ip: dict[str, list[str]] = {}
+_vetted_ip_lock = threading.Lock()
+
+
+def vetted_ip_for(url: str) -> str | None:
+    """The first address ``validate_fetch_url`` approved for this URL, if any."""
+    addresses = _last_vetted_ip.get(url)
+    return addresses[0] if addresses else None
+
+
+def vetted_ips_for(url: str) -> list[str]:
+    """Every address ``validate_fetch_url`` approved, in resolution order.
+
+    All of them passed the same range check, so dialling any one is exactly as
+    safe as dialling the first -- and trying them in turn is what restores the
+    multi-address fallback that pinning removed.
+
+    ``getaddrinfo(AF_UNSPEC)`` does not apply ``AI_ADDRCONFIG``, so a dual-stack
+    name returns its AAAA first even on a client with no IPv6 route. Recording
+    only the first address turned that into a hard failure where httpcore had
+    previously tried each address in turn: fetching a JWKS from an IPv4-only
+    container failed on the v6 literal instead of falling through to the A
+    record, and the zone's every agent came back ``signature_status='no_key'``.
+    The same exposure applies to any multi-homed host whose first address is
+    transiently down.
+    """
+    return list(_last_vetted_ip.get(url) or ())
+
+
+# NAT64 (RFC 6052) and 6to4 relay anycast carry an embedded IPv4 destination and
+# are classified globally reachable, so `64:ff9b::a9fe:a9fe` passed the range
+# check while the bare 169.254.169.254 it translates to did not. On any host
+# behind NAT64/DNS64 -- IPv6-only clusters, AWS VPC NAT64, mobile carriers --
+# the gateway delivers it to the metadata service.
+# RFC 6052 section 2.2 puts the embedded IPv4 at a different offset per prefix
+# length, so the decode must be per prefix. Reading the low 32 bits is correct
+# ONLY for /96; for /48 those bits are the attacker-chosen suffix, so a decode
+# of 64:ff9b:1:a9fe:a9:fe00:808:808 returned 8.8.8.8 and let an address that
+# reaches 169.254.169.254 through a NAT64 gateway pass as global.
+_EMBEDDED_V4_PREFIXES = (
+    (ipaddress.ip_network("64:ff9b::/96"), 96),
+    (ipaddress.ip_network("64:ff9b:1::/48"), 48),
+)
+# IPv4-compatible IPv6 (RFC 4291 2.5.5.1): ::a.b.c.d reports is_global for a
+# private embedded address, and ipv4_mapped does not catch it.
+_V4_COMPATIBLE = ipaddress.ip_network("::/96")
+_SIXTOFOUR_RELAY = ipaddress.ip_network("192.88.99.0/24")
+
+
+def _unwrap_embedded_v4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Resolve an address to the destination it actually reaches."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return ip.ipv4_mapped
+        raw = int(ip)
+        for prefix, length in _EMBEDDED_V4_PREFIXES:
+            if ip in prefix:
+                if length == 96:
+                    return ipaddress.IPv4Address(raw & 0xFFFFFFFF)
+                # /48: bits 48-63 then 72-87, skipping the reserved u octet.
+                return ipaddress.IPv4Address(
+                    (((raw >> 64) & 0xFFFF) << 16) | ((raw >> 40) & 0xFFFF)
+                )
+        if ip in _V4_COMPATIBLE and raw & 0xFFFFFFFF:
+            return ipaddress.IPv4Address(raw & 0xFFFFFFFF)
+    elif ip in _SIXTOFOUR_RELAY:
+        # Anycast relay into 6to4; the far side is not constrained.
+        return ipaddress.IPv4Address("127.0.0.1")
+    return ip
 
 
 def validate_fetch_url(url: str) -> str:
@@ -98,6 +179,12 @@ def validate_fetch_url(url: str) -> str:
     except socket.gaierror as e:
         raise UnsafeURLError(f"Cannot resolve hostname '{hostname}': {e}") from e
 
+    # Every resolved address is range-checked (one bad answer in the set fails
+    # the whole URL), and every one that passes is recorded so the caller can
+    # fall through when the first is unreachable. Order is preserved: the
+    # resolver's preference is still honoured, it is simply no longer the only
+    # option.
+    vetted: list[str] = []
     for _family, _type, _proto, _canonname, sockaddr in addrinfos:
         ip_str = sockaddr[0]
         try:
@@ -105,11 +192,33 @@ def validate_fetch_url(url: str) -> str:
         except ValueError:
             continue
 
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        # Allow-list the globally routable space rather than enumerating the
+        # bad ranges. The enumeration missed RFC 6598 shared address space
+        # (100.64.0.0/10 -- Alibaba Cloud metadata at 100.100.100.200, Tailscale
+        # tailnets, carrier-grade NAT, some k8s fabrics) and multicast, both of
+        # which a forgeable SVCB target could name.
+        ip = _unwrap_embedded_v4(ip)
+        if not ip.is_global or ip.is_multicast or ip.is_unspecified:
             raise UnsafeURLError(
                 f"URL resolves to non-public IP {ip_str} (hostname '{hostname}'): {url}"
             )
+        if ip_str not in vetted:
+            vetted.append(str(ip_str))
 
+    # Bounded like every other cache in this package. URLs are built from record
+    # data, so an attacker publishing many distinct URIs across many zones would
+    # otherwise grow this without limit in a long-running server.
+    # Locked. Unlike the caches in jwks.py, which run on the single-threaded
+    # event loop, validate_fetch_url executes in a 32-worker ThreadPoolExecutor
+    # via validate_fetch_url_async -- and `iter()` then `next()` are separate
+    # bytecodes, so another worker mutating the dict between them raises
+    # RuntimeError. That escaped through six call sites that catch only
+    # UnsafeURLError, as an intermittent load-triggered failure.
+    with _vetted_ip_lock:
+        while len(_last_vetted_ip) >= _VETTED_IP_MAX:
+            _last_vetted_ip.pop(next(iter(_last_vetted_ip)), None)
+        _last_vetted_ip.pop(url, None)
+        _last_vetted_ip[url] = vetted
     return url
 
 
@@ -203,42 +312,91 @@ async def safe_fetch_bytes(
     if max_redirects:
         kwargs["max_redirects"] = max_redirects
 
-    async with httpx.AsyncClient(**kwargs) as client, client.stream("GET", url) as resp:
-        if resp.status_code != 200:
-            return None
+    # Pin the connection to the address the guard actually vetted.
+    #
+    # Every caller validates the URL and then hands the same NAME to httpx,
+    # which resolves it a second time. Only the first resolution is checked, so
+    # a hostile authoritative server answering with a one-second TTL returns a
+    # public address to the guard and a loopback or metadata address to the
+    # connection. The retrieved body then lands in the discovery result, which
+    # makes it exfiltration rather than blind SSRF.
+    #
+    # Rewriting the URL to the literal keeps the range check meaningful;
+    # sni_hostname carries the original name so SNI and certificate hostname
+    # verification are unchanged. Falls back to the name when no pin is
+    # available (an allow-listed host, or a URL validated elsewhere), which is
+    # the pre-existing behaviour rather than a new hole.
+    async def _fetch_from(pinned: str | None) -> bytes | None:
+        request_url = url
+        extensions: dict = {}
+        per_attempt = dict(kwargs)
+        if pinned:
+            parsed = urlparse(url)
+            if parsed.hostname and parsed.hostname != pinned:
+                host_literal = f"[{pinned}]" if ":" in pinned else pinned
+                netloc = f"{host_literal}:{parsed.port}" if parsed.port else host_literal
+                request_url = urlunparse(parsed._replace(netloc=netloc))
+                extensions["sni_hostname"] = parsed.hostname
+                per_attempt["headers"] = {"Host": parsed.netloc}
 
-        # Fast-path: reject via Content-Length header if present.
-        # Not authoritative (can be spoofed/absent) — stream read is.
-        cl = resp.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) > max_bytes:
-            logger.warning(
-                "Response Content-Length exceeds limit — aborting",
-                url=url,
-                content_length=int(cl),
-                limit=max_bytes,
-            )
-            raise ResponseTooLargeError(
-                f"Content-Length {cl} exceeds {max_bytes} byte limit: {url}"
-            )
+        async with (
+            httpx.AsyncClient(**per_attempt) as client,
+            client.stream("GET", request_url, extensions=extensions) as resp,
+        ):
+            if resp.status_code != 200:
+                return None
 
-        # Stream with byte counting — the real guard.
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in resp.aiter_bytes(chunk_size=8192):
-            total += len(chunk)
-            if total > max_bytes:
+            # Fast-path: reject via Content-Length header if present.
+            # Not authoritative (can be spoofed/absent) — stream read is.
+            cl = resp.headers.get("content-length")
+            if cl and cl.isdigit() and int(cl) > max_bytes:
                 logger.warning(
-                    "Response exceeded size limit mid-stream — aborting",
+                    "Response Content-Length exceeds limit — aborting",
                     url=url,
-                    bytes_read=total,
+                    content_length=int(cl),
                     limit=max_bytes,
                 )
                 raise ResponseTooLargeError(
-                    f"Response exceeded {max_bytes} byte limit at {total} bytes: {url}"
+                    f"Content-Length {cl} exceeds {max_bytes} byte limit: {url}"
                 )
-            chunks.append(chunk)
 
-        return b"".join(chunks)
+            # Stream with byte counting — the real guard.
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes(chunk_size=8192):
+                total += len(chunk)
+                if total > max_bytes:
+                    logger.warning(
+                        "Response exceeded size limit mid-stream — aborting",
+                        url=url,
+                        bytes_read=total,
+                        limit=max_bytes,
+                    )
+                    raise ResponseTooLargeError(
+                        f"Response exceeded {max_bytes} byte limit at {total} bytes: {url}"
+                    )
+                chunks.append(chunk)
+
+            return b"".join(chunks)
+
+    # Try every vetted address before giving up. Only a TRANSPORT failure
+    # advances to the next one: a non-200, an oversized body or a TLS rejection
+    # is the server's real answer and retrying it against a sibling address
+    # would just repeat the same result more slowly.
+    candidates: list[str | None] = list(vetted_ips_for(url)) or [None]
+    for index, candidate in enumerate(candidates):
+        try:
+            return await _fetch_from(candidate)
+        except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as e:
+            if index + 1 >= len(candidates):
+                raise
+            logger.debug(
+                "vetted address unreachable; trying the next one",
+                url=url,
+                address=candidate,
+                error=str(e),
+            )
+    return None
 
 
 def _get_allowlist() -> set[str]:

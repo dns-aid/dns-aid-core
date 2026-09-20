@@ -1,0 +1,204 @@
+# Installs the package the way a user does — a fresh `pip install` that resolves
+# dependencies from their declared floors, with no lockfile — and checks that the
+# result actually starts.
+#
+# Every other workflow avoids a fresh resolution: ci.yml and security.yml use
+# `uv sync --frozen`, release.yml installs the bare wheel with no extras, and
+# fuzz.yml uses `pip install --no-deps`. That gap is why mcp 2.0.0 removing
+# `mcp.server.fastmcp` reached users as a container that started and immediately
+# exited (#230) while CI stayed green.
+#
+# This breaks on an upstream release rather than on a commit, so the primary
+# trigger is the nightly schedule. Pull requests only run it when they touch
+# dependency metadata, since a contributor cannot fix an upstream publication.
+name: Install smoke test
+
+on:
+  schedule:
+    # 04:37 UTC nightly. Deliberately off the hour: GitHub delays and can DROP
+    # scheduled runs queued at the top of an hour, and for this workflow a
+    # dropped run means the detector is simply off that night.
+    - cron: "37 4 * * *"
+  workflow_dispatch:
+  # NOTE: the two path lists are duplicated on purpose. GitHub Actions does not
+  # support YAML anchors/aliases, so they must be kept in sync by hand.
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      # A module-level import of a symbol that does not exist at the resolved
+      # version fails here and nowhere else, so source changes matter too.
+      - "src/**"
+      - ".github/workflows/install-smoke.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - "src/**"
+      - ".github/workflows/install-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Scheduled runs are the primary signal and must not be cancelled by a push or
+  # a manual dispatch landing on main: a cancelled run is not a failure, so it
+  # would notify nobody and silently skip the night's check.
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  install-smoke:
+    name: Fresh install (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # A server that accepts connections but never answers would otherwise burn
+    # the 360-minute default before anyone hears about it.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest and newest interpreter in the classifier list, where marker-based
+        # resolution differs most. Note `requires-python = ">=3.11"` has no upper
+        # bound, so 3.14+ installs are permitted but not covered here.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Deliberately pip, not uv, and deliberately no lockfile: pip resolves each
+      # dependency to the NEWEST version its specifier allows, which is what a
+      # user's install does and what the frozen CI jobs never see. Note this
+      # tests the ceiling, not the floors — an incorrect lower bound is NOT
+      # caught here, because pip will not pick the floor to begin with.
+      #
+      # Extras match what the published container ships (Dockerfile) plus cli,
+      # so the uncapped floors that actually reach users — boto3,
+      # edgegrid-python, requests, google-auth — are resolved too.
+      - name: Install from source with no lockfile
+        run: |
+          python -m pip install --upgrade pip
+          pip install '.[mcp,cli,route53,akamai-edgedns]'
+
+      # Printed before the smoke test so a failure is diagnosable from the log
+      # alone — the first question is always "which version did it resolve?".
+      - name: Record resolved versions
+        run: pip list
+
+      - name: Smoke test — MCP server console script
+        run: dns-aid-mcp --help
+
+      # The CLI pulls typer and rich, both of which are 0.x with no upper bound.
+      # Without this the extra is installed but never imported, so a typer major
+      # release would break `dns-aid` while this job stayed green.
+      - name: Smoke test — CLI console script
+        run: dns-aid --help
+
+      # How downstream sidecars spawn the server. This is NOT an independent
+      # import path from the console script — both reach server.py through
+      # dns_aid/mcp/__init__.py — but runpy re-executes the module after the
+      # package import, which the console script does not do.
+      - name: Smoke test — module entrypoint
+        run: python -m dns_aid.mcp.server --help
+
+      - name: Smoke test — HTTP transport serves /health
+        env:
+          # Without this the server's own startup diagnostics are block-buffered
+          # and lost when the trap terminates it — exactly when they are wanted.
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          dns-aid-mcp --transport http --host 127.0.0.1 --port 8000 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          # Both curls are bounded. Without --max-time a socket that accepts but
+          # never responds blocks the first iteration indefinitely, so the "30
+          # attempts" below would not bound the step at all.
+          ready=""
+          for _ in $(seq 1 30); do
+            if curl -sf --connect-timeout 2 --max-time 5 -o /dev/null http://127.0.0.1:8000/health; then
+              ready=1
+              break
+            fi
+            # If the process is already gone, the server crashed on startup and
+            # polling for the rest of the timeout would only delay the report.
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "::error::server exited during startup"
+              # `wait` yields the real exit status; report it rather than discard it.
+              rc=0
+              wait "$server_pid" || rc=$?
+              echo "server exit status: $rc"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # Explicit, because `status=$(curl ...)` under `set -e` aborts the step
+          # on a failing curl before any diagnostic can print — which rendered
+          # the timeout path as a bare "exit code 7" with no message.
+          if [ -z "$ready" ]; then
+            echo "::error::server did not answer /health within 30s (still running, never became ready)"
+            exit 1
+          fi
+
+          status=0
+          curl -s --connect-timeout 2 --max-time 10 -o /tmp/health.json \
+            -w '%{http_code}' http://127.0.0.1:8000/health > /tmp/health.code || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::curl failed against /health (exit $status)"
+            exit 1
+          fi
+          echo "GET /health -> $(cat /tmp/health.code)"
+          cat /tmp/health.json
+          echo
+          if [ "$(cat /tmp/health.code)" != "200" ]; then
+            echo "::error::/health returned $(cat /tmp/health.code), expected 200"
+            exit 1
+          fi
+
+  # A nightly failure otherwise surfaces only as an email to whoever last edited
+  # the cron line, which is not a durable owner. File an issue instead, reusing
+  # the open one so a sustained upstream breakage does not open a new issue daily.
+  report-failure:
+    name: File an issue on nightly failure
+    needs: install-smoke
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Nightly install smoke test is failing"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$title in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" \
+              --body "Still failing: $RUN_URL"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label bug \
+              --body "$(printf '%s\n' \
+                "A fresh, unconstrained \`pip install\` of this package is failing." \
+                "" \
+                "This job resolves dependencies the way a user does, outside \`uv.lock\`," \
+                "so it usually means an upstream release broke us with no change here —" \
+                "the same failure mode as #230." \
+                "" \
+                "Failing run: $RUN_URL" \
+                "" \
+                "Check the \"Record resolved versions\" step for what resolved.")"
+          fi

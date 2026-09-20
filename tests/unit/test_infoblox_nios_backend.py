@@ -10,8 +10,9 @@ requiring real NIOS credentials.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from dns_aid.backends.infoblox.nios import InfobloxNIOSBackend
@@ -842,3 +843,485 @@ class TestPublisherNIOSBackendSelection:
 
         assert result.success is False
         assert "does not exist" in result.message
+
+
+def _nios_backend(**kwargs) -> InfobloxNIOSBackend:
+    defaults = {"host": "nios.local", "username": "admin", "password": "secret"}
+    defaults.update(kwargs)
+    return InfobloxNIOSBackend(**defaults)
+
+
+def _mock_response(
+    *,
+    json_data=None,
+    status_code: int = 200,
+    content: bytes = b"{}",
+    content_type: str = "application/json",
+    text: str = "",
+):
+    """Build a MagicMock httpx response for NIOS _request tests."""
+    response = MagicMock()
+    response.status_code = status_code
+    response.content = content
+    response.text = text
+    response.headers = {"content-type": content_type}
+    response.json.return_value = json_data
+    response.raise_for_status = MagicMock()
+    return response
+
+
+class TestNIOSInitBranches:
+    """Constructor branches not covered by the main init tests."""
+
+    def test_explicit_verify_ssl_param(self) -> None:
+        backend = _nios_backend(verify_ssl=False)
+        assert backend._verify_ssl is False
+
+    def test_verify_ssl_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NIOS_VERIFY_SSL", "false")
+        backend = _nios_backend()
+        assert backend._verify_ssl is False
+
+    def test_explicit_timeout_param(self) -> None:
+        backend = _nios_backend(timeout=12.5)
+        assert backend._timeout == 12.5
+
+    def test_supports_private_svcb_keys(self) -> None:
+        assert _nios_backend().supports_private_svcb_keys is True
+
+
+class TestNIOSClient:
+    """HTTP client lifecycle."""
+
+    async def test_get_client_creates_and_caches(self) -> None:
+        backend = _nios_backend(verify_ssl=False)
+        client = await backend._get_client()
+        assert isinstance(client, httpx.AsyncClient)
+        assert client.headers["Content-Type"] == "application/json"
+
+        assert await backend._get_client() is client
+        await backend.close()
+        assert backend._client is None
+
+    async def test_get_client_recreates_on_loop_change(self) -> None:
+        backend = _nios_backend(verify_ssl=False)
+        old_client = MagicMock()
+        old_client.is_closed = False
+        old_client.aclose = AsyncMock()
+        backend._client = old_client
+        backend._client_loop_id = -1  # never a real loop id
+
+        client = await backend._get_client()
+
+        old_client.aclose.assert_awaited_once()
+        assert client is not old_client
+        assert isinstance(client, httpx.AsyncClient)
+        await backend.close()
+
+    async def test_close_noop_without_client(self) -> None:
+        backend = _nios_backend()
+        await backend.close()  # must not raise
+
+
+class TestNIOSRequest:
+    """Low-level _request error handling and response parsing."""
+
+    @pytest.fixture
+    def backend(self) -> InfobloxNIOSBackend:
+        return _nios_backend()
+
+    def _patch_client(self, backend: InfobloxNIOSBackend, response=None, side_effect=None):
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=response, side_effect=side_effect)
+        return patch.object(backend, "_get_client", return_value=mock_client), mock_client
+
+    async def test_request_returns_json_list(self, backend: InfobloxNIOSBackend) -> None:
+        response = _mock_response(json_data=[{"_ref": "zone_auth/x"}], content=b"[...]")
+        ctx, mock_client = self._patch_client(backend, response=response)
+        with ctx:
+            result = await backend._request("GET", "zone_auth", params={"fqdn": "example.com"})
+
+        assert result == [{"_ref": "zone_auth/x"}]
+        # Endpoint without a leading slash gets one prepended.
+        assert mock_client.request.call_args[1]["url"] == "/zone_auth"
+
+    async def test_request_http_status_error_raises_runtime_error(
+        self, backend: InfobloxNIOSBackend
+    ) -> None:
+        error_response = MagicMock()
+        error_response.status_code = 400
+        error_response.text = "Bad svc_key"
+        response = _mock_response()
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "400", request=MagicMock(), response=error_response
+        )
+        ctx, _ = self._patch_client(backend, response=response)
+        with ctx, pytest.raises(RuntimeError, match="status=400 body=Bad svc_key"):
+            await backend._request("POST", "/record:svcb", json={})
+
+    async def test_request_transport_error_raises_runtime_error(
+        self, backend: InfobloxNIOSBackend
+    ) -> None:
+        ctx, _ = self._patch_client(backend, side_effect=httpx.ConnectError("refused"))
+        with ctx, pytest.raises(RuntimeError, match="transport error"):
+            await backend._request("GET", "zone_auth")
+
+    async def test_request_empty_body_returns_empty_dict(
+        self, backend: InfobloxNIOSBackend
+    ) -> None:
+        response = _mock_response(content=b"")
+        ctx, _ = self._patch_client(backend, response=response)
+        with ctx:
+            assert await backend._request("DELETE", "record:txt/ZG5z") == {}
+
+    async def test_request_non_json_content_type_returns_raw(
+        self, backend: InfobloxNIOSBackend
+    ) -> None:
+        response = _mock_response(content=b"plain", content_type="text/plain", text="plain")
+        ctx, _ = self._patch_client(backend, response=response)
+        with ctx:
+            assert await backend._request("GET", "grid") == {"raw": "plain"}
+
+    async def test_request_scalar_json_returns_raw(self, backend: InfobloxNIOSBackend) -> None:
+        response = _mock_response(json_data="record:txt/ZG5z", content=b'"record:txt/ZG5z"')
+        ctx, _ = self._patch_client(backend, response=response)
+        with ctx:
+            assert await backend._request("POST", "record:txt", json={}) == {
+                "raw": "record:txt/ZG5z"
+            }
+
+
+class TestNIOSFormatSvcParametersEdgeCases:
+    """Edge cases of _format_svc_parameters_for_value."""
+
+    def test_skips_non_dict_and_empty_key_items(self) -> None:
+        result = InfobloxNIOSBackend._format_svc_parameters_for_value(
+            [
+                "junk",
+                {"svc_value": ["orphan"]},
+                {"svc_key": "  ", "svc_value": ["blank-key"]},
+                {"svc_key": "port", "svc_value": ["443"]},
+            ]
+        )
+        assert result == 'port="443"'
+
+    def test_scalar_and_none_svc_values(self) -> None:
+        result = InfobloxNIOSBackend._format_svc_parameters_for_value(
+            [
+                {"svc_key": "port", "svc_value": "443"},  # scalar → single value
+                {"svc_key": "alpn", "svc_value": None, "mandatory": True},  # value-less
+                {"svc_key": "key65404", "svc_value": "   "},  # blank scalar dropped
+            ]
+        )
+        # alpn is mandatory but value-less: listed in mandatory, no alpn=... token.
+        assert result == 'mandatory="alpn" port="443"'
+        assert "alpn=" not in result
+
+    def test_mandatory_deduplicated(self) -> None:
+        result = InfobloxNIOSBackend._format_svc_parameters_for_value(
+            [
+                {"svc_key": "alpn", "svc_value": ["mcp"], "mandatory": True},
+                {"svc_key": "alpn", "svc_value": ["h2"], "mandatory": True},
+            ]
+        )
+        assert result.startswith('mandatory="alpn" ')
+        assert result.count("mandatory=") == 1
+
+
+class TestNIOSFindRecordRef:
+    """_find_record_ref result handling."""
+
+    @pytest.fixture
+    def backend(self) -> InfobloxNIOSBackend:
+        return _nios_backend()
+
+    async def test_empty_results_returns_none(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(backend, "_request", AsyncMock(return_value=[]))
+        assert await backend._find_record_ref("example.com", "_a._mcp._agents", "SVCB") is None
+
+    async def test_non_list_results_returns_none(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(backend, "_request", AsyncMock(return_value={"error": "x"}))
+        assert await backend._find_record_ref("example.com", "_a._mcp._agents", "TXT") is None
+
+    async def test_non_string_ref_returns_none(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(backend, "_request", AsyncMock(return_value=[{"_ref": 123}]))
+        assert await backend._find_record_ref("example.com", "_a._mcp._agents", "TXT") is None
+
+
+class TestNIOSListAndGetRecordEdgeCases:
+    """list_records / list_zones / get_record edge branches."""
+
+    @pytest.fixture
+    def backend(self) -> InfobloxNIOSBackend:
+        return _nios_backend()
+
+    async def test_list_records_non_list_response_skipped(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(backend, "_request", AsyncMock(return_value={"error": "boom"}))
+        records = [r async for r in backend.list_records("example.com")]
+        assert records == []
+
+    async def test_list_records_skips_records_without_name(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def fake_request(method, endpoint, *, params=None, json=None):
+            if endpoint == "record:txt":
+                return [
+                    {"_ref": "record:txt/a", "text": '"orphan"'},  # no name → skipped
+                    {
+                        "_ref": "record:txt/b",
+                        "name": "_agent._mcp._agents.example.com",
+                        "ttl": 300,
+                        "text": '"kept"',
+                    },
+                ]
+            return []
+
+        monkeypatch.setattr(backend, "_request", fake_request)
+        records = [r async for r in backend.list_records("example.com", record_type="TXT")]
+        assert len(records) == 1
+        assert records[0]["values"] == ['"kept"']
+
+    async def test_get_record_txt(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            backend,
+            "_request",
+            AsyncMock(
+                return_value=[
+                    {
+                        "_ref": "record:txt/abc",
+                        "name": "_index._agents.example.com",
+                        "ttl": 600,
+                        "text": '"agents=chat:mcp"',
+                    }
+                ]
+            ),
+        )
+        result = await backend.get_record("example.com", "_index._agents", "TXT")
+        assert result is not None
+        assert result["type"] == "TXT"
+        assert result["values"] == ['"agents=chat:mcp"']
+        assert result["name"] == "_index._agents"
+        assert result["ttl"] == 600
+
+    async def test_list_zones_non_list_response(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(backend, "_request", AsyncMock(return_value={"error": "x"}))
+        assert await backend.list_zones() == []
+
+    async def test_list_zones_skips_non_dict_entries(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            backend,
+            "_request",
+            AsyncMock(
+                return_value=[
+                    "junk",
+                    {"_ref": "zone_auth/x", "fqdn": "example.com", "view": "default"},
+                ]
+            ),
+        )
+        zones = await backend.list_zones()
+        assert len(zones) == 1
+        assert zones[0]["name"] == "example.com"
+
+
+class TestNIOSRPZ:
+    """RPZ (Response Policy Zone) operations."""
+
+    @pytest.fixture
+    def backend(self) -> InfobloxNIOSBackend:
+        return _nios_backend()
+
+    async def test_create_rpz_cname_nxdomain_new(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, str, dict | None]] = []
+
+        async def fake_request(method, endpoint, *, params=None, json=None):
+            calls.append((method, endpoint, json))
+            return [] if method == "GET" else {}
+
+        monkeypatch.setattr(backend, "_request", fake_request)
+        fqdn = await backend.create_rpz_cname_record(
+            "rpz.example.com", "evil.com", "nxdomain", comment="block it"
+        )
+
+        assert fqdn == "evil.com.rpz.example.com"
+        method, endpoint, payload = calls[-1]
+        assert (method, endpoint) == ("POST", "record:rpz:cname")
+        assert payload == {
+            "name": "evil.com.rpz.example.com",
+            "rp_zone": "rpz.example.com",
+            "canonical": "",
+            "comment": "block it",
+        }
+
+    async def test_create_rpz_cname_passthru_uses_identity_cname(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, str, dict | None]] = []
+
+        async def fake_request(method, endpoint, *, params=None, json=None):
+            calls.append((method, endpoint, json))
+            return [] if method == "GET" else {}
+
+        monkeypatch.setattr(backend, "_request", fake_request)
+        await backend.create_rpz_cname_record("rpz.example.com", "good.com", "PASSTHRU")
+
+        payload = calls[-1][2]
+        assert payload["canonical"] == "good.com"
+        assert payload["comment"] == "DNS-AID RPZ: PASSTHRU good.com"
+
+    async def test_create_rpz_cname_updates_existing(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, str, dict | None]] = []
+
+        async def fake_request(method, endpoint, *, params=None, json=None):
+            calls.append((method, endpoint, json))
+            if method == "GET":
+                return [{"_ref": "record:rpz:cname/abc"}]
+            return {}
+
+        monkeypatch.setattr(backend, "_request", fake_request)
+        # Owner already carries the RPZ zone suffix — no double append.
+        fqdn = await backend.create_rpz_cname_record(
+            "rpz.example.com", "evil.com.rpz.example.com", "NXDOMAIN"
+        )
+
+        assert fqdn == "evil.com.rpz.example.com"
+        method, endpoint, payload = calls[-1]
+        assert (method, endpoint) == ("PUT", "record:rpz:cname/abc")
+        assert payload == {
+            "canonical": "",
+            "comment": "DNS-AID RPZ: NXDOMAIN evil.com.rpz.example.com",
+        }
+
+    async def test_create_rpz_cname_existing_without_ref_creates(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, str]] = []
+
+        async def fake_request(method, endpoint, *, params=None, json=None):
+            calls.append((method, endpoint))
+            if method == "GET":
+                return [{"name": "evil.com.rpz.example.com"}]  # no _ref
+            return {}
+
+        monkeypatch.setattr(backend, "_request", fake_request)
+        await backend.create_rpz_cname_record("rpz.example.com", "evil.com", "NXDOMAIN")
+
+        assert calls[-1] == ("POST", "record:rpz:cname")
+
+    async def test_delete_rpz_cname_found(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, str]] = []
+
+        async def fake_request(method, endpoint, *, params=None, json=None):
+            calls.append((method, endpoint))
+            if method == "GET":
+                return [{"_ref": "record:rpz:cname/abc"}]
+            return {}
+
+        monkeypatch.setattr(backend, "_request", fake_request)
+        assert await backend.delete_rpz_cname_record("rpz.example.com", "evil.com") is True
+        assert calls[-1] == ("DELETE", "record:rpz:cname/abc")
+
+    async def test_delete_rpz_cname_not_found(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(backend, "_request", AsyncMock(return_value=[]))
+        assert await backend.delete_rpz_cname_record("rpz.example.com", "evil.com") is False
+
+    async def test_delete_rpz_cname_non_list_response(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(backend, "_request", AsyncMock(return_value={"error": "x"}))
+        assert await backend.delete_rpz_cname_record("rpz.example.com", "evil.com") is False
+
+    async def test_delete_rpz_cname_missing_ref(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(backend, "_request", AsyncMock(return_value=[{"name": "x"}]))
+        assert await backend.delete_rpz_cname_record("rpz.example.com", "evil.com") is False
+
+    async def test_list_rpz_cname_records_actions(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            backend,
+            "_request",
+            AsyncMock(
+                return_value=[
+                    "junk",  # non-dict skipped
+                    {
+                        "name": "evil.com.rpz.example.com",
+                        "canonical": "",
+                        "comment": "blocked",
+                        "disable": False,
+                    },
+                    {
+                        "name": "good.com.rpz.example.com",
+                        "canonical": "good.com",
+                    },
+                    {
+                        "name": "odd.com.rpz.example.com",
+                        "canonical": "somewhere.else",
+                        "disable": True,
+                    },
+                ]
+            ),
+        )
+        records = await backend.list_rpz_cname_records("rpz.example.com")
+
+        assert len(records) == 3
+        assert records[0]["owner"] == "evil.com"
+        assert records[0]["action"] == "NXDOMAIN"
+        assert records[1]["action"] == "PASSTHRU"
+        assert records[2]["action"] == "NXDOMAIN"  # fallback
+        assert records[2]["disabled"] is True
+
+    async def test_list_rpz_cname_records_non_list_response(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(backend, "_request", AsyncMock(return_value={"error": "x"}))
+        assert await backend.list_rpz_cname_records("rpz.example.com") == []
+
+    async def test_ensure_rpz_zone_exists(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_request = AsyncMock(return_value=[{"_ref": "zone_rp/abc"}])
+        monkeypatch.setattr(backend, "_request", mock_request)
+
+        assert await backend.ensure_rpz_zone("rpz.example.com") is True
+        mock_request.assert_awaited_once()  # no POST when zone exists
+
+    async def test_ensure_rpz_zone_creates(
+        self, backend: InfobloxNIOSBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, str, dict | None]] = []
+
+        async def fake_request(method, endpoint, *, params=None, json=None):
+            calls.append((method, endpoint, json))
+            return [] if method == "GET" else {}
+
+        monkeypatch.setattr(backend, "_request", fake_request)
+        assert await backend.ensure_rpz_zone("rpz.example.com") is True
+
+        method, endpoint, payload = calls[-1]
+        assert (method, endpoint) == ("POST", "zone_rp")
+        assert payload["fqdn"] == "rpz.example.com"
+        assert payload["rpz_policy"] == "GIVEN"

@@ -47,7 +47,7 @@ Experimental features should be clearly labeled in code comments, documentation,
 dns-aid-core/
 ├── src/dns_aid/
 │   ├── core/           # Discovery, publishing, validation (Tier 0)
-│   ├── backends/       # DNS backends (Route 53, Cloudflare, NS1, Infoblox BloxOne, NIOS, DDNS, Mock)
+│   ├── backends/       # DNS backends (Route 53, Cloudflare, NS1, Infoblox BloxOne, NIOS, Akamai EdgeDNS, DDNS, Mock)
 │   ├── sdk/            # Telemetry SDK, ranking, protocol handlers (Tier 1)
 │   ├── cli/            # CLI commands (publish, discover, verify, list, init, doctor)
 │   ├── mcp/            # MCP server for AI agents
@@ -259,7 +259,32 @@ uv run pytest tests/integration/test_infoblox.py -v
 - Add tests for new functionality
 - Update documentation if behavior changes
 - Update `CHANGELOG.md` for significant changes
-- Ensure all 8 CI checks pass
+- Ensure every CI check on the PR passes
+
+## Code Review
+
+Every change reaches `main` through a pull request approved by someone other
+than the author — branch protection enforces this for everyone, including
+maintainers and admins. There is no self-merge path.
+
+Reviewers check, at minimum:
+
+- **Correctness** — the change does what it claims; edge cases and error paths
+  are handled, and errors propagate rather than being silently swallowed
+- **Tests** — new behavior is tested, bug fixes include a regression test, and
+  coverage does not drop (CI enforces the floor)
+- **Security** — input validation on new untrusted inputs; no credential
+  logging; changes under `core/validator.py`, `core/jwks.py`,
+  `utils/url_safety.py`, `utils/validation.py`, or any backend auth path get
+  extra scrutiny for trust-boundary implications
+- **Spec alignment** — behavior changes stay consistent with the IETF draft
+  (see [Specification Alignment](#specification-alignment))
+- **Docs & changelog** — user-visible changes update docs and `CHANGELOG.md`
+
+Any maintainer may approve; approvals are dismissed when new commits are
+pushed, so the approval always covers what actually merges. Review comments
+are expected to be specific and actionable — point at the line, say why, and
+suggest a direction.
 
 ## Release Process
 

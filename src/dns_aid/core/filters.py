@@ -31,6 +31,7 @@ def apply_filters(
     min_dnssec: bool = False,
     text_match: str | None = None,
     require_signed: bool = False,
+    require_signed_params: bool = False,
     require_signature_algorithm: list[str] | None = None,
 ) -> list[AgentRecord]:
     """
@@ -61,6 +62,12 @@ def apply_filters(
     * ``text_match`` — case-insensitive substring match across ``description``, ``use_cases``,
       and ``capabilities``. Empty string is a programming error and raises ``ValueError``.
     * ``require_signed`` — when ``True``, only records whose JWS signature verified pass.
+    * ``require_signed_params`` — when ``True``, additionally require that the verified
+      signature covers the DNS-AID SvcParams (cap, cap-sha256, policy, realm, well-known)
+      and not merely the endpoint tuple. Opt-in, because every record published before the
+      ``svcb`` claim existed carries endpoint-only coverage and would otherwise stop
+      matching. Turn it on once your publishers have re-signed. Planned to become the
+      default in 0.30.0.
     * ``require_signature_algorithm`` — restrict ``require_signed`` matches to records whose
       verified signature algorithm appears in this list.
 
@@ -79,6 +86,10 @@ def apply_filters(
         raise ValueError("text_match cannot be empty; use None to skip the filter")
     if require_signature_algorithm and not require_signed:
         raise ValueError("require_signature_algorithm requires require_signed=True to take effect")
+    # No guard pairing this with require_signed. It is a SUB-CONDITION of it --
+    # _matches_signed returns early when require is False -- so defaulting it on
+    # is inert until a caller asks for a signature, and raising here would make
+    # every unfiltered call fail.
 
     no_constraints = (
         capabilities is None
@@ -106,7 +117,9 @@ def apply_filters(
         and _matches_realm(record, realm)
         and _matches_min_dnssec(record, min_dnssec)
         and _matches_text(record, text_match)
-        and _matches_signed(record, require_signed, require_signature_algorithm)
+        and _matches_signed(
+            record, require_signed, require_signature_algorithm, require_signed_params
+        )
     ]
 
 
@@ -195,6 +208,7 @@ def _matches_signed(
     record: AgentRecord,
     require: bool,
     allowed_algorithms: list[str] | None,
+    require_params: bool = False,
 ) -> bool:
     """
     Trust gate: pass only records whose JWS signature actually verified.
@@ -208,7 +222,28 @@ def _matches_signed(
     if not require:
         return True
     if record.signature_verified is not True:
+        # No escape hatch. require_signed means a JWS that this client verified.
+        #
+        # A DNSSEC skip used to satisfy it, so that a caller asking for both of
+        # the strongest guarantees at once was not left with nothing. That put a
+        # skip in the place of the proof the caller asked for, and it failed both
+        # ways: DNSSEC here is the AD flag with no chain validation, so forging it
+        # let a garbage signature through, while a skip carries no algorithm, so
+        # require_signature_algorithm dropped everything.
+        #
+        # The fix belongs upstream, and is there now: when require_signed or
+        # require_signature_algorithm is set, discovery does not skip JWS, so a
+        # signed record on a DNSSEC zone verifies for real and passes here on its
+        # own merits. Filter on the DNS chain with min_dnssec.
         return False
+    # The signature verified. Whether it covered anything beyond the endpoint
+    # tuple is a separate question: a record signed before the svcb claim
+    # existed binds only fqdn/target/port/alpn, so its capability pointer can be
+    # swapped while the signature still checks out. Opt-in, because requiring it
+    # by default would stop matching every record currently published.
+    if require_params and record.signature_covers_params is not True:
+        return False
+
     if record.signature_algorithm is None:
         return False
     if allowed_algorithms:

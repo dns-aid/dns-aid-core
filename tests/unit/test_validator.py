@@ -3,6 +3,7 @@
 
 """Tests for DNS-AID validator module."""
 
+import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import dns.flags
@@ -48,13 +49,17 @@ def mock_svcb_rdata_with_port():
     return rdata
 
 
+_DANE_PEER_CERT = b"peer-certificate-der-bytes"
+
+
 @pytest.fixture
 def mock_tlsa_rdata():
     """Create a mock TLSA rdata object."""
     rdata = MagicMock()
     rdata.usage = 3  # DANE-EE
-    rdata.selector = 1  # SPKI
+    rdata.selector = 0  # full certificate DER, so no x509 parsing is needed
     rdata.mtype = 1  # SHA-256
+    rdata.cert = hashlib.sha256(_DANE_PEER_CERT).digest()
     return rdata
 
 
@@ -319,6 +324,22 @@ class TestCheckDane:
 
 
 # =============================================================================
+@pytest.fixture(autouse=True)
+def _allow_probe_targets():
+    """The endpoint probe is SSRF-guarded, and the guard resolves for real.
+
+    These tests use reserved example.com names that do not resolve, so the guard
+    would reject before any mocked HTTP behaviour is reached. It has its own
+    coverage; what is under test here is what happens once the probe is allowed.
+    """
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    with patch(
+        "dns_aid.utils.url_safety.validate_fetch_url_async", new=_AsyncMock(return_value="")
+    ):
+        yield
+
+
 # Tests for _check_endpoint()
 # =============================================================================
 
@@ -588,9 +609,9 @@ class TestCheckDaneVerifyCert:
         with (
             patch("dns_aid.core.validator.dns.asyncresolver.Resolver") as mock_resolver,
             patch(
-                "dns_aid.core.validator._match_dane_cert",
+                "dns_aid.core.validator._fetch_peer_cert",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=_DANE_PEER_CERT,
             ),
         ):
             resolver_instance = MagicMock()
@@ -609,9 +630,9 @@ class TestCheckDaneVerifyCert:
         with (
             patch("dns_aid.core.validator.dns.asyncresolver.Resolver") as mock_resolver,
             patch(
-                "dns_aid.core.validator._match_dane_cert",
+                "dns_aid.core.validator._fetch_peer_cert",
                 new_callable=AsyncMock,
-                return_value=False,
+                return_value=b"a-different-certificate",
             ),
         ):
             resolver_instance = MagicMock()

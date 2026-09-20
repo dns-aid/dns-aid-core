@@ -194,6 +194,7 @@ async def test_min_dnssec_propagates_from_dnssec_validated(
         domain,
         min_dnssec=False,
         verify_dane=False,
+        **kwargs,
     ):
         # Simulate the per-agent stamping that the real function does
         # when the DNSSEC check runs and every per-agent check succeeds.
@@ -318,8 +319,10 @@ async def test_require_signed_implies_verify_signatures(
         domain: str,
         min_dnssec: bool = False,
         verify_dane: bool = False,
+        **kwargs,
     ) -> bool:
         captured["verify_signatures"] = verify_signatures
+        captured["require_signature"] = kwargs.get("require_signature")
         return False
 
     with (

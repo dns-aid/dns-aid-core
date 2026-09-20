@@ -45,16 +45,62 @@ _CALLER_DOMAIN_ENV_VAR = "DNS_AID_CALLER_DOMAIN"
 # surfaces a clear remediation message instead of crashing at first use.
 try:
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
-    from mcp.shared.exceptions import McpError
+
+    # mcp 2.0.0 renamed McpError -> MCPError. mcp.types is unaffected by the 2.x
+    # package split, so the names below resolve identically on both majors.
+    try:  # mcp >= 1.28.1, < 2
+        from mcp.shared.exceptions import McpError
+    except ImportError:  # mcp >= 2
+        # mypy resolves against whichever major is installed, so the other
+        # branch is always unknown to it.
+        from mcp.shared.exceptions import (  # type: ignore[attr-defined,no-redef]
+            MCPError as McpError,
+        )
+
     from mcp.types import (
         CallToolResult,
         ListToolsResult,
         TextContent,
     )
 
-    _MCP_SDK_AVAILABLE = True
-    _MCP_IMPORT_ERROR: str | None = None
+    # The client path does not carry over to mcp 2.x. Three separate changes:
+    #
+    #   1. streamablehttp_client -> streamable_http_client, and its
+    #      headers/timeout/auth/httpx_client_factory arguments collapsed into a
+    #      single `http_client`.
+    #   2. It yields TransportStreams rather than the
+    #      (read, write, get_session_id) tuple unpacked below.
+    #   3. mcp.types renamed its camelCase fields to snake_case. The classes
+    #      still import, which makes this easy to miss, but every field this
+    #      module reads is gone: CallToolResult.isError and .structuredContent,
+    #      ListToolsResult.nextCursor, Tool.inputSchema (used at lines ~182-209
+    #      and ~340). Those are plain AttributeError at runtime.
+    #
+    # Note the `http_client` parameter is annotated httpx2.AsyncClient, but that
+    # is advisory: httpx2 and httpx expose identical AsyncClient constructor
+    # parameters and an httpx client is accepted, so the HTTP library is NOT the
+    # obstacle and no port of this module's transport layer is required. The
+    # blocker is (3), the field renames, which need a compatibility shim in
+    # _extract_* and the call-result handling.
+    #
+    # pyproject caps mcp below 2.0.0 until that shim exists. This detection is
+    # here so a forced 2.x install reports the real reason rather than failing
+    # with an opaque AttributeError partway through an invocation.
+    try:  # mcp >= 1.28.1, < 2
+        from mcp.client.streamable_http import streamablehttp_client
+
+        _MCP_SDK_AVAILABLE = True
+        _MCP_IMPORT_ERROR: str | None = None
+    except ImportError:  # mcp >= 2
+        streamablehttp_client = None  # type: ignore[assignment]
+        _MCP_SDK_AVAILABLE = False
+        _MCP_IMPORT_ERROR = (
+            "mcp 2.x is installed, but this client requires the 1.x API: "
+            "mcp.types renamed its result fields to snake_case (isError, "
+            "structuredContent, nextCursor, inputSchema) and the "
+            "streamable-HTTP transport changed shape. dns-aid supports "
+            "mcp >=1.28.1,<2.0.0 on the client path"
+        )
 except ImportError as exc:
     _MCP_SDK_AVAILABLE = False
     _MCP_IMPORT_ERROR = str(exc)
@@ -212,8 +258,11 @@ class MCPProtocolHandler(ProtocolHandler):
                 status=InvocationStatus.ERROR,
                 error_type="ImportError",
                 error_message=(
-                    "Missing 'mcp' extra: install dns-aid[mcp] to use modern "
-                    f"MCP transport. Original error: {_MCP_IMPORT_ERROR}"
+                    "The MCP streamable-HTTP transport is unavailable. If the "
+                    "'mcp' package is not installed, run "
+                    "`pip install 'dns-aid[mcp]'`; if it is installed, its "
+                    "version is out of range (supported: mcp >=1.28.1,<2.0.0). "
+                    f"Reason: {_MCP_IMPORT_ERROR}"
                 ),
             )
 
