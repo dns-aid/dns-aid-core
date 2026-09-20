@@ -200,6 +200,11 @@ async def fetch_cap_document(
             logger.debug("Cap document is not a JSON object", cap_uri=cap_uri)
             return None
 
+        # Returned raw. The grammar is enforced by AgentRecord's capabilities
+        # validator; filtering here would empty the list for a prose-bearing
+        # document and make the discoverer's tier cascade fall through to the
+        # A2A card parsed from this same document, reinstating the value it
+        # had just removed.
         capabilities = _extract_capabilities_multi_format(data)
         use_cases = _extract_string_list(data, "use_cases")
 

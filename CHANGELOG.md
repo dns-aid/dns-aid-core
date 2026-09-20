@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Discovered capabilities are now validated on ingest, not only on publish.**
+  The capability grammar validator existed and was applied at the publish
+  boundary; nothing applied it on the read path, so dns-aid-core validated what
+  it wrote and trusted what it read. Capabilities are structurally an
+  identifier list, but every source is authored by whichever domain was
+  queried — the TXT `capabilities=` fallback was comma-split with no further
+  checks, and the capability document, legacy HTTP index and ARD catalog were
+  parsed straight out of remote JSON. Those values are surfaced to callers,
+  which for the MCP tools means an LLM's context, so a single TXT record was
+  enough to place an arbitrary sentence there on the DNS-only path — no
+  capability document, HTTP index or agent endpoint required.
+  `sanitize_discovered_capabilities` now applies the same charset at all four
+  ingest points. It drops malformed entries rather than raising, because on
+  discovery the values are attacker-influenceable and raising would let any
+  publisher break discovery of its own zone; and it preserves case, because
+  discovery reports what a remote party published and identifiers such as the
+  ARD catalog's `WeatherTool` are case-carrying. Length remains the host
+  format's, so conforming ARD catalogs are unaffected. This bounds the field
+  rather than sanitising prose — separator characters are legal, so a short
+  `snake_case_instruction` still satisfies the grammar, and no reliable prose
+  filter is claimed. Reported by Nelson Kauley.
+
+### Changed
+
+- **`docs/rfc/security-considerations.md` §2.2 no longer mandates a fixed
+  capability vocabulary.** It specified a five-value allow-list
+  (`chat`/`code`/`search`/`image`/`voice`) that was never implemented and that
+  would break capability search if it had been. It now specifies the
+  identifier grammar, validation on ingest, drop-don't-raise, and not
+  narrowing a foreign catalog's own bounds.
+- **New §1.3, "Trust Boundary: Record Authenticity vs Referent Safety".** The
+  STRIDE analysis covered the DNS and cryptographic planes but never stated
+  where their guarantees stop. DNSSEC and JWS authenticate the pointer, not
+  the safety of what it references, and no signature can close that gap.
+- **`list_agent_tools` and `call_agent_tool` document that remote content is
+  untrusted**, including the two failure modes that do not look like attacks —
+  a description addressing the assistant directly, and a description steering
+  tool selection toward a different, broader-scope tool.
+- **The `search_agents` composition pattern is no longer labelled
+  "zero-trust".** It re-verifies endpoint authority, not content, and the old
+  heading invited the stronger reading.
+- **`text_match` documents that `description` is only populated on the HTTP
+  index path**, so on DNS-only discovery the filter matches on name alone.
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed

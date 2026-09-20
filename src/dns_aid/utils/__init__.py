@@ -5,6 +5,7 @@
 
 from dns_aid.utils.validation import (
     ValidationError,
+    sanitize_discovered_capabilities,
     validate_agent_name,
     validate_backend,
     validate_capabilities,
@@ -19,6 +20,7 @@ from dns_aid.utils.validation import (
 
 __all__ = [
     "ValidationError",
+    "sanitize_discovered_capabilities",
     "validate_agent_name",
     "validate_backend",
     "validate_capabilities",

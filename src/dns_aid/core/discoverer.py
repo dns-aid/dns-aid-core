@@ -935,17 +935,23 @@ async def _query_single_agent(
                         descriptor_url=effective_descriptor_url,
                     )
 
+                # If cap_sha256 was supplied AND the fetcher accepted the
+                # bytes (it did not raise CapDigestMismatchError), the
+                # integrity pin was applied to those bytes. Record that as a
+                # separate boolean so downstream consumers don't have to guess
+                # from the mere presence of cap_sha256.
+                #
+                # Keyed on the fetch succeeding, not on the document happening
+                # to carry capabilities. A descriptor may legitimately declare
+                # none — it still verified, and reporting an applied pin as
+                # unapplied understates the record's integrity and emits a
+                # spurious dangling-cap_sha256 warning.
+                if cap_doc is not None and cap_sha256 is not None:
+                    cap_sha256_applied = True
+
                 if cap_doc and cap_doc.capabilities:
                     capabilities = cap_doc.capabilities
                     capability_source = descriptor_source_label
-                    # If cap_sha256 was supplied AND the fetcher accepted
-                    # the bytes (it did not raise CapDigestMismatchError),
-                    # the integrity pin was actually applied to these
-                    # bytes. Record that as a separate boolean so
-                    # downstream consumers don't have to guess from the
-                    # mere presence of cap_sha256.
-                    if cap_sha256 is not None:
-                        cap_sha256_applied = True
                     logger.debug(
                         "Capabilities fetched from descriptor URL",
                         fqdn=fqdn,
@@ -1116,6 +1122,11 @@ async def _query_capabilities(fqdn: str) -> list[str]:
     except Exception:
         pass  # TXT record is optional
 
+    # Deliberately returned raw. The grammar is enforced by AgentRecord's
+    # capabilities validator, so this tier reports what the TXT record
+    # actually said. Filtering here would empty the list for a prose-bearing
+    # record and make the caller's cascade treat that as "no capabilities
+    # found", pulling in another source's unfiltered values instead.
     return capabilities
 
 
