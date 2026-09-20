@@ -1515,8 +1515,14 @@ async def _apply_ard_card(record: AgentRecord, http_agent: HttpIndexAgent) -> No
         except Exception:  # noqa: BLE001 — not a valid A2A card; keep catalog data
             return
         record.agent_card = card
-        if isinstance(card.url, str) and card.url.startswith("https://"):
-            _set_endpoint(card.url)
+        # endpoint_for falls back to supportedInterfaces when the card
+        # carries no top-level url, which is every A2A 1.0 card. Without
+        # the fallback the entry keeps the endpoint _http_agent_to_record
+        # derived from the catalog -- the identifier-as-locator this
+        # function exists to avoid.
+        card_endpoint = card.endpoint_for()
+        if card_endpoint:
+            _set_endpoint(card_endpoint)
         if card.skills:
             record.capabilities = card.to_capabilities()[:_MAX_ARD_CARD_CAPABILITIES]
             record.capability_source = "agent_card"
@@ -1832,6 +1838,34 @@ def _apply_agent_card(agent: AgentRecord, card: A2AAgentCard) -> None:
                 endpoint=agent.endpoint_override,
                 path=path,
             )
+
+    # A2A 1.0 carries neither the `endpoints` block (a dns-aid convention,
+    # not an A2A field) nor a top-level url: supportedInterfaces is the only
+    # place the path lives. Read it when nothing above resolved a path, and
+    # only while the interface stays on the host DNS resolved -- the SVCB
+    # record is the authority for *where* the agent is, the card only for
+    # *which path* on it. An interface pointing at another host is an
+    # internal runtime URL or a redirection the DNS owner never signed for,
+    # so it is logged and dropped rather than followed.
+    if not agent.endpoint_override:
+        card_endpoint = card.endpoint_for()
+        if card_endpoint:
+            card_host = urlparse(card_endpoint).hostname
+            if card_host == agent.target_host:
+                agent.endpoint_override = card_endpoint
+                agent.endpoint_source = "dns_svcb_enriched"
+                logger.debug(
+                    "Enriched agent endpoint from agent card interfaces",
+                    agent=agent.name,
+                    endpoint=card_endpoint,
+                )
+            else:
+                logger.debug(
+                    "Agent card interface is off-host; keeping the DNS endpoint",
+                    agent=agent.name,
+                    card_host=card_host,
+                    dns_host=agent.target_host,
+                )
 
     # Extract auth metadata from card (A2A format)
     # Only populate if not already set (DNS-AID native AuthSpec takes precedence)

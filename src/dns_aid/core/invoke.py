@@ -510,7 +510,12 @@ async def resolve_a2a_endpoint(
                 # that isn't publicly reachable via the same proxy/CDN.
                 card = await fetch_agent_card(discovered_endpoint, timeout=5.0)
                 if card:
-                    card_host = urlparse(card.url).hostname if card.url else None
+                    # endpoint_for falls back to supportedInterfaces when the
+                    # card has no top-level url (every A2A 1.0 card), and
+                    # prefers the JSONRPC binding because _invoke_raw_a2a
+                    # speaks JSON-RPC over HTTP.
+                    card_url = card.endpoint_for("JSONRPC")
+                    card_host = urlparse(card_url).hostname if card_url else None
                     dns_host = urlparse(discovered_endpoint).hostname
                     use_card_url = card_host == dns_host if card_host else False
                     if not use_card_url and card_host:
@@ -521,7 +526,7 @@ async def resolve_a2a_endpoint(
                         )
 
                     return ResolvedAgent(
-                        endpoint=card.url if use_card_url else discovered_endpoint,
+                        endpoint=card_url if use_card_url else discovered_endpoint,
                         agent_name=card.name,
                         agent_description=card.description,
                         skills=[s.name for s in card.skills],
@@ -547,17 +552,18 @@ async def resolve_a2a_endpoint(
         )
 
     # Path 2: Fetch agent card from the given endpoint for metadata.
-    # Use card.url only if it matches the host we were given.
+    # Use the card's own endpoint only if it matches the host we were given.
     normalized = normalize_endpoint(endpoint)
     try:
         card = await fetch_agent_card(normalized, timeout=5.0)
         if card:
-            card_host = urlparse(card.url).hostname if card.url else None
+            card_url = card.endpoint_for("JSONRPC")
+            card_host = urlparse(card_url).hostname if card_url else None
             given_host = urlparse(normalized).hostname
             use_card_url = card_host == given_host if card_host else False
 
             return ResolvedAgent(
-                endpoint=card.url if use_card_url else normalized,
+                endpoint=card_url if use_card_url else normalized,
                 agent_name=card.name,
                 agent_description=card.description,
                 skills=[s.name for s in card.skills],
