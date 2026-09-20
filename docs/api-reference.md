@@ -584,6 +584,7 @@ agent = AgentRecord(
 | `ttl` | `int` | No | 3600 | DNS TTL (60-86400) |
 | `cap_uri` | `str` | No | `None` | URI to capability document (DNS-AID) |
 | `cap_sha256` | `str` | No | `None` | SHA-256 digest of capability descriptor |
+| `cap_metadata` | `dict[str, Any]` | No | `{}` | Operator-defined fields of the fetched capability document (every key beyond the known schema). Opaque, unverified passthrough — judge integrity via `cap_sha256_verified`, same as `capabilities` |
 | `bap` | `list[str]` | No | `[]` | Supported protocols with versions |
 | `policy_uri` | `str` | No | `None` | URI to agent policy document |
 | `realm` | `str` | No | `None` | Multi-tenant scope identifier |
