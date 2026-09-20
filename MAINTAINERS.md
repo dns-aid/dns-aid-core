@@ -6,9 +6,8 @@ This file lists the current maintainers of the DNS-AID project. The project cont
 
 | Name | GitHub | Affiliation | Role | Since |
 |------|--------|-------------|------|-------|
-| Igor Racic | [@iracic82](https://github.com/iracic82) | Infoblox | Project Lead | 2024-12 |
-| Ingmar Van Glabbeek | [@ivanglabbeek](https://github.com/ivanglabbeek) | Infoblox | DNS Standards & Policy Layer Maintainer | 2026-04 |
-| Nick Williams | [@NWillAU900](https://github.com/NWillAU900) | Infoblox | DNS Standards Lead | 2026-05 |
+| Nick Williams | [@NWillAU900](https://github.com/NWillAU900) | Infoblox | Project Lead | 2026-09 |
+| Ingmar Van Glabbeek | [@ivanglabbeek](https://github.com/ivanglabbeek) | Infoblox | Committer | 2026-04 |
 
 ## Desired Roles
 
@@ -32,7 +31,7 @@ See [GOVERNANCE.md](GOVERNANCE.md) for the process. In brief:
 
 ## Sustainability and Bus Factor
 
-DNS-AID currently has **three maintainers**, all Infoblox-affiliated (bus factor = 3 in headcount, 1 in organizational diversity). The remaining sustainability gap — single-organization maintainership — is acknowledged transparently and is the reason `MAINTAINERS.md` lists the open roles above.
+DNS-AID currently has **two maintainers**, both Infoblox-affiliated (bus factor = 2 in headcount, 1 in organizational diversity). The remaining sustainability gap — single-organization maintainership — is acknowledged transparently and is the reason `MAINTAINERS.md` lists the open roles above.
 
 **Active mitigations**
 
@@ -56,7 +55,7 @@ For full transparency:
 
 - **PyPI publishing** — the `dns-aid` package on [PyPI](https://pypi.org/project/dns-aid/) is published exclusively via [PyPI Trusted Publisher OIDC](https://docs.pypi.org/trusted-publishers/) tied to this repository's `.github/workflows/release.yml`. No long-lived API tokens exist. Only commits that land on a `v*` tag in this repo can publish to PyPI.
 - **Release artifacts** — every wheel and sdist is signed with [Sigstore](https://www.sigstore.dev/) cosign keyless OIDC during the release workflow. SBOM (`sbom.json`) is generated via `cyclonedx-py` and signed alongside the artifacts.
-- **GitHub branch protection** — `main` requires 1 approving review and successful status checks. With three maintainers now in place, PRs are expected to be reviewed by the non-author maintainer; admin-merge remains available as a documented fallback for time-sensitive operational changes.
+- **GitHub branch protection** — `main` requires 1 approving review and successful status checks. With two maintainers in place, PRs are expected to be reviewed by the non-author maintainer; admin-merge remains available as a documented fallback for time-sensitive operational changes.
 
 ## Contact
 
