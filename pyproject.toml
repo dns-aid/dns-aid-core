@@ -46,6 +46,10 @@ dependencies = [
     # cryptography. Previously only in the ``[jws]`` extra, which made a base
     # install ImportError on ``verify_signatures=True``.
     "cryptography>=50.0.0",
+    # Direct floor on a transitive dep: httpx (above) pulls anyio, so this is in
+    # the base install tree rather than behind an extra. httpx's own constraint
+    # is looser than the patched version needs.
+    "anyio>=4.14.2",    # CVE-2026-63374 + CVE-2026-64847 — fixed in 4.14.2
 ]
 
 [project.optional-dependencies]
