@@ -78,6 +78,7 @@ mcp = [
     # (mcp's upstream constraints are looser than the patched versions need).
     "pyjwt>=2.13.0",            # PYSEC-2026-175/177/178/179 (4 vulns); supersedes CVE-2026-32597 (unknown 'crit' header)
     "python-multipart>=0.0.27", # CVE-2026-42561 / GHSA-pp6c-gr5w-3c5g (high) — DoS via unbounded multipart headers; supersedes CVE-2026-40347
+    "anyio>=4.14.2",            # CVE-2026-63374 + CVE-2026-64847 — fixed in 4.14.2
 ]
 route53 = [
     "boto3>=1.34.0",
