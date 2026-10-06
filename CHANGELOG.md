@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dns.name.from_wire_parser()` burn excessive CPU on name decompression;
   every discovery lookup parses untrusted wire-format responses.
 
+### Fixed
+
+- Preserve the declared HTTP index protocol for flat and walkable FQDNs during
+  discovery, including HTTPS entries without a caller protocol filter (#277).
+  Caller filters must match a declared protocol and the DNS-resolved result;
+  DNS `bap`/`alpn` precedence and metadata provenance are unchanged.
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed
