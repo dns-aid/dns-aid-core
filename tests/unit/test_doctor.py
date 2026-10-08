@@ -230,7 +230,15 @@ class TestCheckBackends:
         fake_importlib = types.SimpleNamespace(import_module=_raise_import_error)
         monkeypatch.setattr("dns_aid.doctor.importlib", fake_importlib)
         checks = _by_label(_check_backends())
-        for name in ("route53", "cloudflare", "infoblox", "nios", "akamai-edgedns", "ddns"):
+        for name in (
+            "route53",
+            "cloudflare",
+            "infoblox",
+            "nios",
+            "akamai-edgedns",
+            "ddns",
+            "dnsimple",
+        ):
             info = BACKEND_REGISTRY[name]
             assert checks[info.display_name].status == "fail"
             assert f'pip install "dns-aid[{info.optional_dep}]"' in checks[info.display_name].detail
@@ -290,6 +298,18 @@ class TestCheckBackends:
         checks = _by_label(_check_backends())
         assert checks["NS1 (IBM)"].status == "warn"
         assert "NS1_API_KEY" in checks["NS1 (IBM)"].detail
+
+    def test_dnsimple_credentials_configured(self, monkeypatch):
+        monkeypatch.setenv("DNSIMPLE_TOKEN", "dnsimple-token")
+        checks = _by_label(_check_backends())
+        assert checks["DNSimple"].status == "pass"
+        assert checks["DNSimple"].detail == "credentials configured"
+
+    def test_dnsimple_missing_credentials_warns(self, monkeypatch):
+        monkeypatch.delenv("DNSIMPLE_TOKEN", raising=False)
+        checks = _by_label(_check_backends())
+        assert checks["DNSimple"].status == "warn"
+        assert "DNSIMPLE_TOKEN" in checks["DNSimple"].detail
 
 
 # ── _check_optional ────────────────────────────────────────────────
