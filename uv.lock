@@ -718,7 +718,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "cryptography", marker = "extra == 'dev'", specifier = ">=50.0.0" },
     { name = "cyclonedx-bom", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "dns-aid", extras = ["cli", "mcp", "route53", "cloudflare", "ns1", "cloud-dns", "infoblox", "nios", "akamai-edgedns", "ddns", "jws", "sdk", "otel", "cel", "pqc"], marker = "extra == 'all'" },
+    { name = "dns-aid", extras = ["cli", "mcp", "route53", "cloudflare", "ns1", "cloud-dns", "infoblox", "nios", "akamai-edgedns", "ddns", "dnsimple", "jws", "sdk", "otel", "cel", "pqc"], marker = "extra == 'all'" },
     { name = "dnspython", specifier = ">=2.6.0" },
     { name = "edgegrid-python", marker = "extra == 'akamai-edgedns'", specifier = ">=2.0.7" },
     { name = "google-auth", marker = "extra == 'cloud-dns'", specifier = ">=2.30.0" },
@@ -754,7 +754,7 @@ requires-dist = [
     { name = "urllib3", marker = "extra == 'route53'", specifier = ">=2.7.0" },
     { name = "uvicorn", marker = "extra == 'mcp'", specifier = ">=0.30.0" },
 ]
-provides-extras = ["cli", "mcp", "route53", "cloud-dns", "infoblox", "cloudflare", "ns1", "nios", "akamai-edgedns", "ddns", "jws", "sdk", "otel", "cel", "pqc", "dev", "all"]
+provides-extras = ["cli", "mcp", "route53", "cloud-dns", "infoblox", "cloudflare", "ns1", "nios", "akamai-edgedns", "ddns", "dnsimple", "jws", "sdk", "otel", "cel", "pqc", "dev", "all"]
 
 [[package]]
 name = "dnspython"

@@ -35,6 +35,7 @@ class TestValidBackendNames:
             "nios",
             "akamai-edgedns",
             "ddns",
+            "dnsimple",
             "mock",
         }
         assert expected == VALID_BACKEND_NAMES
@@ -111,6 +112,7 @@ _OPTIONAL_BACKEND_MODULES = [
     ("dns_aid.backends.cloud_dns", "CloudDNSBackend"),
     ("dns_aid.backends.ns1", "NS1Backend"),
     ("dns_aid.backends.akamai_edgedns", "AkamaiEdgeDNSBackend"),
+    ("dns_aid.backends.dnsimple", "DNSimpleBackend"),
 ]
 
 

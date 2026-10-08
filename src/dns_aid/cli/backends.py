@@ -197,6 +197,27 @@ BACKEND_REGISTRY: dict[str, BackendInfo] = {
             "For authenticated updates, set DDNS_KEY_NAME and DDNS_KEY_SECRET",
         ],
     ),
+    "dnsimple": BackendInfo(
+        name="dnsimple",
+        display_name="DNSimple",
+        required_env={
+            "DNSIMPLE_TOKEN": "DNSimple API access token (account token)",  # nosec B105
+        },
+        optional_env={
+            "DNSIMPLE_ACCOUNT_ID": "Account ID (auto-detected from an account token if omitted)",
+            "DNSIMPLE_BASE_URL": (
+                "API base URL (default: https://api.dnsimple.com; "
+                "sandbox: https://api.sandbox.dnsimple.com)"
+            ),
+        },
+        optional_dep="dnsimple",
+        setup_url="https://support.dnsimple.com/articles/api-access-token/",
+        setup_steps=[
+            "Create an account access token at dnsimple.com → Account → Automation → API access tokens",
+            "Use an account token, or set DNSIMPLE_ACCOUNT_ID for a user token",
+            "Set DNSIMPLE_TOKEN",
+        ],
+    ),
     "mock": BackendInfo(
         name="mock",
         display_name="Mock (in-memory, for testing)",
