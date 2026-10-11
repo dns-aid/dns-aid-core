@@ -297,22 +297,101 @@ class DNSimpleBackend(DNSBackend):
         """
         Replace all records with the given name and type.
 
-        The DNSimple API has no upsert operation. Thus, delete all records
-        with the same name and type first, then create one record for each
-        content value.
+        The DNSimple API has no atomic replace operation. Thus, do the
+        changes in an order that keeps the existing records if the API
+        refuses a change:
+
+        1. Keep each existing record that has a new value. Update its TTL
+           if necessary.
+        2. Update the other existing records in place with the remaining
+           new values.
+        3. Create one record for each new value that is still remaining.
+        4. Delete the existing records that are not necessary.
+
+        If a step 1-3 request fails, undo the changes of steps 1-3 and
+        raise the error. The API refuses a record that is equal to an
+        existing record. Step 1 prevents this error.
         """
         existing = await self._find_records(domain, name, record_type)
-        await self._delete_records(domain, existing)
+
+        remaining = list(contents)
+        unmatched: list[dict] = []
+        updates: list[tuple[dict, dict]] = []
+        for record in existing:
+            value = self._record_value(record)
+            if value in remaining:
+                remaining.remove(value)
+                if record.get("ttl") != ttl:
+                    updates.append((record, {"ttl": ttl}))
+            else:
+                unmatched.append(record)
+
+        for record, content in zip(unmatched, remaining, strict=False):
+            updates.append((record, {"content": content, "ttl": ttl}))
+        creates = remaining[len(unmatched) :]
+        deletes = unmatched[len(remaining) :]
 
         path = await self._records_path(domain)
         client = await self._get_client()
 
-        for content in contents:
-            response = await client.post(
-                path,
-                json={"name": name, "type": record_type, "content": content, "ttl": ttl},
-            )
-            response.raise_for_status()
+        updated: list[dict] = []
+        created: list[dict] = []
+        try:
+            for record, payload in updates:
+                response = await client.patch(f"{path}/{record['id']}", json=payload)
+                response.raise_for_status()
+                updated.append(record)
+            for content in creates:
+                response = await client.post(
+                    path,
+                    json={"name": name, "type": record_type, "content": content, "ttl": ttl},
+                )
+                response.raise_for_status()
+                created.append(response.json()["data"])
+        except Exception:
+            await self._undo_replace(domain, updated, created)
+            raise
+
+        await self._delete_records(domain, deletes)
+
+    async def _undo_replace(self, domain: str, updated: list[dict], created: list[dict]) -> None:
+        """
+        Undo the changes of a failed replacement.
+
+        Delete the created records and set the updated records back to
+        their old content and TTL. Log a failure, but do not raise it, so
+        that the caller can raise the first error.
+        """
+        path = await self._records_path(domain)
+        client = await self._get_client()
+
+        for record in created:
+            try:
+                response = await client.delete(f"{path}/{record['id']}")
+                if response.status_code != 404:
+                    response.raise_for_status()
+            except Exception as exc:
+                logger.error(
+                    "Failed to delete record after failed replacement",
+                    domain=domain,
+                    record_id=record.get("id"),
+                    error=str(exc),
+                )
+
+        for record in updated:
+            try:
+                response = await client.patch(
+                    f"{path}/{record['id']}",
+                    json={"content": self._record_value(record), "ttl": record.get("ttl")},
+                )
+                response.raise_for_status()
+            except Exception as exc:
+                logger.error(
+                    "Failed to restore record after failed replacement",
+                    domain=domain,
+                    record_id=record.get("id"),
+                    error=str(exc),
+                )
 
     @staticmethod
     def _record_value(record: dict) -> str:
