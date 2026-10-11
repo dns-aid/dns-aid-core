@@ -359,7 +359,10 @@ class DNSimpleBackend(DNSBackend):
         Undo the changes of a failed replacement.
 
         Delete the created records and set the updated records back to
-        their old content and TTL. Log a failure, but do not raise it, so
+        their old content and TTL. Send the old content as the API gave it.
+        Do not send the decoded TXT value: the API reads a value that starts
+        with a quote as serialized TXT content, thus a decoded value that has
+        literal quotes would change. Log a failure, but do not raise it, so
         that the caller can raise the first error.
         """
         path = await self._records_path(domain)
@@ -382,7 +385,7 @@ class DNSimpleBackend(DNSBackend):
             try:
                 response = await client.patch(
                     f"{path}/{record['id']}",
-                    json={"content": self._record_value(record), "ttl": record.get("ttl")},
+                    json={"content": record.get("content"), "ttl": record.get("ttl")},
                 )
                 response.raise_for_status()
             except Exception as exc:

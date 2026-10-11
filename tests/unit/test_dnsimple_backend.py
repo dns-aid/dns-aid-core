@@ -959,8 +959,30 @@ class TestDNSimpleBackendCreateTXT:
         # Undo: delete the created record 901, then restore 31 and 32.
         assert _deletes(events) == [("DELETE", f"{RECORDS_PATH}/901")]
         assert _patches(events)[2:] == [
-            ("PATCH", f"{RECORDS_PATH}/31", {"content": "capabilities=search", "ttl": 3600}),
-            ("PATCH", f"{RECORDS_PATH}/32", {"content": "version=1.0.0", "ttl": 3600}),
+            ("PATCH", f"{RECORDS_PATH}/31", {"content": '"capabilities=search"', "ttl": 3600}),
+            ("PATCH", f"{RECORDS_PATH}/32", {"content": '"version=1.0.0"', "ttl": 3600}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_create_txt_undo_keeps_literal_quotes(self):
+        """Test that the undo sends the old API content, so literal quotes stay."""
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[_records_page([_record(31, rtype="TXT", content='"\\"quoted\\""')])],
+            post_responses=[_status_response(400)],
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await backend.create_txt_record(
+                zone="example.com", name="chat", values=["a=1", "bad"], ttl=3600
+            )
+
+        assert _patches(events) == [
+            ("PATCH", f"{RECORDS_PATH}/31", {"content": "a=1", "ttl": 3600}),
+            ("PATCH", f"{RECORDS_PATH}/31", {"content": '"\\"quoted\\""', "ttl": 3600}),
         ]
 
     @pytest.mark.asyncio
