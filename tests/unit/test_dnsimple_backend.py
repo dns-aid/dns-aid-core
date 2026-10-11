@@ -512,11 +512,16 @@ def _make_client(
     pages: list[MagicMock] | None = None,
     delete_responses: list[MagicMock] | None = None,
     post_response: MagicMock | None = None,
+    post_responses: list[MagicMock] | None = None,
+    patch_responses: list[MagicMock] | None = None,
 ) -> tuple[AsyncMock, list[tuple]]:
     """Make a mock client. Return the client and an ordered list of HTTP events."""
     events: list[tuple] = []
     pages = list(pages) if pages is not None else [_records_page([])]
     delete_responses = list(delete_responses) if delete_responses is not None else []
+    post_responses = list(post_responses) if post_responses is not None else []
+    patch_responses = list(patch_responses) if patch_responses is not None else []
+    next_id = iter(range(900, 1000))
 
     async def _get(path, *args, **kwargs):
         events.append(("GET", path, kwargs.get("params")))
@@ -530,19 +535,32 @@ def _make_client(
 
     async def _post(path, *args, **kwargs):
         events.append(("POST", path, kwargs.get("json")))
+        if post_responses:
+            return post_responses.pop(0)
         if post_response is not None:
             return post_response
-        return _status_response(201, {"id": 999, **(kwargs.get("json") or {})})
+        return _status_response(201, {"id": next(next_id), **(kwargs.get("json") or {})})
+
+    async def _patch(path, *args, **kwargs):
+        events.append(("PATCH", path, kwargs.get("json")))
+        if patch_responses:
+            return patch_responses.pop(0)
+        return _status_response(200, {"id": int(path.rsplit("/", 1)[1])})
 
     mock_client = AsyncMock()
     mock_client.get = AsyncMock(side_effect=_get)
     mock_client.delete = AsyncMock(side_effect=_delete)
     mock_client.post = AsyncMock(side_effect=_post)
+    mock_client.patch = AsyncMock(side_effect=_patch)
     return mock_client, events
 
 
 def _posts(events: list[tuple]) -> list[tuple]:
     return [e for e in events if e[0] == "POST"]
+
+
+def _patches(events: list[tuple]) -> list[tuple]:
+    return [e for e in events if e[0] == "PATCH"]
 
 
 def _deletes(events: list[tuple]) -> list[tuple]:
@@ -553,20 +571,21 @@ def _gets(events: list[tuple]) -> list[tuple]:
     return [e for e in events if e[0] == "GET"]
 
 
-def _assert_posts_after_deletes(events: list[tuple]) -> None:
-    """Assert that the first POST comes after the last DELETE."""
+def _assert_deletes_last(events: list[tuple]) -> None:
+    """Assert that all DELETE requests come after all PATCH and POST requests."""
     methods = [e[0] for e in events]
-    first_post = methods.index("POST")
-    last_delete = max(i for i, m in enumerate(methods) if m == "DELETE")
-    assert first_post > last_delete
+    writes = [i for i, m in enumerate(methods) if m in ("PATCH", "POST")]
+    deletes = [i for i, m in enumerate(methods) if m == "DELETE"]
+    if writes and deletes:
+        assert min(deletes) > max(writes)
 
 
 class TestDNSimpleBackendCreateSVCB:
     """Tests for create_svcb_record."""
 
     @pytest.mark.asyncio
-    async def test_create_svcb_replaces_existing_and_posts(self):
-        """Test that existing SVCB records are deleted before the new record is created."""
+    async def test_create_svcb_replaces_existing_in_place(self):
+        """Test that the first existing SVCB record is updated and the others are deleted."""
         backend = _make_backend()
         mock_client, events = _make_client(
             pages=[_records_page([_record(11), _record(12)])],
@@ -590,24 +609,20 @@ class TestDNSimpleBackendCreateSVCB:
         assert gets[0][2]["name"] == "chat"
         assert gets[0][2]["type"] == "SVCB"
 
-        assert _deletes(events) == [
-            ("DELETE", f"{RECORDS_PATH}/11"),
-            ("DELETE", f"{RECORDS_PATH}/12"),
-        ]
-        assert _posts(events) == [
+        assert _patches(events) == [
             (
-                "POST",
-                RECORDS_PATH,
+                "PATCH",
+                f"{RECORDS_PATH}/11",
                 {
-                    "name": "chat",
-                    "type": "SVCB",
                     "content": '1 chat.example.com alpn="mcp" port="443" '
                     'key65400="https://x/cap.json"',
                     "ttl": 300,
                 },
             )
         ]
-        _assert_posts_after_deletes(events)
+        assert _posts(events) == []
+        assert _deletes(events) == [("DELETE", f"{RECORDS_PATH}/12")]
+        _assert_deletes_last(events)
 
     @pytest.mark.asyncio
     async def test_create_svcb_alias_mode_empty_params(self):
@@ -701,8 +716,8 @@ class TestDNSimpleBackendCreateSVCB:
 
         assert fqdn == "chat.example.com"
         assert _gets(events)[0][1] == RECORDS_PATH
-        assert _deletes(events) == [("DELETE", f"{RECORDS_PATH}/5")]
-        assert _posts(events)[0][1] == RECORDS_PATH
+        assert _patches(events)[0][1] == f"{RECORDS_PATH}/5"
+        assert _deletes(events) == []
 
     @pytest.mark.asyncio
     async def test_create_svcb_no_existing_records_no_delete(self):
@@ -725,7 +740,7 @@ class TestDNSimpleBackendCreateSVCB:
 
     @pytest.mark.asyncio
     async def test_create_svcb_follows_pagination(self):
-        """Test that records on all pages are deleted."""
+        """Test that records on all pages are replaced."""
         backend = _make_backend()
         mock_client, events = _make_client(
             pages=[
@@ -748,12 +763,12 @@ class TestDNSimpleBackendCreateSVCB:
         assert len(gets) == 2
         assert all(g[1] == RECORDS_PATH for g in gets)
         assert gets[1][2]["page"] == 2
+        assert [p[1] for p in _patches(events)] == [f"{RECORDS_PATH}/21"]
         assert sorted(d[1] for d in _deletes(events)) == [
-            f"{RECORDS_PATH}/21",
             f"{RECORDS_PATH}/22",
             f"{RECORDS_PATH}/23",
         ]
-        assert len(_posts(events)) == 1
+        assert _posts(events) == []
 
     @pytest.mark.asyncio
     async def test_create_svcb_post_error_propagates(self):
@@ -773,6 +788,32 @@ class TestDNSimpleBackendCreateSVCB:
                 params={"alpn": "mcp"},
                 ttl=300,
             )
+
+    @pytest.mark.asyncio
+    async def test_create_svcb_patch_error_keeps_existing_record(self):
+        """Test that a refused update does not delete the existing SVCB record."""
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[_records_page([_record(11, content='1 old.example.com alpn="mcp"')])],
+            patch_responses=[_status_response(429)],
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await backend.create_svcb_record(
+                zone="example.com",
+                name="chat",
+                priority=1,
+                target="new.example.com.",
+                params={"alpn": "mcp"},
+                ttl=300,
+            )
+
+        assert len(_patches(events)) == 1
+        assert _deletes(events) == []
+        assert _posts(events) == []
 
 
 class TestDNSimpleBackendCreateTXT:
@@ -801,23 +842,148 @@ class TestDNSimpleBackendCreateTXT:
         assert gets[0][2]["name"] == "chat"
         assert gets[0][2]["type"] == "TXT"
 
-        assert _deletes(events) == [
-            ("DELETE", f"{RECORDS_PATH}/31"),
-            ("DELETE", f"{RECORDS_PATH}/32"),
+        assert _patches(events) == [
+            ("PATCH", f"{RECORDS_PATH}/31", {"content": "version=1.0.0", "ttl": 300}),
+            ("PATCH", f"{RECORDS_PATH}/32", {"content": 'description=Say "hi"', "ttl": 300}),
+        ]
+        assert _posts(events) == []
+        assert _deletes(events) == []
+
+    @pytest.mark.asyncio
+    async def test_create_txt_keeps_equal_values_and_creates_new_values(self):
+        """Test that an equal value is kept and a new value is created after the updates."""
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[
+                _records_page(
+                    [
+                        _record(31, rtype="TXT", content='"version=1.0.0"'),
+                        _record(32, rtype="TXT", content='"capabilities=search"'),
+                        _record(33, rtype="TXT", content='"old=1"'),
+                    ]
+                )
+            ],
+        )
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            await backend.create_txt_record(
+                zone="example.com",
+                name="chat",
+                values=["capabilities=chat", "version=1.0.0", "realm=test", "a=b"],
+                ttl=3600,
+            )
+
+        # 31 has an equal value and TTL: no request.
+        assert _patches(events) == [
+            ("PATCH", f"{RECORDS_PATH}/32", {"content": "capabilities=chat", "ttl": 3600}),
+            ("PATCH", f"{RECORDS_PATH}/33", {"content": "realm=test", "ttl": 3600}),
         ]
         assert _posts(events) == [
-            (
-                "POST",
-                RECORDS_PATH,
-                {"name": "chat", "type": "TXT", "content": "version=1.0.0", "ttl": 300},
-            ),
-            (
-                "POST",
-                RECORDS_PATH,
-                {"name": "chat", "type": "TXT", "content": 'description=Say "hi"', "ttl": 300},
-            ),
+            ("POST", RECORDS_PATH, {"name": "chat", "type": "TXT", "content": "a=b", "ttl": 3600}),
         ]
-        _assert_posts_after_deletes(events)
+        assert _deletes(events) == []
+
+    @pytest.mark.asyncio
+    async def test_create_txt_equal_value_with_other_ttl_updates_ttl_only(self):
+        """Test that an equal value with a different TTL gets a TTL-only update."""
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[_records_page([_record(31, rtype="TXT", content='"version=1.0.0"')])],
+        )
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            await backend.create_txt_record(
+                zone="example.com", name="chat", values=["version=1.0.0"], ttl=300
+            )
+
+        assert _patches(events) == [("PATCH", f"{RECORDS_PATH}/31", {"ttl": 300})]
+        assert _posts(events) == []
+        assert _deletes(events) == []
+
+    @pytest.mark.asyncio
+    async def test_create_txt_fewer_values_deletes_extra_records_last(self):
+        """Test that existing records with no new value are deleted after the updates."""
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[
+                _records_page(
+                    [
+                        _record(31, rtype="TXT", content='"a=1"'),
+                        _record(32, rtype="TXT", content='"b=2"'),
+                    ]
+                )
+            ],
+        )
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            await backend.create_txt_record(
+                zone="example.com", name="chat", values=["c=3"], ttl=3600
+            )
+
+        assert _patches(events) == [
+            ("PATCH", f"{RECORDS_PATH}/31", {"content": "c=3", "ttl": 3600}),
+        ]
+        assert _deletes(events) == [("DELETE", f"{RECORDS_PATH}/32")]
+        _assert_deletes_last(events)
+
+    @pytest.mark.asyncio
+    async def test_create_txt_post_error_undoes_changes(self):
+        """Test that a failed POST deletes the created records and restores the updated ones."""
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[
+                _records_page(
+                    [
+                        _record(31, rtype="TXT", content='"capabilities=search"'),
+                        _record(32, rtype="TXT", content='"version=1.0.0"'),
+                    ]
+                )
+            ],
+            post_responses=[
+                _status_response(201, {"id": 901}),
+                _status_response(400),
+            ],
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await backend.create_txt_record(
+                zone="example.com",
+                name="chat",
+                values=["capabilities=chat", "version=2.0.0", "a=b", "bad"],
+                ttl=3600,
+            )
+
+        # Undo: delete the created record 901, then restore 31 and 32.
+        assert _deletes(events) == [("DELETE", f"{RECORDS_PATH}/901")]
+        assert _patches(events)[2:] == [
+            ("PATCH", f"{RECORDS_PATH}/31", {"content": "capabilities=search", "ttl": 3600}),
+            ("PATCH", f"{RECORDS_PATH}/32", {"content": "version=1.0.0", "ttl": 3600}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_create_txt_undo_error_does_not_hide_first_error(self):
+        """Test that a failed undo request is logged and the first error is raised."""
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[_records_page([_record(31, rtype="TXT", content='"a=1"')])],
+            post_responses=[_status_response(429)],
+            delete_responses=[],
+            patch_responses=[_status_response(200, {"id": 31}), _status_response(500)],
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            pytest.raises(httpx.HTTPStatusError) as exc_info,
+        ):
+            await backend.create_txt_record(
+                zone="example.com", name="chat", values=["b=2", "c=3"], ttl=3600
+            )
+
+        assert exc_info.value.response.status_code == 429
+        assert len(_patches(events)) == 2
 
 
 class TestDNSimpleBackendDeleteRecord:
