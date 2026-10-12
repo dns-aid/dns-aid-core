@@ -305,7 +305,15 @@ def publish_agent_to_dns(
     category: str | None = None,
     ttl: int = 3600,
     backend: Literal[
-        "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "mock"
+        "route53",
+        "cloudflare",
+        "ns1",
+        "infoblox",
+        "nios",
+        "akamai-edgedns",
+        "ddns",
+        "dnsimple",
+        "mock",
     ] = "route53",
     update_index: bool = True,
     cap_uri: str | None = None,
@@ -346,8 +354,8 @@ def publish_agent_to_dns(
         category: Agent category (e.g., "network", "security", "finance", "chat").
         ttl: DNS record TTL in seconds (default: 3600).
         backend: DNS backend to use - "route53", "cloudflare", "ns1", "infoblox",
-            "nios", "akamai-edgedns", "ddns", or "mock" (testing). Requires the
-            matching API credentials configured in the environment.
+            "nios", "akamai-edgedns", "ddns", "dnsimple", or "mock" (testing).
+            Requires the matching API credentials configured in the environment.
         update_index: Whether to update the domain's agent index record (default: True).
         cap_uri: URI to capability document (DNS-AID draft-compliant, e.g.,
             "https://mcp.example.com/.well-known/agent-cap.json"). When set, the
@@ -521,7 +529,7 @@ def publish_catalog_pointer(
     ipv6_hint: str | None = None,
     ttl: int = 3600,
     backend: Literal[
-        "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", "mock"
+        "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", "dnsimple", "mock"
     ] = "route53",
 ) -> dict:
     """Publish ARD catalog DNS pointer records for a domain.
@@ -585,7 +593,7 @@ def unpublish_catalog_pointer(
     domain: str,
     catalog_only: bool = False,
     backend: Literal[
-        "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", "mock"
+        "route53", "cloudflare", "ns1", "infoblox", "nios", "ddns", "dnsimple", "mock"
     ] = "route53",
 ) -> dict:
     """Remove ARD catalog DNS pointer records for a domain.
@@ -1375,7 +1383,15 @@ def verify_agent_dns(fqdn: str) -> dict:
 def list_published_agents(
     domain: str,
     backend: Literal[
-        "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "mock"
+        "route53",
+        "cloudflare",
+        "ns1",
+        "infoblox",
+        "nios",
+        "akamai-edgedns",
+        "ddns",
+        "dnsimple",
+        "mock",
     ] = "route53",
 ) -> dict:
     """
@@ -1470,7 +1486,15 @@ def delete_agent_from_dns(
     domain: str,
     protocol: Literal["mcp", "a2a"] = "mcp",
     backend: Literal[
-        "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "mock"
+        "route53",
+        "cloudflare",
+        "ns1",
+        "infoblox",
+        "nios",
+        "akamai-edgedns",
+        "ddns",
+        "dnsimple",
+        "mock",
     ] = "route53",
     update_index: bool = True,
 ) -> dict:
@@ -1572,7 +1596,15 @@ def delete_agent_from_dns(
 def list_agent_index(
     domain: str,
     backend: Literal[
-        "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "mock"
+        "route53",
+        "cloudflare",
+        "ns1",
+        "infoblox",
+        "nios",
+        "akamai-edgedns",
+        "ddns",
+        "dnsimple",
+        "mock",
     ] = "route53",
 ) -> dict:
     """
@@ -1643,7 +1675,15 @@ def list_agent_index(
 def sync_agent_index(
     domain: str,
     backend: Literal[
-        "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "mock"
+        "route53",
+        "cloudflare",
+        "ns1",
+        "infoblox",
+        "nios",
+        "akamai-edgedns",
+        "ddns",
+        "dnsimple",
+        "mock",
     ] = "route53",
     ttl: int = 3600,
 ) -> dict:
@@ -1808,7 +1848,15 @@ def compile_policy_to_rpz(
 def publish_rpz_zone(
     policy_json: str,
     backend: Literal[
-        "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "mock"
+        "route53",
+        "cloudflare",
+        "ns1",
+        "infoblox",
+        "nios",
+        "akamai-edgedns",
+        "ddns",
+        "dnsimple",
+        "mock",
     ],
     rpz_zone: str,
     td_action: str = "action_block",
@@ -1975,7 +2023,15 @@ def publish_rpz_zone(
 def list_rpz_rules(
     rpz_zone: str,
     backend: Literal[
-        "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "mock"
+        "route53",
+        "cloudflare",
+        "ns1",
+        "infoblox",
+        "nios",
+        "akamai-edgedns",
+        "ddns",
+        "dnsimple",
+        "mock",
     ] = "infoblox",
 ) -> dict:
     """
