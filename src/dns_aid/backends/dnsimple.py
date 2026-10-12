@@ -431,9 +431,25 @@ class DNSimpleBackend(DNSBackend):
         The DNSimple API refuses a target with a trailing dot ("Target can't
         have empty labels"). Thus, remove the trailing dot. Keep the root
         target "." as it is.
+
+        The DNSimple API refuses a backslash in a param value ("must not
+        contain backslashes"). A double quote in a param value stops the
+        quoted string, also when it is escaped. Thus, the API cannot keep a
+        param value that has one of these characters. Refuse such a value
+        before a request is sent, so that the existing records do not change.
+
+        Raises:
+            ValueError: If a param value has a backslash or a double quote
         """
         if target != "." and target.endswith("."):
             target = target[:-1]
+
+        for key, value in params.items():
+            if "\\" in value or '"' in value:
+                raise ValueError(
+                    f"DNSimple does not accept a backslash or a double quote in an "
+                    f"SVCB param value: {key}={value!r}"
+                )
 
         params_str = " ".join(f'{key}="{value}"' for key, value in params.items())
 

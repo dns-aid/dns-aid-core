@@ -661,6 +661,34 @@ class TestDNSimpleBackendCreateSVCB:
         assert _posts(events)[0][2]["content"] == '1 . alpn="mcp"'
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ['say "hi"', "a\\b"], ids=["double-quote", "backslash"])
+    async def test_create_svcb_refuses_quote_or_backslash_in_value(self, value):
+        """Test that a param value with a double quote or a backslash is refused.
+
+        The DNSimple API cannot keep these characters in an SVCB param value.
+        The backend must refuse the value before it changes a record.
+        """
+        backend = _make_backend()
+        mock_client, events = _make_client(pages=[_records_page([_record(11)])])
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            pytest.raises(ValueError, match="key65400"),
+        ):
+            await backend.create_svcb_record(
+                zone="example.com",
+                name="chat",
+                priority=1,
+                target="chat.example.com.",
+                params={"alpn": "mcp", "key65400": value},
+                ttl=300,
+            )
+
+        assert _patches(events) == []
+        assert _posts(events) == []
+        assert _deletes(events) == []
+
+    @pytest.mark.asyncio
     async def test_create_svcb_target_without_trailing_dot_unchanged(self):
         """Test that a target without a trailing dot is sent unchanged."""
         backend = _make_backend()
