@@ -98,7 +98,9 @@ class _Api:
         r = await self.client.get(self.path, params={"name": name})
         r.raise_for_status()
         for record in r.json()["data"]:
-            await self.client.delete(f"{self.path}/{record['id']}")
+            d = await self.client.delete(f"{self.path}/{record['id']}")
+            if d.status_code != 404:
+                d.raise_for_status()
 
 
 @pytest.fixture

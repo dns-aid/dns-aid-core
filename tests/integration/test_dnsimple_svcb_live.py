@@ -86,7 +86,9 @@ async def name(api):
     r = await client.get(path, params={"name": n})
     r.raise_for_status()
     for record in r.json()["data"]:
-        await client.delete(f"{path}/{record['id']}")
+        d = await client.delete(f"{path}/{record['id']}")
+        if d.status_code != 404:
+            d.raise_for_status()
 
 
 @pytest.mark.parametrize("value", SPECIAL_VALUES)
