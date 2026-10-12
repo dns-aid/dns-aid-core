@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -187,6 +188,26 @@ class TestDNSimpleBackendClient:
         assert client1 is client2
 
         await backend.close()
+
+    def test_get_client_recreates_client_for_new_event_loop(self):
+        """Test that a new event loop gets a new client (CLI uses asyncio.run() more than once)."""
+        backend = DNSimpleBackend(token="test-token")
+        # Keep both loops open until the end. The backend compares id(loop),
+        # and a new loop can get the id of a loop that was freed.
+        loop1 = asyncio.new_event_loop()
+        loop2 = asyncio.new_event_loop()
+        try:
+            client1 = loop1.run_until_complete(backend._get_client())
+            client2 = loop2.run_until_complete(backend._get_client())
+
+            assert client2 is not client1
+            assert client1.is_closed
+            assert backend._client is client2
+
+            loop2.run_until_complete(backend.close())
+        finally:
+            loop1.close()
+            loop2.close()
 
     @pytest.mark.asyncio
     async def test_get_client_raises_without_token(self):
@@ -1089,6 +1110,71 @@ class TestDNSimpleBackendCreateTXT:
         # The undo restores the updated record before it creates a deleted record.
         methods = [e[0] for e in events]
         assert methods.index("POST") > methods.index("PATCH", methods.index("DELETE"))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("undo_status", [404, 500])
+    async def test_create_txt_undo_delete_error_does_not_hide_first_error(self, undo_status):
+        """Test that the undo continues when the DELETE of a created record fails.
+
+        A 404 is not an error (the record is already gone). Another error is
+        logged. In both cases, the undo restores the updated record and the
+        first error is raised.
+        """
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[_records_page([_record(31, rtype="TXT", content='"a=1"')])],
+            post_responses=[_status_response(201, {"id": 901}), _status_response(429)],
+            delete_responses=[_status_response(undo_status)],
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            pytest.raises(httpx.HTTPStatusError) as exc_info,
+        ):
+            await backend.create_txt_record(
+                zone="example.com", name="chat", values=["b=2", "c=3", "d=4"], ttl=3600
+            )
+
+        assert exc_info.value.response.status_code == 429
+        assert _deletes(events) == [("DELETE", f"{RECORDS_PATH}/901")]
+        assert _patches(events)[-1] == (
+            "PATCH",
+            f"{RECORDS_PATH}/31",
+            {"content": '"a=1"', "ttl": 3600},
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_txt_undo_create_error_does_not_hide_first_error(self):
+        """Test that the undo continues when a deleted record cannot be created again."""
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[
+                _records_page(
+                    [
+                        _record(31, rtype="TXT", content='"a=1"'),
+                        _record(32, rtype="TXT", content='"b=2"'),
+                        _record(33, rtype="TXT", content='"c=3"'),
+                    ]
+                )
+            ],
+            delete_responses=[_status_response(204), _status_response(500)],
+            post_responses=[_status_response(429)],
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            pytest.raises(httpx.HTTPStatusError) as exc_info,
+        ):
+            await backend.create_txt_record(zone="example.com", name="chat", values=["a=1"])
+
+        assert exc_info.value.response.status_code == 500
+        assert _posts(events) == [
+            (
+                "POST",
+                RECORDS_PATH,
+                {"name": "chat", "type": "TXT", "content": '"b=2"', "ttl": 3600},
+            ),
+        ]
 
 
 class TestDNSimpleBackendDeleteRecord:
