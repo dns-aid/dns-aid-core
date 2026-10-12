@@ -1035,6 +1035,61 @@ class TestDNSimpleBackendCreateTXT:
         assert exc_info.value.response.status_code == 429
         assert len(_patches(events)) == 2
 
+    @pytest.mark.asyncio
+    async def test_create_txt_delete_error_undoes_changes(self):
+        """Test that a failed DELETE in the last step puts the old record set back.
+
+        The undo restores the updated record and creates the deleted records
+        again. A record that was already gone (404) is not created again.
+        """
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[
+                _records_page(
+                    [
+                        _record(31, rtype="TXT", content='"capabilities=search"'),
+                        _record(32, rtype="TXT", content='"version=1.0.0"'),
+                        _record(33, rtype="TXT", content='"realm=prod"'),
+                        _record(34, rtype="TXT", content='"region=eu"'),
+                    ]
+                )
+            ],
+            delete_responses=[
+                _status_response(204),
+                _status_response(404),
+                _status_response(500),
+            ],
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            pytest.raises(httpx.HTTPStatusError) as exc_info,
+        ):
+            await backend.create_txt_record(
+                zone="example.com", name="chat", values=["capabilities=chat"], ttl=3600
+            )
+
+        assert exc_info.value.response.status_code == 500
+        assert _deletes(events) == [
+            ("DELETE", f"{RECORDS_PATH}/32"),
+            ("DELETE", f"{RECORDS_PATH}/33"),
+            ("DELETE", f"{RECORDS_PATH}/34"),
+        ]
+        assert _patches(events) == [
+            ("PATCH", f"{RECORDS_PATH}/31", {"content": "capabilities=chat", "ttl": 3600}),
+            ("PATCH", f"{RECORDS_PATH}/31", {"content": '"capabilities=search"', "ttl": 3600}),
+        ]
+        assert _posts(events) == [
+            (
+                "POST",
+                RECORDS_PATH,
+                {"name": "chat", "type": "TXT", "content": '"version=1.0.0"', "ttl": 3600},
+            ),
+        ]
+        # The undo restores the updated record before it creates a deleted record.
+        methods = [e[0] for e in events]
+        assert methods.index("POST") > methods.index("PATCH", methods.index("DELETE"))
+
 
 class TestDNSimpleBackendDeleteRecord:
     """Tests for delete_record."""
