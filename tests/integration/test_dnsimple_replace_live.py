@@ -8,6 +8,10 @@ existing records. They use the real DNSimple API. The API refuses the
 replacement with a validation error (HTTP 400), which is the same failure
 path as a 429 or a 5xx response.
 
+The API has no input that makes a DELETE fail. Thus, the test for the last
+step (delete) makes the DELETE requests of the backend fail with a network
+error. All other requests go to the real API.
+
 Each test uses a new record name and removes its records at the end.
 
 Gated behind DNS_AID_LIVE_TESTS=1 so CI stays hermetic:
@@ -145,5 +149,38 @@ async def test_rejected_txt_replacement_keeps_existing_records(backend, api, nam
     after = sorted(backend._record_value(r) for r in await api.find(name, "TXT"))
     assert after == sorted(old_values), (
         f"Rejected TXT replacement changed the record set. "
+        f"Before: {sorted(old_values)!r}. After: {after!r}"
+    )
+
+
+async def test_failed_final_delete_keeps_existing_records(backend, api, name):
+    """A TXT replacement that fails in the last step (delete) must not leave a mixed set.
+
+    The replacement updates one old record in place and then deletes the
+    other old records. If a DELETE fails, the record set must be the old set.
+    It must not be the new value plus the old values that were not deleted.
+    """
+    old_values = ["capabilities=search", "version=1.0.0", "realm=prod"]
+    for value in old_values:
+        await api.create(name, "TXT", value)
+
+    async def fail_delete(request: httpx.Request) -> None:
+        if request.method == "DELETE":
+            raise httpx.ConnectError("DELETE failed for the test", request=request)
+
+    client = await backend._get_client()
+    client.event_hooks = {"request": [fail_delete], "response": []}
+
+    with pytest.raises(httpx.ConnectError):
+        await backend.create_txt_record(
+            zone=ZONE,
+            name=name,
+            values=["capabilities=chat"],
+            ttl=TTL,
+        )
+
+    after = sorted(backend._record_value(r) for r in await api.find(name, "TXT"))
+    assert after == sorted(old_values), (
+        f"A failed final delete changed the record set. "
         f"Before: {sorted(old_values)!r}. After: {after!r}"
     )

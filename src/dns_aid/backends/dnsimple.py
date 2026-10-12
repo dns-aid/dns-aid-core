@@ -308,9 +308,9 @@ class DNSimpleBackend(DNSBackend):
         3. Create one record for each new value that is still remaining.
         4. Delete the existing records that are not necessary.
 
-        If a step 1-3 request fails, undo the changes of steps 1-3 and
-        raise the error. The API refuses a record that is equal to an
-        existing record. Step 1 prevents this error.
+        If a request fails, undo the changes and raise the error. The API
+        refuses a record that is equal to an existing record. Step 1
+        prevents this error.
         """
         existing = await self._find_records(domain, name, record_type)
 
@@ -336,6 +336,7 @@ class DNSimpleBackend(DNSBackend):
 
         updated: list[dict] = []
         created: list[dict] = []
+        deleted: list[dict] = []
         try:
             for record, payload in updates:
                 response = await client.patch(f"{path}/{record['id']}", json=payload)
@@ -348,18 +349,33 @@ class DNSimpleBackend(DNSBackend):
                 )
                 response.raise_for_status()
                 created.append(response.json()["data"])
+            for record in deletes:
+                response = await client.delete(f"{path}/{record['id']}")
+                # A 404 is not an error: the record is already gone. Do not
+                # create it again in the undo.
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                deleted.append(record)
         except Exception:
-            await self._undo_replace(domain, updated, created)
+            await self._undo_replace(domain, updated, created, deleted)
             raise
 
-        await self._delete_records(domain, deletes)
-
-    async def _undo_replace(self, domain: str, updated: list[dict], created: list[dict]) -> None:
+    async def _undo_replace(
+        self,
+        domain: str,
+        updated: list[dict],
+        created: list[dict],
+        deleted: list[dict],
+    ) -> None:
         """
         Undo the changes of a failed replacement.
 
-        Delete the created records and set the updated records back to
-        their old content and TTL. Send the old content as the API gave it.
+        Delete the created records, set the updated records back to their
+        old content and TTL, and create the deleted records again. Do these
+        steps in this order, so that no request makes a record that is equal
+        to an existing record. A record that is created again gets a new ID.
+        Send the old content as the API gave it.
         Do not send the decoded TXT value: the API reads a value that starts
         with a quote as serialized TXT content, thus a decoded value that has
         literal quotes would change. Log a failure, but do not raise it, so
@@ -391,6 +407,26 @@ class DNSimpleBackend(DNSBackend):
             except Exception as exc:
                 logger.error(
                     "Failed to restore record after failed replacement",
+                    domain=domain,
+                    record_id=record.get("id"),
+                    error=str(exc),
+                )
+
+        for record in deleted:
+            try:
+                response = await client.post(
+                    path,
+                    json={
+                        "name": record.get("name"),
+                        "type": record.get("type"),
+                        "content": record.get("content"),
+                        "ttl": record.get("ttl"),
+                    },
+                )
+                response.raise_for_status()
+            except Exception as exc:
+                logger.error(
+                    "Failed to create deleted record again after failed replacement",
                     domain=domain,
                     record_id=record.get("id"),
                     error=str(exc),
