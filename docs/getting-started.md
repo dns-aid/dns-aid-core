@@ -1722,7 +1722,9 @@ python examples/demo_full.py
 #### "Zone not found" error
 - Verify AWS credentials: `aws sts get-caller-identity`
 - Check zone exists: `dns-aid zones`
-- Ensure correct region: `export AWS_DEFAULT_REGION=us-east-1`
+- Check you are using the AWS account that owns the zone (for example, set
+  `AWS_PROFILE`). Route 53 is a global service, so the region does not change
+  which zones are found.
 
 #### DNS records not appearing
 - Wait for propagation (up to 60 seconds for Route 53)

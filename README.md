@@ -39,7 +39,7 @@ Changes to protocol behavior should be discussed within the IETF.
 - [API Reference](docs/api-reference.md) — Python SDK, CLI, and MCP server tool reference
 - [ARD ai-catalog discovery](docs/ard-catalog.md) — interop with [Agentic Resource Discovery](https://agenticresourcediscovery.org/spec/): catalog discovery, the host-anywhere DNS pointer, and card dereferencing
 - [Architecture](docs/architecture.md) — protocol layers, metadata resolution, integration points
-- [Integrations](docs/integrations.md) — backend-specific setup notes
+- [Integrations](docs/integrations.md) — using DNS-AID with agent frameworks, workflow platforms and AWS
 - [Demo Guide](docs/demo-guide.md) — end-to-end walkthrough for talks and presentations
 - [Roadmap](docs/roadmap.md) — where the project is headed, near/medium/long term
 - [Privacy Policy](PRIVACY.md) | [Security Policy](SECURITY.md) | [Trademarks](TRADEMARKS.md)
