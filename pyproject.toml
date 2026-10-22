@@ -50,6 +50,9 @@ dependencies = [
     # the base install tree rather than behind an extra. httpx's own constraint
     # is looser than the patched version needs.
     "anyio>=4.14.2",    # CVE-2026-63374 + CVE-2026-64847 — fixed in 4.14.2
+    # Same reasoning for certifi (pulled by httpx): the bundled CA store before
+    # 2026.10.18 still trusts the compromised emSign ECC Root CA - G3 chain.
+    "certifi>=2026.10.19",  # PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2
 ]
 
 [project.optional-dependencies]
@@ -72,21 +75,21 @@ mcp = [
     # httpx2.AsyncClient, but httpx2 and httpx expose identical AsyncClient
     # constructor parameters and an httpx client is accepted, so no HTTP-layer
     # port is needed. Raise this ceiling once the field-rename shim lands.
-    "mcp>=1.28.1,<3.0.0",
+    "mcp>=1.30.0,<3.0.0",  # CVE-2026-59951 — stateful Streamable HTTP sessions never reclaimed; fixed in 1.30.0
     "uvicorn>=0.30.0",
     # Direct floors on transitive deps pulled by `mcp` to close Dependabot alerts
     # (mcp's upstream constraints are looser than the patched versions need).
-    "pyjwt>=2.13.0",            # PYSEC-2026-175/177/178/179 (4 vulns); supersedes CVE-2026-32597 (unknown 'crit' header)
+    "pyjwt>=2.15.0",            # PYSEC-2026-4140..4152 + 4183 (14 vulns, fixed in 2.14.0/2.15.0); supersedes PYSEC-2026-175/177/178/179 and CVE-2026-32597
     "python-multipart>=0.0.27", # CVE-2026-42561 / GHSA-pp6c-gr5w-3c5g (high) — DoS via unbounded multipart headers; supersedes CVE-2026-40347
 ]
 route53 = [
     "boto3>=1.34.0",
-    "urllib3>=2.7.0",   # CVE-2026-44431 + CVE-2026-44432 (high) — via boto3/requests
+    "urllib3>=2.8.0",   # PYSEC-2026-4175/4176/4177 (fixed in 2.8.0); earlier CVE-2026-44431 + CVE-2026-44432 — via boto3/requests
 ]
 cloud-dns = [
     "google-auth>=2.30.0",
     "requests>=2.33.0",
-    "urllib3>=2.7.0",   # CVE-2026-44431 + CVE-2026-44432 (high) — via boto3/requests
+    "urllib3>=2.8.0",   # PYSEC-2026-4175/4176/4177 (fixed in 2.8.0); earlier CVE-2026-44431 + CVE-2026-44432 — via boto3/requests
 ]
 infoblox = [
     # Uses httpx from core deps
@@ -103,7 +106,7 @@ nios = [
 akamai-edgedns = [
     "edgegrid-python>=2.0.7",
     "requests>=2.33.0",
-    "urllib3>=2.7.0",   # CVE-2026-44431 + CVE-2026-44432 (high) — via boto3/requests
+    "urllib3>=2.8.0",   # PYSEC-2026-4175/4176/4177 (fixed in 2.8.0); earlier CVE-2026-44431 + CVE-2026-44432 — via boto3/requests
 ]
 ddns = [
     # Uses dnspython from core deps
@@ -155,7 +158,7 @@ dev = [
     # Direct floors on transitive deps to close Dependabot alerts:
     "lxml>=6.1.0",       # CVE-2026-41066 (high) — XXE in iterparse, via cyclonedx-bom
     "pygments>=2.20.0",  # CVE-2026-4539 (low) — ReDoS in GUID regex, via rich/pytest/cel
-    "urllib3>=2.7.0",    # CVE-2026-44431 + CVE-2026-44432 (high) — header leak + decompression bomb
+    "urllib3>=2.8.0",    # PYSEC-2026-4175/4176/4177 (fixed in 2.8.0); earlier CVE-2026-44431 + CVE-2026-44432 — header leak + decompression bomb
 ]
 # `all` is defined by self-reference (PEP 508) rather than by restating every
 # requirement. Restating them is what let it drift: `all` was silently missing
