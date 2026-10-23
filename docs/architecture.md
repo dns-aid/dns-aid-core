@@ -223,6 +223,15 @@ resolvable when consumers set `DNS_AID_LEGACY_01_FALLBACK=1`.
    - Not found → endpoint_source = "http_index_fallback"
 ```
 
+For flat or walkable FQDNs, the HTTP index's first declared protocol
+(`capability.protocols`, exposed as `primary_protocol`) seeds DNS resolution.
+An explicit caller protocol filter selects a matching declared member; it does
+not relabel an incompatible entry. Unknown primary protocols are not guessed.
+Entries without a declaration keep the existing caller-filter / MCP-A2A fallback.
+Legacy FQDN protocol labels keep their precedence. DNS `bap`/`alpn` reconciliation
+remains authoritative, and the resolved protocol must still match an explicit
+caller filter. This is HTTP index adapter behavior, not a new DNS wire rule.
+
 ### Future Enhancement: HTTP Index Fallback in DNS Mode
 
 Currently the two discovery modes are independent — pure DNS never consults the
