@@ -48,7 +48,7 @@ try:
 
     # mcp 2.0.0 renamed McpError -> MCPError. mcp.types is unaffected by the 2.x
     # package split, so the names below resolve identically on both majors.
-    try:  # mcp >= 1.28.1, < 2
+    try:  # mcp >= 1.30.0, < 2
         from mcp.shared.exceptions import McpError
     except ImportError:  # mcp >= 2
         # mypy resolves against whichever major is installed, so the other
@@ -86,7 +86,7 @@ try:
     # pyproject caps mcp below 2.0.0 until that shim exists. This detection is
     # here so a forced 2.x install reports the real reason rather than failing
     # with an opaque AttributeError partway through an invocation.
-    try:  # mcp >= 1.28.1, < 2
+    try:  # mcp >= 1.30.0, < 2
         from mcp.client.streamable_http import streamablehttp_client
 
         _MCP_SDK_AVAILABLE = True
@@ -99,7 +99,7 @@ try:
             "mcp.types renamed its result fields to snake_case (isError, "
             "structuredContent, nextCursor, inputSchema) and the "
             "streamable-HTTP transport changed shape. dns-aid supports "
-            "mcp >=1.28.1,<2.0.0 on the client path"
+            "mcp >=1.30.0,<2.0.0 on the client path"
         )
 except ImportError as exc:
     _MCP_SDK_AVAILABLE = False
@@ -261,7 +261,7 @@ class MCPProtocolHandler(ProtocolHandler):
                     "The MCP streamable-HTTP transport is unavailable. If the "
                     "'mcp' package is not installed, run "
                     "`pip install 'dns-aid[mcp]'`; if it is installed, its "
-                    "version is out of range (supported: mcp >=1.28.1,<2.0.0). "
+                    "version is out of range (supported: mcp >=1.30.0,<2.0.0). "
                     f"Reason: {_MCP_IMPORT_ERROR}"
                 ),
             )

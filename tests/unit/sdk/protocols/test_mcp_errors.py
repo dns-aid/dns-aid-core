@@ -101,7 +101,7 @@ async def test_unsupported_mcp_version_is_distinguishable_from_missing_package(
     message = raw.error_message or ""
     # Must name the supported range, so an installed-but-unsupported mcp is
     # distinguishable from a missing package.
-    assert "mcp >=1.28.1,<2.0.0" in message, "the supported range must be stated"
+    assert "mcp >=1.30.0,<2.0.0" in message, "the supported range must be stated"
     assert "dns-aid[mcp]" in message, "the install remedy must still be offered"
 
 

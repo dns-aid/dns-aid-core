@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Bumped dependency floors to clear the Dependency Audit gate** — `mcp` to
+  `>=1.30.0` (CVE-2026-59951, unreclaimed stateful Streamable HTTP sessions),
+  `pyjwt` to `>=2.15.0` (PYSEC-2026-4140..4152 and PYSEC-2026-4183),
+  `urllib3` to `>=2.8.0` (PYSEC-2026-4175/4176/4177) and `certifi` to
+  `>=2026.10.19` (PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2, compromised emSign
+  ECC Root CA - G3). `mcp` stays capped below 2.0.0 for the SDK client path.
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed

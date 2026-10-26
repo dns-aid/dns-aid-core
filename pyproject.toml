@@ -51,7 +51,8 @@ dependencies = [
     # is looser than the patched version needs.
     "anyio>=4.14.2",    # CVE-2026-63374 + CVE-2026-64847 — fixed in 4.14.2
     # Same reasoning for certifi (pulled by httpx): the bundled CA store before
-    # 2026.10.18 still trusts the compromised emSign ECC Root CA - G3 chain.
+    # 2026.10.19 still trusts the compromised emSign ECC Root CA - G3 chain
+    # (GHSA lists 2026.10.18 as fixed; PYSEC-2026-4320 says 2026.10.19, so take the later).
     "certifi>=2026.10.19",  # PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2
 ]
 
@@ -75,7 +76,7 @@ mcp = [
     # httpx2.AsyncClient, but httpx2 and httpx expose identical AsyncClient
     # constructor parameters and an httpx client is accepted, so no HTTP-layer
     # port is needed. Raise this ceiling once the field-rename shim lands.
-    "mcp>=1.30.0,<3.0.0",  # CVE-2026-59951 — stateful Streamable HTTP sessions never reclaimed; fixed in 1.30.0
+    "mcp>=1.30.0,<2.0.0",  # CVE-2026-59951 — stateful Streamable HTTP sessions never reclaimed; fixed in 1.30.0
     "uvicorn>=0.30.0",
     # Direct floors on transitive deps pulled by `mcp` to close Dependabot alerts
     # (mcp's upstream constraints are looser than the patched versions need).
