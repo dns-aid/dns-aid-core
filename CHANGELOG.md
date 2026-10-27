@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **DNSimple DNS backend** — new `DNSimpleBackend` for the DNSimple API v2 with
+  an API access token (`DNSIMPLE_TOKEN`). Install with `dns-aid[dnsimple]`.
+  Private-use SVCB keys (`key65400`–`key65409`) go directly into the SVCB
+  record. Each TXT value is a separate API record. The account ID is found
+  from `/v2/whoami` when `DNSIMPLE_ACCOUNT_ID` is not set. `DNSIMPLE_BASE_URL`
+  selects the sandbox. The DNSimple API has no atomic replace, so the backend
+  keeps equal records, updates the other records in place, creates and deletes
+  as the last steps, and undoes its changes if a request fails. The backend
+  removes a trailing dot from the SVCB target (the API refuses it) and refuses
+  an SVCB param value with a double quote or a backslash (the API cannot keep
+  it). Available in the CLI (`--backend dnsimple`), `dns-aid doctor` and the
+  MCP tools.
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed

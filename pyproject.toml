@@ -108,6 +108,9 @@ akamai-edgedns = [
 ddns = [
     # Uses dnspython from core deps
 ]
+dnsimple = [
+    # Uses httpx from core deps
+]
 jws = [
     # JWS signature support (alternative to DNSSEC).
     # ``cryptography`` is now a CORE dependency (JWS verification is a core
@@ -178,7 +181,7 @@ dev = [
 #
 # tests/unit/test_packaging.py guards all of this.
 all = [
-    "dns-aid[cli,mcp,route53,cloudflare,ns1,cloud-dns,infoblox,nios,akamai-edgedns,ddns,jws,sdk,otel,cel,pqc]",
+    "dns-aid[cli,mcp,route53,cloudflare,ns1,cloud-dns,infoblox,nios,akamai-edgedns,ddns,dnsimple,jws,sdk,otel,cel,pqc]",
 ]
 
 [project.scripts]
