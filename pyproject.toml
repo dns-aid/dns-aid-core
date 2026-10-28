@@ -35,7 +35,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "dnspython>=2.6.0",
+    "dnspython>=2.9.0",  # CVE-2026-114605 / GHSA-45c3-73f7-pv4m — name decompression CPU DoS; fixed in 2.9.0
     "pydantic>=2.5.0",
     "httpx>=0.27.0",
     "structlog>=24.0.0",
