@@ -76,7 +76,7 @@ mcp = [
     # httpx2.AsyncClient, but httpx2 and httpx expose identical AsyncClient
     # constructor parameters and an httpx client is accepted, so no HTTP-layer
     # port is needed. Raise this ceiling once the field-rename shim lands.
-    "mcp>=1.30.0,<2.0.0",  # CVE-2026-59951 — stateful Streamable HTTP sessions never reclaimed; fixed in 1.30.0
+    "mcp>=1.30.0,<3.0.0",  # CVE-2026-59951 — stateful Streamable HTTP sessions never reclaimed; fixed in 1.30.0
     "uvicorn>=0.30.0",
     # Direct floors on transitive deps pulled by `mcp` to close Dependabot alerts
     # (mcp's upstream constraints are looser than the patched versions need).
