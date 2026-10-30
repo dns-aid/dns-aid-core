@@ -604,9 +604,21 @@ class AgentClient:
                 )
         # --- end policy enforcement ---
 
+        # DNS SVCB gives host:port but no path. Apply the same MCP path
+        # resolution (.well-known/agent.json, then /mcp convention) that
+        # core.invoke.call_mcp_tool / list_mcp_tools use, so invoke() works
+        # for DNS-discovered MCP agents. Already-pathed endpoints are returned
+        # unchanged. The signal/span keep reporting agent.endpoint_url.
+        # Imported lazily: core.invoke itself imports the SDK at module load.
+        request_endpoint = agent.endpoint_url
+        if protocol == "mcp":
+            from dns_aid.core.invoke import resolve_mcp_endpoint
+
+            request_endpoint = await resolve_mcp_endpoint(request_endpoint)
+
         raw = await handler.invoke(
             client=self._http_client,
-            endpoint=agent.endpoint_url,
+            endpoint=request_endpoint,
             method=method,
             arguments=arguments,
             timeout=effective_timeout,
