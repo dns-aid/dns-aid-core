@@ -468,6 +468,24 @@ class ResolvedAgent:
     skills: list[str] = field(default_factory=list)
     resolved_via: str = "direct"  # "direct", "agent_card", "dns_discover"
     agent_record: AgentRecord | None = None  # AgentRecord when available from DNS discovery
+    # Auth the agent card declares, set only when resolved from the card with no
+    # DNS-discovered record (``agent_record`` is None). Lets the SDK path apply
+    # caller-supplied credentials instead of building a record with no auth_type.
+    auth_type: str | None = None
+    auth_config: dict | None = None
+
+
+def _card_auth(card: object) -> tuple[str | None, dict | None]:
+    """The auth type and config an A2A agent card declares, or ``(None, None)``.
+
+    Mirrors how discovery derives them (first declared scheme), so a call made
+    with only an endpoint authenticates the same way a discovered agent does.
+    """
+    authentication = getattr(card, "authentication", None)
+    schemes = getattr(authentication, "schemes", None)
+    if not schemes:
+        return None, None
+    return schemes[0], {"schemes": list(schemes)}
 
 
 async def resolve_a2a_endpoint(
@@ -556,12 +574,15 @@ async def resolve_a2a_endpoint(
             given_host = urlparse(normalized).hostname
             use_card_url = card_host == given_host if card_host else False
 
+            card_auth_type, card_auth_config = _card_auth(card)
             return ResolvedAgent(
                 endpoint=card.url if use_card_url else normalized,
                 agent_name=card.name,
                 agent_description=card.description,
                 skills=[s.name for s in card.skills],
                 resolved_via="agent_card",
+                auth_type=card_auth_type,
+                auth_config=card_auth_config,
             )
     except Exception:
         pass  # Fall through to direct endpoint
@@ -644,6 +665,8 @@ async def send_a2a_message(
             caller_id=caller_id,
             agent_record=resolved.agent_record,
             credentials=credentials,
+            auth_type=resolved.auth_type,
+            auth_config=resolved.auth_config,
             policy_uri=policy_uri,
         )
     else:

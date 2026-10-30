@@ -253,6 +253,15 @@ class AgentClient:
                 NOT included in the error message (FR-005).
         """
         auth_type = getattr(agent, "auth_type", None)
+        # Credentials supplied for an agent whose auth type is unknown would be
+        # dropped silently and the call would go out unauthenticated. An explicit
+        # "none" is a real declaration; an unset auth_type is not, so say so.
+        if not auth_type and (credentials or credential_provider is not None):
+            logger.warning(
+                "sdk.credentials_ignored",
+                agent=agent.fqdn,
+                reason="agent has no auth_type, so supplied credentials were not applied",
+            )
         # FR-008: short-circuit before the provider is awaited when the target
         # declares no authentication.
         if not auth_type or auth_type == "none":
