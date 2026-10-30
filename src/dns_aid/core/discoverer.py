@@ -1427,10 +1427,10 @@ async def _process_http_agent(
         return None
 
     # Under draft-02 the flat and walkable FQDN shapes don't carry the
-    # agent protocol — it lives in the SVCB `bap`/`alpn` SvcParam. If
-    # _parse_fqdn returned no protocol, use the caller-supplied protocol
-    # filter when present, otherwise try mcp then a2a (the SVCB params
-    # on the discovered record reveal the actual protocol).
+    # agent protocol. Use the HTTP index's declared primary protocol as
+    # the probe (or a declared member matching the caller's filter). DNS
+    # `bap`/`alpn` still determines the resolved protocol. Only entries
+    # without a declaration retain the caller-filter / MCP-A2A fallback.
     candidate_protocols: list[Protocol]
     if fqdn_protocol_str:
         try:
@@ -1442,6 +1442,20 @@ async def _process_http_agent(
                 fqdn=http_agent.fqdn,
                 protocol=fqdn_protocol_str,
             )
+            return None
+    elif http_agent.protocols:
+        declared_protocol = http_agent.primary_protocol
+        if protocol is not None:
+            if not any(
+                isinstance(value, str) and value.lower() == protocol.value
+                for value in http_agent.protocols
+            ):
+                return None
+            declared_protocol = protocol.value
+        try:
+            candidate_protocols = [Protocol(declared_protocol.lower())]
+        except (ValueError, AttributeError):
+            # An unknown/malformed declaration must not become a guessed MCP agent.
             return None
     elif protocol is not None:
         candidate_protocols = [protocol]
@@ -1462,6 +1476,10 @@ async def _process_http_agent(
             break
 
     if agent:
+        # DNS reconciliation may have changed the probe; never return a
+        # different protocol from the one the caller explicitly requested.
+        if protocol is not None and agent.protocol != protocol:
+            return None
         _enrich_from_http_index(agent, http_agent)
         return agent
 
