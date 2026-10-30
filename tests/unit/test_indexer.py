@@ -745,3 +745,131 @@ class TestSyncIndexScanException:
         result = await sync_index("example.com", mock_backend)
         assert result.success is False
         assert "scan boom" in result.message
+
+
+class _ValuesOnlyBackend(MockBackend):
+    """MockBackend whose ``list_records`` yields only the real-backend shape.
+
+    Real backends (Route 53, Cloudflare, NS1, Cloud DNS, ddns, Akamai,
+    BloxOne, NIOS) return SVCB rdata as presentation strings in
+    ``record["values"]`` and never supply the ``data``/``params`` dict that
+    MockBackend adds. Regression coverage for issue #227.
+    """
+
+    async def list_records(self, zone, name_pattern=None, record_type=None):
+        async for record in super().list_records(zone, name_pattern, record_type):
+            record = dict(record)
+            record.pop("data", None)
+            yield record
+
+
+# One SVCB rdata string per backend, matching what that backend's
+# list_records builds for ``values[0]``.
+_REAL_BACKEND_SVCB_VALUES = {
+    # Route 53 / Cloud DNS / ddns / Akamai / NS1: rdata text as stored in DNS.
+    "route53": '1 mcp.example.com. alpn="mcp" port="443" key65402="mcp=1.0"',
+    "cloud_dns": '1 mcp.example.com. alpn="mcp" port="443"',
+    "ddns": '1 mcp.example.com. alpn="mcp" port="443"',
+    "akamai": '1 mcp.example.com. alpn="mcp" port="443"',
+    "ns1": '1 mcp.example.com. alpn="mcp" port="443"',
+    # Cloudflare: f"{priority} {target} {value}" from structured data.
+    "cloudflare": '1 mcp.example.com. alpn="mcp" port="443" key65402="mcp"',
+    # BloxOne: _svcb_presentation joins svc_params as key=value.
+    "bloxone": "1 mcp.example.com. alpn=mcp port=443 key65402=mcp=1.0",
+    # NIOS: _format_svc_parameters_for_value tokens.
+    "nios": "1 mcp.example.com. alpn=mcp port=443",
+}
+
+
+def _seed_agent(backend: MockBackend, name: str, svcb_value: str) -> None:
+    """Store a flat SVCB (values-only) plus its companion TXT."""
+    backend.records["example.com"][name]["SVCB"] = [{"values": [svcb_value], "ttl": 3600}]
+    backend.records["example.com"][name]["TXT"] = [{"values": ["capabilities=x"], "ttl": 3600}]
+
+
+class TestSyncIndexRealBackendRecordShape:
+    """sync_index must read the protocol from ``values``, not ``data.params``."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("backend_name", sorted(_REAL_BACKEND_SVCB_VALUES))
+    async def test_protocol_from_values_only_record(self, backend_name: str):
+        backend = _ValuesOnlyBackend()
+        _seed_agent(backend, "chat", _REAL_BACKEND_SVCB_VALUES[backend_name])
+
+        result = await sync_index("example.com", backend)
+
+        assert result.success is True
+        assert result.entries == [IndexEntry(name="chat", protocol="mcp")]
+
+    @pytest.mark.asyncio
+    async def test_bap_preferred_over_alpn(self):
+        backend = _ValuesOnlyBackend()
+        _seed_agent(backend, "agent", '1 t.example.com. alpn="h2" key65402="a2a=1.0"')
+
+        result = await sync_index("example.com", backend)
+
+        assert result.entries == [IndexEntry(name="agent", protocol="a2a")]
+
+    @pytest.mark.asyncio
+    async def test_no_protocol_params_stays_unknown(self):
+        backend = _ValuesOnlyBackend()
+        _seed_agent(backend, "agent", "1 t.example.com. port=443")
+
+        result = await sync_index("example.com", backend)
+
+        assert result.entries == [IndexEntry(name="agent", protocol="unknown")]
+
+
+class TestSyncIndexRoute53Shape:
+    """Run sync_index through the real Route53Backend.list_records.
+
+    Only the boto3 client is stubbed, with the documented
+    ``ListResourceRecordSets`` response structure (``Name`` with a trailing
+    dot, ``Type``, ``TTL``, ``ResourceRecords[].Value``), so the record dicts
+    sync_index sees are exactly what Route 53 produces. Regression coverage
+    for issue #227.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_index_reads_protocol_from_route53_values(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from dns_aid.backends.route53 import Route53Backend
+
+        backend = Route53Backend(zone_id="Z123")
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {
+                "ResourceRecordSets": [
+                    {
+                        "Name": "chat.example.com.",
+                        "Type": "SVCB",
+                        "TTL": 3600,
+                        "ResourceRecords": [{"Value": '1 mcp.example.com. alpn="mcp" port="443"'}],
+                    },
+                    {
+                        "Name": "chat.example.com.",
+                        "Type": "TXT",
+                        "TTL": 3600,
+                        "ResourceRecords": [{"Value": '"capabilities=chat"'}],
+                    },
+                ]
+            }
+        ]
+        client = MagicMock()
+        client.get_paginator.return_value = paginator
+        create_txt = AsyncMock(return_value="_index._agents.example.com")
+
+        with (
+            patch.object(backend, "_get_client", return_value=client),
+            patch.object(backend, "zone_exists", AsyncMock(return_value=True)),
+            patch.object(backend, "get_record", AsyncMock(return_value=None)),
+            patch.object(backend, "create_txt_record", create_txt),
+        ):
+            result = await sync_index("example.com", backend)
+
+        assert result.success is True
+        assert result.entries == [IndexEntry(name="chat", protocol="mcp")]
+        written = create_txt.call_args.kwargs.get("values") or create_txt.call_args.args[2]
+        assert any("chat:mcp" in v for v in written)
+        assert not any("unknown" in v for v in written)
