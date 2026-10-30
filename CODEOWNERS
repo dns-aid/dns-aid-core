@@ -9,10 +9,10 @@
 * @nicknacnic
 
 # Core protocol engine — both maintainers
-src/dns_aid/core/ @nicknacnic @ivanglabbeek
+src/dns_aid/core/ @nicknacnic @IngmarVG-IB
 
 # Policy + standards layer — Ingmar leads
-src/dns_aid/sdk/policy/ @ivanglabbeek @nicknacnic
+src/dns_aid/sdk/policy/ @IngmarVG-IB @nicknacnic
 
 # DNS backends
 src/dns_aid/backends/ @nicknacnic
@@ -24,13 +24,13 @@ src/dns_aid/mcp/ @nicknacnic
 src/dns_aid/cli/ @nicknacnic
 
 # CI/CD and governance — both maintainers approve
-.github/ @nicknacnic @ivanglabbeek
-GOVERNANCE.md @nicknacnic @ivanglabbeek
-MAINTAINERS.md @nicknacnic @ivanglabbeek
-SECURITY.md @nicknacnic @ivanglabbeek
-TRADEMARKS.md @nicknacnic @ivanglabbeek
+.github/ @nicknacnic @IngmarVG-IB
+GOVERNANCE.md @nicknacnic @IngmarVG-IB
+MAINTAINERS.md @nicknacnic @IngmarVG-IB
+SECURITY.md @nicknacnic @IngmarVG-IB
+TRADEMARKS.md @nicknacnic @IngmarVG-IB
 
 # Python dependency manifests — both maintainers approve so Dependabot pip
 # bumps surface to the same reviewer pair as github-actions bumps in .github/
-pyproject.toml @nicknacnic @ivanglabbeek
-uv.lock @nicknacnic @ivanglabbeek
+pyproject.toml @nicknacnic @IngmarVG-IB
+uv.lock @nicknacnic @IngmarVG-IB

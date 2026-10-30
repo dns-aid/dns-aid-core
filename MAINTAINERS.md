@@ -6,8 +6,8 @@ This file lists the current maintainers of the DNS-AID project. The project cont
 
 | Name | GitHub | Affiliation | Role | Since |
 |------|--------|-------------|------|-------|
-| Nick Williams | [@NWillAU900](https://github.com/NWillAU900) | Infoblox | Project Lead | 2026-09 |
-| Ingmar Van Glabbeek | [@ivanglabbeek](https://github.com/ivanglabbeek) | Infoblox | Committer | 2026-04 |
+| Nick Williams | [@nicknacnic](https://github.com/nicknacnic) | Infoblox | Project Lead | 2026-09 |
+| Ingmar Van Glabbeek | [@IngmarVG-IB](https://github.com/IngmarVG-IB) | Infoblox | Committer | 2026-04 |
 
 ## Desired Roles
 
@@ -55,7 +55,7 @@ For full transparency:
 
 - **PyPI publishing** — the `dns-aid` package on [PyPI](https://pypi.org/project/dns-aid/) is published exclusively via [PyPI Trusted Publisher OIDC](https://docs.pypi.org/trusted-publishers/) tied to this repository's `.github/workflows/release.yml`. No long-lived API tokens exist. Only commits that land on a `v*` tag in this repo can publish to PyPI.
 - **Release artifacts** — every wheel and sdist is signed with [Sigstore](https://www.sigstore.dev/) cosign keyless OIDC during the release workflow. SBOM (`sbom.json`) is generated via `cyclonedx-py` and signed alongside the artifacts.
-- **GitHub branch protection** — `main` requires 1 approving review and successful status checks. With two maintainers in place, PRs are expected to be reviewed by the non-author maintainer; admin-merge remains available as a documented fallback for time-sensitive operational changes.
+- **GitHub branch protection** — `main` requires 1 approving review and successful status checks. With two maintainers in place, PRs are expected to be reviewed by the non-author maintainer. The branch ruleset has no bypass actors, so there is no admin-merge path.
 
 ## Contact
 
