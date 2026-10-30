@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`resolve_mcp_endpoint()` now applies the SSRF guard before probing
+  `/.well-known/agent.json`.** The host comes from DNS, which the endpoint's
+  publisher controls, so the probe now goes through `validate_fetch_url` like
+  every other DNS- or metadata-derived fetch. A blocked URL (private, loopback,
+  link-local) is not fetched and the `/mcp` convention is used; the
+  `DNS_AID_FETCH_ALLOWLIST` override applies as elsewhere.
 - **Bumped dependency floors to clear the Dependency Audit gate** — `mcp` to
   `>=1.30.0` (CVE-2026-59951, unreclaimed stateful Streamable HTTP sessions),
   `pyjwt` to `>=2.15.0` (PYSEC-2026-4140..4152 and PYSEC-2026-4183),
@@ -19,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GHSA-45c3-73f7-pv4m). A crafted DNS message could make
   `dns.name.from_wire_parser()` burn excessive CPU on name decompression;
   every discovery lookup parses untrusted wire-format responses.
+
+### Fixed
+
+- **`AgentClient.invoke()` now resolves the MCP endpoint path for
+  DNS-discovered agents.** SVCB records carry a host and port but no path, so
+  an agent for which discovery found no path was called at the bare host and
+  failed (HTTP 405, then the legacy fallback). `invoke()` now applies the same
+  resolution as `call_mcp_tool` and `list_mcp_tools`: the `endpoints.mcp` path
+  from `/.well-known/agent.json`, else the `/mcp` convention. Endpoints that
+  already carry a path are unchanged, and signals and spans still report the
+  discovered endpoint (#248).
 
 ## [0.28.1] - 2026-08-09
 
