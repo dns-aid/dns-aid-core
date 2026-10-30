@@ -24,6 +24,7 @@ Contributors who have earned the ability to merge pull requests. Committers are 
 |------|--------|------|
 | Nick Williams | [@nicknacnic](https://github.com/nicknacnic) | Project Lead |
 | Ingmar Van Glabbeek | [@IngmarVG-IB](https://github.com/IngmarVG-IB) | Committer |
+| Igor Racic | [@iracic82](https://github.com/iracic82) | Committer |
 
 ### Project Lead
 

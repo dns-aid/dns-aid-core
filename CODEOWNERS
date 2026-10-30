@@ -23,12 +23,12 @@ src/dns_aid/mcp/ @nicknacnic
 # CLI
 src/dns_aid/cli/ @nicknacnic
 
-# CI/CD and governance — both maintainers approve
-.github/ @nicknacnic @IngmarVG-IB
-GOVERNANCE.md @nicknacnic @IngmarVG-IB
-MAINTAINERS.md @nicknacnic @IngmarVG-IB
-SECURITY.md @nicknacnic @IngmarVG-IB
-TRADEMARKS.md @nicknacnic @IngmarVG-IB
+# CI/CD and governance — all three committers
+.github/ @nicknacnic @IngmarVG-IB @iracic82
+GOVERNANCE.md @nicknacnic @IngmarVG-IB @iracic82
+MAINTAINERS.md @nicknacnic @IngmarVG-IB @iracic82
+SECURITY.md @nicknacnic @IngmarVG-IB @iracic82
+TRADEMARKS.md @nicknacnic @IngmarVG-IB @iracic82
 
 # Python dependency manifests — both maintainers approve so Dependabot pip
 # bumps surface to the same reviewer pair as github-actions bumps in .github/
