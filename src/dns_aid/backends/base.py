@@ -328,8 +328,8 @@ class DNSBackend(ABC):
         # Optional walkable AliasMode at {name}._agents.{domain} pointing
         # at the flat primary owner. Per draft-02 §Known Agent, operators
         # MAY emit this record so DNS-SD-style consumers can enumerate.
-        # dns-aid-core publishes it by default; callers can suppress it
-        # by setting publish_walkable_alias=False on the AgentRecord.
+        # It is off by default; callers opt in by setting
+        # publish_walkable_alias=True on the AgentRecord (CLI: --walkable).
         if agent.publish_walkable_alias:
             try:
                 # AliasMode MUST point at the flat primary owner
