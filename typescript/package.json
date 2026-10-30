@@ -1,0 +1,55 @@
+{
+  "name": "@dns-aid/core",
+  "version": "0.1.0",
+  "description": "DNS-AID (draft-mozleywilliams-dnsop-dnsaid-02) agent discovery and verification for TypeScript. Native SVCB codec, pluggable DNS transports (Do53, DoH), DNSSEC AD-flag, JWS sig verification.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/transport/do53.d.ts",
+      "import": "./dist/transport/do53.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:live": "DNS_AID_LIVE=1 vitest run test/live.test.ts"
+  },
+  "dependencies": {
+    "dns-packet": "^5.6.1",
+    "jose": "^6.2.0"
+  },
+  "devDependencies": {
+    "@types/dns-packet": "^5.6.5",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  },
+  "keywords": [
+    "dns-aid",
+    "svcb",
+    "rfc9460",
+    "mcp",
+    "a2a",
+    "agent-discovery",
+    "dnssec"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dns-aid/dns-aid-core.git",
+    "directory": "typescript"
+  },
+  "homepage": "https://github.com/dns-aid/dns-aid-core/tree/main/typescript"
+}

@@ -44,3 +44,11 @@ updates:
     labels:
       - "dependencies"
       - "automated"
+
+  - package-ecosystem: "npm"
+    directory: "/typescript"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-deps:
+        patterns: ["*"]
