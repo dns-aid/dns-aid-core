@@ -366,6 +366,46 @@ class A2AAgentCard:
         """Convert skills to DNS-AID capability format (skill IDs)."""
         return self.skill_ids
 
+    def endpoint_for(self, preferred_binding: str | None = None) -> str | None:
+        """The https endpoint this card advertises, or None if it advertises none.
+
+        Precedence: the top-level ``url`` when it is https (the 0.2/0.3 shape),
+        then the interface list -- the entry whose ``protocol_binding`` equals
+        *preferred_binding* when one is asked for, otherwise the first https
+        entry.
+
+        The fallback is not a nicety for exotic cards: A2A 1.0 removed the
+        top-level ``url`` from ``AgentCard`` and made ``supportedInterfaces``
+        the required carrier of every endpoint (``a2a.proto``, ``AgentCard``
+        field 3), so a card that is conformant to the current spec reaches this
+        method with ``url == ""`` and resolves only through the list. The list
+        is ordered and "the first entry is preferred", per the same field's
+        comment, which is where the untargeted tie-break comes from.
+
+        Args:
+            preferred_binding: Transport binding to prefer, e.g. ``"JSONRPC"``.
+                Compared case-insensitively. Absent or unmatched falls back to
+                the first https entry.
+
+        Returns:
+            An https URL, or None when neither the url nor any interface
+            carries one.
+        """
+        if isinstance(self.url, str) and self.url.startswith("https://"):
+            return self.url
+
+        https_interfaces = [
+            i for i in self.interfaces if isinstance(i.url, str) and i.url.startswith("https://")
+        ]
+        if not https_interfaces:
+            return None
+        if preferred_binding:
+            wanted = preferred_binding.casefold()
+            for i in https_interfaces:
+                if (i.protocol_binding or "").casefold() == wanted:
+                    return i.url
+        return https_interfaces[0].url
+
     def to_publish_params(
         self,
         domain: str,
