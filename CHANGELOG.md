@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dns.name.from_wire_parser()` burn excessive CPU on name decompression;
   every discovery lookup parses untrusted wire-format responses.
 
+### Fixed
+
+- **`send_a2a_message(endpoint=..., credentials=...)` now applies the
+  credentials.** With only an endpoint no discovery runs, so the call's record
+  had no `auth_type` and the SDK dropped the supplied credentials silently,
+  sending the request unauthenticated even when the agent card declared HTTP
+  Bearer. The auth type the card declares is now carried into the call, and
+  `AgentClient` logs `sdk.credentials_ignored` when credentials are supplied
+  for an agent with no auth type instead of dropping them without a trace. The
+  card chooses only the auth type; it cannot supply a token URL or other
+  handler configuration (#256).
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed
