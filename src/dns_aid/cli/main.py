@@ -514,7 +514,7 @@ def discover(
     """
     from dns_aid.core.discoverer import _dnssec_check_runs
     from dns_aid.core.discoverer import discover as do_discover
-    from dns_aid.core.models import CATALOG_ENDPOINT_SOURCES
+    from dns_aid.core.models import CATALOG_ENDPOINT_SOURCES, DNSSECError
 
     # Human-readable status header — suppressed in --json mode so stdout stays
     # a single machine-parseable JSON document.
@@ -549,6 +549,18 @@ def discover(
     except ValueError as exc:
         error_console.print(f"[red]Invalid filter combination:[/red] {exc}")
         raise typer.Exit(code=64) from exc
+    except DNSSECError as exc:
+        # --require-dnssec refused one or more agents. A policy failure, not a
+        # crash: report it like the other CLI errors instead of a traceback.
+        if json_output:
+            import json
+
+            error_console.print_json(
+                json.dumps({"error": {"class": "DNSSECError", "message": str(exc)}})
+            )
+        else:
+            error_console.print(f"[red]DNSSEC validation failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
 
     if json_output:
         import json

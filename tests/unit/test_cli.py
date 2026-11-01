@@ -162,6 +162,37 @@ class TestDiscoverCommand:
         assert result.exit_code == 0
         assert "HTTP index" in result.output
 
+    @patch("dns_aid.cli.main.run_async")
+    def test_discover_require_dnssec_refusal_is_clean_error(self, mock_run_async):
+        from dns_aid.core.models import DNSSECError
+
+        mock_run_async.side_effect = DNSSECError(
+            "DNSSEC validation required but the following agent FQDNs were not "
+            "authenticated (AD flag not set): ['chat.example.com']"
+        )
+
+        result = runner.invoke(app, ["discover", "example.com", "--require-dnssec"])
+        assert result.exit_code == 1
+        output = _strip_ansi(result.output)
+        assert "DNSSEC validation failed:" in output
+        assert "chat.example.com" in output
+        assert "Traceback" not in output
+
+    @patch("dns_aid.cli.main.run_async")
+    def test_discover_require_dnssec_refusal_json(self, mock_run_async):
+        import json
+
+        from dns_aid.core.models import DNSSECError
+
+        mock_run_async.side_effect = DNSSECError("AD flag not set: ['chat.example.com']")
+
+        result = runner.invoke(app, ["discover", "example.com", "--require-dnssec", "--json"])
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        payload = json.loads(_strip_ansi(result.output))
+        assert payload["error"]["class"] == "DNSSECError"
+        assert "chat.example.com" in payload["error"]["message"]
+
 
 class TestVerifyCommand:
     """Test verify CLI command."""
