@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from dns_aid.backends._ownership import svcb_text_is_replaced
 from dns_aid.backends.base import DNSBackend
 
 if TYPE_CHECKING:
@@ -169,6 +170,24 @@ class Route53Backend(DNSBackend):
         else:
             return f"{priority} {target}"
 
+    def _existing_values(self, zone_id: str, fqdn: str, record_type: str) -> list[str]:
+        """Values of the RRset at ``fqdn`` (trailing dot) or ``[]`` if absent."""
+        client = self._get_client()
+        response = client.list_resource_record_sets(
+            HostedZoneId=zone_id,
+            StartRecordName=fqdn,
+            StartRecordType=record_type,  # type: ignore[arg-type]
+            MaxItems="1",
+        )
+        record_sets = response.get("ResourceRecordSets", [])
+        if not record_sets:
+            return []
+        record = record_sets[0]
+        name = str(record.get("Name", ""))
+        if name.lower() != fqdn.lower() or record.get("Type") != record_type:
+            return []
+        return [rr["Value"] for rr in record.get("ResourceRecords", [])]
+
     async def create_svcb_record(
         self,
         zone: str,
@@ -199,6 +218,16 @@ class Route53Backend(DNSBackend):
             ttl=ttl,
         )
 
+        # A Route 53 UPSERT replaces the whole RRset, so carry over the
+        # existing RRs this write does not own: the SVCB records for other
+        # agent protocols at the same owner (draft-02 §3.1.1, issue #246)
+        # and other publishers' records.
+        kept = [
+            v
+            for v in self._existing_values(zone_id, fqdn, "SVCB")
+            if v != svcb_value and not svcb_text_is_replaced(v, priority, params)
+        ]
+
         # Create change batch
         change_batch = {
             "Comment": f"DNS-AID: Create SVCB record for {name}",
@@ -209,7 +238,7 @@ class Route53Backend(DNSBackend):
                         "Name": fqdn,
                         "Type": "SVCB",
                         "TTL": ttl,
-                        "ResourceRecords": [{"Value": svcb_value}],
+                        "ResourceRecords": [{"Value": v} for v in [*kept, svcb_value]],
                     },
                 }
             ],

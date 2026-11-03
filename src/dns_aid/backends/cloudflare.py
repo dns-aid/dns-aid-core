@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
 import structlog
 
+from dns_aid.backends._ownership import svcb_text_is_replaced
 from dns_aid.backends.base import DNSBackend
 
 logger = structlog.get_logger(__name__)
@@ -359,6 +360,7 @@ class CloudflareBackend(DNSBackend):
         zone_id: str,
         fqdn: str,
         record_type: str,
+        match: Callable[[dict[str, Any]], bool] | None = None,
     ) -> str | None:
         """
         Get record ID for a specific record.
@@ -367,6 +369,10 @@ class CloudflareBackend(DNSBackend):
             zone_id: Cloudflare zone ID
             fqdn: Fully qualified domain name
             record_type: DNS record type (SVCB, TXT, etc.)
+            match: Optional predicate over the API record dict. When given,
+                only a record it accepts is returned, so a write can update
+                the RR it owns instead of whichever record at the name the
+                API lists first.
 
         Returns:
             Record ID if found, None otherwise
@@ -380,8 +386,9 @@ class CloudflareBackend(DNSBackend):
         data = response.json()
 
         records = data.get("result", [])
-        if records:
-            return records[0]["id"]
+        for record in records:
+            if match is None or match(record):
+                return record["id"]
         return None
 
     def _format_svcb_data(
@@ -542,8 +549,21 @@ class CloudflareBackend(DNSBackend):
             ttl=ttl,
         )
 
-        # Check if record exists (for update)
-        existing_id = await self._get_record_id(zone_id, fqdn, "SVCB")
+        # Update the RR for the same agent protocol if there is one, else add
+        # a sibling. Cloudflare keeps one API record per RR, and the first
+        # record at the name may belong to another protocol or publisher
+        # (draft-02 §3.1.1, issue #246).
+        def _same_protocol(record: dict[str, Any]) -> bool:
+            data = record.get("data")
+            if isinstance(data, dict):
+                text = (
+                    f"{data.get('priority', '')} {data.get('target', '.')} {data.get('value', '')}"
+                )
+            else:
+                text = str(record.get("content") or "")
+            return svcb_text_is_replaced(text, priority, params)
+
+        existing_id = await self._get_record_id(zone_id, fqdn, "SVCB", match=_same_protocol)
 
         # Prepare request data
         svcb_data = self._format_svcb_data(priority, target, params)

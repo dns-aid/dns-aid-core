@@ -14,6 +14,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+from dns_aid.backends._ownership import svcb_rr_is_replaced
 from dns_aid.backends.base import DNSBackend
 from dns_aid.core.models import SVCB_ALIAS_MODE, SVCB_SERVICE_MODE
 
@@ -80,8 +81,15 @@ class MockBackend(DNSBackend):
             "ttl": ttl,
         }
 
-        # Replace existing or add new
-        self.records[zone][name]["SVCB"] = [record]
+        # Replace the RR for the same agent protocol, keep the others
+        # (draft-02 §3.1.1: one SVCB record per protocol at the owner).
+        existing = self.records[zone][name].get("SVCB", [])
+        kept = [
+            r
+            for r in existing
+            if not svcb_rr_is_replaced(r.get("priority", 1), r.get("params", {}), priority, params)
+        ]
+        self.records[zone][name]["SVCB"] = [*kept, record]
 
         return fqdn
 
@@ -194,12 +202,13 @@ class MockBackend(DNSBackend):
 
             # Format values based on record type
             if record_type == "SVCB":
-                # Format as "priority target params..."
-                priority = record.get("priority", 1)
-                target = record.get("target", "")
-                params = record.get("params", {})
-                param_str = " ".join(f'{k}="{v}"' for k, v in params.items())
-                values = [f"{priority} {target} {param_str}".strip()]
+                # Format each RR as "priority target params..."
+                values = []
+                for rr in records:
+                    param_str = " ".join(f'{k}="{v}"' for k, v in rr.get("params", {}).items())
+                    values.append(
+                        f"{rr.get('priority', 1)} {rr.get('target', '')} {param_str}".strip()
+                    )
             elif record_type == "TXT":
                 values = record.get("values", [])
             else:

@@ -17,14 +17,17 @@ import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import dns.message
 import dns.name
 import dns.query
+import dns.rcode
 import dns.rdatatype
 import dns.resolver
 import dns.tsigkeyring
 import dns.update
 import structlog
 
+from dns_aid.backends._ownership import svcb_text_is_replaced
 from dns_aid.backends.base import DNSBackend
 
 logger = structlog.get_logger(__name__)
@@ -199,6 +202,36 @@ class DDNSBackend(DNSBackend):
         params_str = " ".join(param_parts)
         return f"{priority} {target} {params_str}"
 
+    def _existing_rdatas(self, fqdn: str, rdtype: dns.rdatatype.RdataType) -> list:
+        """Read the RRset at ``fqdn`` from the configured primary (over TCP).
+
+        The primary is the server the update goes to, so this sees the same
+        data the update will apply against, not a cached resolver view.
+        Returns ``[]`` when the owner or type does not exist. Raises
+        ``RuntimeError`` when the primary cannot be queried: without the
+        current RRset we cannot tell our RRs from other publishers' RRs.
+        """
+        query = dns.message.make_query(fqdn, rdtype)
+        try:
+            response = dns.query.tcp(query, self.server, port=self.port, timeout=self.timeout)
+        except Exception as e:
+            raise RuntimeError(
+                f"DDNS update failed: could not read the existing records at {fqdn}: {e}"
+            ) from e
+        rcode = response.rcode()
+        if rcode == dns.rcode.NXDOMAIN:
+            return []
+        if rcode != dns.rcode.NOERROR:
+            raise RuntimeError(
+                "DDNS update failed: could not read the existing records at "
+                f"{fqdn}: {dns.rcode.to_text(rcode)}"
+            )
+        qname = dns.name.from_text(fqdn)
+        for rrset in response.answer:
+            if rrset.name == qname and rrset.rdtype == rdtype:
+                return list(rrset)
+        return []
+
     async def create_svcb_record(
         self,
         zone: str,
@@ -227,8 +260,14 @@ class DDNSBackend(DNSBackend):
         # Create update message
         update = dns.update.Update(zone, keyring=self._keyring, keyalgorithm=self._algorithm)
 
-        # Delete any existing SVCB records for this name, then add new one
-        update.delete(name, dns.rdatatype.SVCB)
+        # Replace only the SVCB RR for the same agent protocol (and any
+        # AliasMode RR). draft-02 §3.1.1 keeps one record per protocol in
+        # the RRset, and other publishers' records at the owner stay put.
+        # Deleting the whole RRset here made a second-protocol publish
+        # replace the first (issue #246).
+        for existing in self._existing_rdatas(fqdn, dns.rdatatype.SVCB):
+            if svcb_text_is_replaced(existing.to_text(), priority, params):
+                update.delete(name, existing)
         update.add(name, ttl, dns.rdatatype.SVCB, rdata)
 
         # Send update
