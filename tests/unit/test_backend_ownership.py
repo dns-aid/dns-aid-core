@@ -1,7 +1,9 @@
 # Copyright 2024-2026 The DNS-AID Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Backends replace only the SVCB RR they own at a shared owner (issue #246).
+"""Backends replace only the SVCB / TXT RRs they own at a shared owner.
+
+Issue #246 (SVCB siblings) and the lab finding F3 (foreign TXT).
 
 draft-02 §3.1.1 keeps one SVCB record per agent protocol at the flat owner,
 and other DNS-based discovery publishers may write SVCB records at the same
@@ -24,6 +26,9 @@ from dns_aid.backends._ownership import (
     svcb_identity,
     svcb_rr_is_replaced,
     svcb_text_is_replaced,
+    txt_key,
+    txt_rr_is_replaced,
+    txt_strings,
 )
 from dns_aid.backends.cloudflare import CloudflareBackend
 from dns_aid.backends.ddns import DDNSBackend
@@ -412,3 +417,162 @@ class TestMockSvcbSiblings:
         assert len(svcb) == 2
         a2a = next(r for r in svcb if r["params"]["alpn"] == "a2a")
         assert a2a["params"]["port"] == "8443"
+
+
+# ---------------------------------------------------------------------------
+# TXT: replace only DNS-AID's own TXT RRs (findings F3, issue #247 context)
+# ---------------------------------------------------------------------------
+
+DNSAID_TXT = ["capabilities=chat", "version=1.0.0"]
+COMMON_TXT = '"txtvers=1" "proto=a2a" "path=/a2a"'
+
+
+class TestTxtReplacePredicate:
+    def test_txt_key(self):
+        assert txt_key("Capabilities=chat") == "capabilities"
+        assert txt_key("bare") == "bare"
+
+    @pytest.mark.parametrize(
+        "first",
+        [
+            "capabilities=a,b",
+            "version=1.0.0",
+            "description=x",
+            "use_cases=a",
+            "category=c",
+            "dnsaid_key65402=webmcp",
+        ],
+    )
+    def test_dnsaid_keys_replaced(self, first):
+        assert txt_rr_is_replaced([first], DNSAID_TXT)
+
+    def test_foreign_txt_kept(self):
+        assert not txt_rr_is_replaced(["txtvers=1", "proto=a2a"], DNSAID_TXT)
+        assert not txt_rr_is_replaced(["v=spf1 -all"], DNSAID_TXT)
+
+    def test_only_first_string_decides(self):
+        # A foreign RR that happens to carry version= later is still foreign.
+        assert not txt_rr_is_replaced(["txtvers=1", "version=2"], DNSAID_TXT)
+
+    def test_key_written_by_this_call_replaced(self):
+        # The index TXT writes agents=...; its previous value must go.
+        assert txt_rr_is_replaced(["agents=a:mcp"], ["agents=a:mcp,b:a2a"])
+        assert not txt_rr_is_replaced(["agents=a:mcp"], DNSAID_TXT)
+
+    def test_empty_rr_kept(self):
+        assert not txt_rr_is_replaced([], DNSAID_TXT)
+
+    def test_txt_strings(self):
+        assert txt_strings(COMMON_TXT) == ["txtvers=1", "proto=a2a", "path=/a2a"]
+        assert txt_strings('"capabilities=chat"') == ["capabilities=chat"]
+
+
+def _txt_response(fqdn: str, *rdatas: str) -> dns.message.Message:
+    query = dns.message.make_query(fqdn, "TXT")
+    response = dns.message.make_response(query)
+    if rdatas:
+        response.answer.append(dns.rrset.from_text(f"{fqdn}.", 300, "IN", "TXT", *rdatas))
+    return response
+
+
+class TestDDNSTxtOwnership:
+    @pytest.mark.asyncio
+    async def test_publish_keeps_common_params_txt(self):
+        backend = DDNSBackend(server="192.0.2.53", key_name="k", key_secret="c2VjcmV0")
+        existing = _txt_response(
+            "agent.example.com",
+            COMMON_TXT,
+            '"capabilities=old"',
+            '"version=0.9"',
+            '"description=gone"',
+        )
+        sent: list[dns.message.Message] = []
+
+        def fake_tcp(msg, *args, **kwargs):
+            sent.append(msg)
+            return existing if len(sent) == 1 else _noerror()
+
+        with patch("dns.query.tcp", side_effect=fake_tcp):
+            await backend.create_txt_record(
+                zone="example.com", name="agent", values=["capabilities=new", "version=1.0.0"]
+            )
+
+        deleted, added = _update_sections(sent[1])
+        assert sorted(deleted) == ['"capabilities=old"', '"description=gone"', '"version=0.9"']
+        assert "ANY TXT" not in deleted
+        assert sorted(added) == ['"capabilities=new"', '"version=1.0.0"']
+
+
+class TestRoute53TxtOwnership:
+    @pytest.mark.asyncio
+    async def test_upsert_carries_foreign_txt(self):
+        backend = Route53Backend(zone_id="Z123")
+        client = MagicMock()
+        client.list_resource_record_sets.return_value = {
+            "ResourceRecordSets": [
+                {
+                    "Name": "agent.example.com.",
+                    "Type": "TXT",
+                    "TTL": 300,
+                    "ResourceRecords": [
+                        {"Value": COMMON_TXT},
+                        {"Value": '"capabilities=old"'},
+                        {"Value": '"version=1.0.0"'},
+                    ],
+                }
+            ]
+        }
+        client.change_resource_record_sets.return_value = {"ChangeInfo": {"Id": "/change/C1"}}
+        with patch.object(backend, "_get_client", return_value=client):
+            await backend.create_txt_record(
+                zone="example.com", name="agent", values=["capabilities=new", "version=1.0.0"]
+            )
+        batch = client.change_resource_record_sets.call_args.kwargs["ChangeBatch"]
+        values = [rr["Value"] for rr in batch["Changes"][0]["ResourceRecordSet"]["ResourceRecords"]]
+        assert values == [COMMON_TXT, '"capabilities=new"', '"version=1.0.0"']
+
+
+class TestCloudflareTxtOwnership:
+    @pytest.mark.asyncio
+    async def test_foreign_txt_listed_first_is_not_overwritten(self):
+        backend = CloudflareBackend(api_token="t", zone_id="Z1")
+        client = TestCloudflareSvcbSiblings()._client(
+            [
+                {"id": "common", "content": COMMON_TXT},
+                {"id": "ours", "content": '"capabilities=old" "version=1.0.0"'},
+            ]
+        )
+        with patch.object(backend, "_get_client", return_value=client):
+            await backend.create_txt_record(
+                zone="example.com", name="agent", values=["capabilities=new", "version=1.0.0"]
+            )
+        client.post.assert_not_called()
+        assert client.put.call_args.args[0].endswith("/dns_records/ours")
+
+    @pytest.mark.asyncio
+    async def test_only_foreign_txt_adds_new_record(self):
+        backend = CloudflareBackend(api_token="t", zone_id="Z1")
+        client = TestCloudflareSvcbSiblings()._client([{"id": "common", "content": COMMON_TXT}])
+        with patch.object(backend, "_get_client", return_value=client):
+            await backend.create_txt_record(
+                zone="example.com", name="agent", values=["capabilities=new"]
+            )
+        client.put.assert_not_called()
+        client.post.assert_called_once()
+
+
+class TestMockTxtOwnership:
+    @pytest.mark.asyncio
+    async def test_foreign_txt_kept_across_publishes(self):
+        backend = MockBackend()
+        backend.records["example.com"]["agent"]["TXT"] = [
+            {"values": ["txtvers=1", "proto=a2a"], "ttl": 300}
+        ]
+        await backend.create_txt_record("example.com", "agent", ["capabilities=a", "version=1"])
+        await backend.create_txt_record("example.com", "agent", ["capabilities=b", "version=1"])
+        txt = backend.records["example.com"]["agent"]["TXT"]
+        assert [r["values"] for r in txt] == [
+            ["capabilities=b", "version=1"],
+            ["txtvers=1", "proto=a2a"],
+        ]
+        assert backend.get_txt_record("example.com", "agent") == ["capabilities=b", "version=1"]

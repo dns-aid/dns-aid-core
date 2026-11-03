@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 import structlog
 
-from dns_aid.backends._ownership import svcb_text_is_replaced
+from dns_aid.backends._ownership import svcb_text_is_replaced, txt_rr_is_replaced, txt_strings
 from dns_aid.backends.base import DNSBackend
 
 logger = structlog.get_logger(__name__)
@@ -598,8 +598,13 @@ class CloudflareBackend(DNSBackend):
             ttl=ttl,
         )
 
-        # Check if record exists (for update)
-        existing_id = await self._get_record_id(zone_id, fqdn, "TXT")
+        # Update the TXT record DNS-AID owns, if any, else add one. Another
+        # publisher's TXT at the same owner (e.g. "txtvers=1" "proto=a2a")
+        # may be listed first and must not be overwritten.
+        def _owned(record: dict[str, Any]) -> bool:
+            return txt_rr_is_replaced(txt_strings(str(record.get("content") or "")), values)
+
+        existing_id = await self._get_record_id(zone_id, fqdn, "TXT", match=_owned)
 
         # Each value must be its own RFC 1035 <character-string>. Cloudflare's
         # "content" field is DNS presentation format, so we wrap each value in

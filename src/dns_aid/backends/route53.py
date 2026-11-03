@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from dns_aid.backends._ownership import svcb_text_is_replaced
+from dns_aid.backends._ownership import svcb_text_is_replaced, txt_rr_is_replaced, txt_strings
 from dns_aid.backends.base import DNSBackend
 
 if TYPE_CHECKING:
@@ -272,7 +272,15 @@ class Route53Backend(DNSBackend):
             fqdn = f"{fqdn}."
 
         # TXT records need quoted values
-        txt_values = [{"Value": f'"{v}"'} for v in values]
+        new_values = [f'"{v}"' for v in values]
+        # A Route 53 UPSERT replaces the whole RRset, so carry over TXT RRs
+        # DNS-AID does not own (other publishers' records at the owner).
+        kept = [
+            v
+            for v in self._existing_values(zone_id, fqdn, "TXT")
+            if v not in new_values and not txt_rr_is_replaced(txt_strings(v), values)
+        ]
+        txt_values = [{"Value": v} for v in [*kept, *new_values]]
 
         logger.info(
             "Creating TXT record",
