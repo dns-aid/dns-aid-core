@@ -41,6 +41,7 @@ import dns.resolver
 import structlog
 from pydantic import BaseModel, Field
 
+from dns_aid.core.resolver import make_resolver
 from dns_aid.utils.validation import (
     validate_agent_name,
     validate_domain,
@@ -358,7 +359,7 @@ async def verify(
         require_dnssec=require_dnssec,
     )
 
-    resolver = dns.asyncresolver.Resolver()
+    resolver = make_resolver()
     resolver.cache = None  # bypass OS-level DNS cache; stale positives survive revoke
     resolver.lifetime = 4.0
     if require_dnssec:
