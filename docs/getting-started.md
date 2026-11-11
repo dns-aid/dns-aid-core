@@ -53,6 +53,7 @@ pip install -e ".[infoblox]"    # Core + Infoblox BloxOne backend
 pip install -e ".[nios]"        # Core + Infoblox NIOS (on-prem) backend
 pip install -e ".[akamai-edgedns]" # Core + Akamai Edge DNS backend
 pip install -e ".[ddns]"        # Core + RFC 2136 Dynamic DNS backend
+pip install -e ".[dnsimple]"    # Core + DNSimple backend
 pip install -e ".[cel]"         # Core + CEL custom policy rules
 ```
 
@@ -780,6 +781,77 @@ backend = NS1Backend(
 - **REST API v1**: well-documented, stable API with PUT/POST upsert semantics
 - **Enterprise features**: traffic steering, DNS analytics, DNSSEC
 - **IBM backing**: enterprise support, SOC2 compliance
+
+## DNSimple Setup
+
+DNSimple is a managed DNS provider with a REST API (v2). DNSimple accepts RFC 9460 private-use SVCB keys natively, so DNS-AID custom parameters (cap_uri, policy_uri, realm) go directly into the SVCB record without TXT demotion.
+
+### 1. Get an API Access Token
+
+1. Log in to [DNSimple](https://dnsimple.com)
+2. Go to **Account → Automation → API access tokens**
+3. Create an **account** access token
+4. Copy the token
+
+A user access token also works, but then you must set `DNSIMPLE_ACCOUNT_ID`. See [API access tokens](https://support.dnsimple.com/articles/api-access-token/).
+
+### 2. Configure Credentials
+
+```bash
+# Required
+export DNSIMPLE_TOKEN="your-api-token-here"
+
+# Optional — found from an account token if not set
+# export DNSIMPLE_ACCOUNT_ID="12345"
+
+# Optional — use the DNSimple sandbox
+# export DNSIMPLE_BASE_URL="https://api.sandbox.dnsimple.com"
+```
+
+### 3. Verify Setup
+
+```bash
+dns-aid doctor
+# Should show: ✓ DNSimple  credentials configured
+```
+
+### 4. Publish Your First Agent
+
+```bash
+dns-aid publish \
+  --name billing \
+  --domain your-zone.example \
+  --protocol mcp \
+  --endpoint mcp.your-zone.example \
+  --capability invoicing \
+  --capability payments \
+  --backend dnsimple
+
+dns-aid list your-zone.example --backend dnsimple
+```
+
+### 5. Use in Python
+
+```python
+from dns_aid.backends.dnsimple import DNSimpleBackend
+
+backend = DNSimpleBackend()  # reads DNSIMPLE_TOKEN from env
+
+# Or with explicit configuration
+backend = DNSimpleBackend(
+    token="your-api-token",
+    account_id="12345",                  # optional
+    base_url="https://api.dnsimple.com",  # default
+)
+```
+
+### DNSimple Notes
+
+- **Native private-use SVCB keys**: cap_uri, policy_uri, realm go directly into SVCB — single-record agent discovery
+- **SVCB target**: the API refuses a target with a trailing dot. The backend removes it before it sends the record.
+- **SVCB param values**: the API cannot keep a param value with a double quote (`"`) or a backslash (`\`). The backend refuses such a value before it sends a request.
+- **Replace**: the API has no atomic replace. The backend keeps equal records, updates the other records in place, and creates and deletes records as the last steps. If a request fails, the backend undoes its changes and raises the error.
+- **TXT**: each TXT value is a separate API record. The API adds the quotes.
 
 ## End-to-End Test
 
@@ -1766,7 +1838,7 @@ python examples/demo_full.py
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DNS_AID_BACKEND` | Yes (if no `backend=` arg) | — | DNS backend: `route53`, `cloudflare`, `ns1`, `infoblox`, `nios`, `akamai-edgedns`, `ddns`, `mock` |
+| `DNS_AID_BACKEND` | Yes (if no `backend=` arg) | — | DNS backend: `route53`, `cloudflare`, `ns1`, `infoblox`, `nios`, `akamai-edgedns`, `ddns`, `dnsimple`, `mock` |
 | `DNS_AID_SVCB_STRING_KEYS` | No | `0` | Set `1` to emit human-readable SVCB param names instead of keyNNNNN |
 | `DNS_AID_FETCH_ALLOWLIST` | No | — | Comma-separated hostnames to bypass SSRF protection (testing only) |
 
@@ -1793,6 +1865,9 @@ python examples/demo_full.py
 | `NIOS_DNS_VIEW` | nios | DNS view name (default: `default`) |
 | `NIOS_WAPI_VERSION` | nios | WAPI version (default: `2.13.7`) |
 | `NIOS_VERIFY_SSL` | nios | Verify TLS certificate (default: `false`) |
+| `DNSIMPLE_TOKEN` | dnsimple | DNSimple API access token |
+| `DNSIMPLE_ACCOUNT_ID` | dnsimple | Account ID (found from an account token if not set) |
+| `DNSIMPLE_BASE_URL` | dnsimple | API base URL (default: `https://api.dnsimple.com`) |
 
 ## Experimental Models
 

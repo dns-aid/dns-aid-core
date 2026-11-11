@@ -1,7 +1,7 @@
 # Copyright 2024-2026 The DNS-AID Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""DNS backend implementations: Route53, Cloudflare, Cloud DNS, NS1, Infoblox BloxOne, Akamai EdgeDNS, DDNS, Mock."""
+"""DNS backend implementations: Route53, Cloudflare, Cloud DNS, NS1, Infoblox BloxOne, Akamai EdgeDNS, DDNS, DNSimple, Mock."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ _BACKEND_CLASSES: dict[str, tuple[str, str]] = {
     "nios": ("dns_aid.backends.infoblox.nios", "InfobloxNIOSBackend"),
     "akamai-edgedns": ("dns_aid.backends.akamai_edgedns", "AkamaiEdgeDNSBackend"),
     "ddns": ("dns_aid.backends.ddns", "DDNSBackend"),
+    "dnsimple": ("dns_aid.backends.dnsimple", "DNSimpleBackend"),
     "mock": ("dns_aid.backends.mock", "MockBackend"),
 }
 
@@ -110,6 +111,14 @@ try:
     from dns_aid.backends.ns1 import NS1Backend  # noqa: F401
 
     __all__.append("NS1Backend")
+except ImportError:
+    pass
+
+# DNSimple backend - uses httpx (already a core dep)
+try:
+    from dns_aid.backends.dnsimple import DNSimpleBackend  # noqa: F401
+
+    __all__.append("DNSimpleBackend")
 except ImportError:
     pass
 

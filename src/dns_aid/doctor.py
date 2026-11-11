@@ -233,7 +233,7 @@ def _check_backends() -> list[CheckResult]:
             try:
                 if name == "route53":
                     importlib.import_module("boto3")
-                elif name in ("cloudflare", "infoblox", "nios"):
+                elif name in ("cloudflare", "infoblox", "nios", "dnsimple"):
                     importlib.import_module("httpx")
                 elif name == "ddns":
                     importlib.import_module("dns.update")
