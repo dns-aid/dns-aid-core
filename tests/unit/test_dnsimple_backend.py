@@ -844,7 +844,7 @@ class TestDNSimpleBackendCreateSVCB:
         backend = _make_backend()
         mock_client, events = _make_client(
             pages=[_records_page([_record(11, content='1 old.example.com alpn="mcp"')])],
-            patch_responses=[_status_response(429)],
+            patch_responses=[_status_response(422)],
         )
 
         with (
@@ -1040,7 +1040,7 @@ class TestDNSimpleBackendCreateTXT:
         backend = _make_backend()
         mock_client, events = _make_client(
             pages=[_records_page([_record(31, rtype="TXT", content='"a=1"')])],
-            post_responses=[_status_response(429)],
+            post_responses=[_status_response(422)],
             delete_responses=[],
             patch_responses=[_status_response(200, {"id": 31}), _status_response(500)],
         )
@@ -1053,7 +1053,7 @@ class TestDNSimpleBackendCreateTXT:
                 zone="example.com", name="chat", values=["b=2", "c=3"], ttl=3600
             )
 
-        assert exc_info.value.response.status_code == 429
+        assert exc_info.value.response.status_code == 422
         assert len(_patches(events)) == 2
 
     @pytest.mark.asyncio
@@ -1123,7 +1123,7 @@ class TestDNSimpleBackendCreateTXT:
         backend = _make_backend()
         mock_client, events = _make_client(
             pages=[_records_page([_record(31, rtype="TXT", content='"a=1"')])],
-            post_responses=[_status_response(201, {"id": 901}), _status_response(429)],
+            post_responses=[_status_response(201, {"id": 901}), _status_response(422)],
             delete_responses=[_status_response(undo_status)],
         )
 
@@ -1135,7 +1135,7 @@ class TestDNSimpleBackendCreateTXT:
                 zone="example.com", name="chat", values=["b=2", "c=3", "d=4"], ttl=3600
             )
 
-        assert exc_info.value.response.status_code == 429
+        assert exc_info.value.response.status_code == 422
         assert _deletes(events) == [("DELETE", f"{RECORDS_PATH}/901")]
         assert _patches(events)[-1] == (
             "PATCH",
@@ -1158,7 +1158,7 @@ class TestDNSimpleBackendCreateTXT:
                 )
             ],
             delete_responses=[_status_response(204), _status_response(500)],
-            post_responses=[_status_response(429)],
+            post_responses=[_status_response(422)],
         )
 
         with (
@@ -1683,6 +1683,130 @@ class TestDNSimpleBackendGetRecord:
             await backend.get_record(
                 zone="example.com", name="_chat._mcp._agents", record_type="SVCB"
             )
+
+
+def _rate_limited_response(reset_at: int) -> MagicMock:
+    """Make a mock 429 response with the DNSimple rate-limit headers."""
+    mock_response = _status_response(429)
+    mock_response.headers = httpx.Headers(
+        {
+            "X-RateLimit-Limit": "2400",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": str(reset_at),
+        }
+    )
+    return mock_response
+
+
+class TestDNSimpleBackendRateLimit:
+    """Tests for the handling of DNSimple rate limits (HTTP 429)."""
+
+    @pytest.mark.asyncio
+    async def test_create_svcb_retries_after_single_429(self):
+        """Test that a single 429 does not make the publish fail.
+
+        DNSimple sends X-RateLimit-Reset with a 429. The backend must wait
+        and send the request again. It must not raise the error and undo
+        the changes.
+        """
+        import time
+
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            post_responses=[
+                _rate_limited_response(int(time.time())),
+                _status_response(201, {"id": 900}),
+            ],
+        )
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            fqdn = await backend.create_svcb_record(
+                zone="example.com",
+                name="chat",
+                priority=1,
+                target="chat.example.com.",
+                params={"alpn": "mcp", "port": "443"},
+                ttl=300,
+            )
+
+        assert fqdn == "chat.example.com"
+        content = '1 chat.example.com alpn="mcp" port="443"'
+        expected_post = (
+            "POST",
+            RECORDS_PATH,
+            {"name": "chat", "type": "SVCB", "content": content, "ttl": 300},
+        )
+        assert _posts(events) == [expected_post, expected_post]
+        assert _deletes(events) == []
+
+    @pytest.mark.asyncio
+    async def test_waits_until_rate_limit_reset(self):
+        """Test that the backend waits until the time in X-RateLimit-Reset."""
+        backend = _make_backend()
+        now = 1_800_000_000.0
+        mock_client, events = _make_client(
+            post_responses=[_rate_limited_response(int(now) + 5)],
+        )
+        sleep = AsyncMock()
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch("dns_aid.backends.dnsimple.time.time", return_value=now),
+            patch("asyncio.sleep", new=sleep),
+        ):
+            await backend.create_txt_record(zone="example.com", name="chat", values=["a=1"])
+
+        sleep.assert_awaited_once_with(5.0)
+        assert len(_posts(events)) == 2
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_when_reset_is_too_late(self):
+        """Test that a 429 is raised at once when the window resets too late.
+
+        A retry before the reset time also gets a 429.
+        """
+        backend = _make_backend()
+        now = 1_800_000_000.0
+        mock_client, events = _make_client(
+            post_responses=[_rate_limited_response(int(now) + 3600)],
+        )
+        sleep = AsyncMock()
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch("dns_aid.backends.dnsimple.time.time", return_value=now),
+            patch("asyncio.sleep", new=sleep),
+            pytest.raises(httpx.HTTPStatusError) as exc_info,
+        ):
+            await backend.create_txt_record(zone="example.com", name="chat", values=["a=1"])
+
+        assert exc_info.value.response.status_code == 429
+        sleep.assert_not_awaited()
+        assert len(_posts(events)) == 1
+
+    @pytest.mark.asyncio
+    async def test_raises_429_after_max_retries_with_backoff(self):
+        """Test exponential backoff without X-RateLimit-Reset, then the 429 is raised."""
+        backend = _make_backend()
+        responses = [_status_response(429) for _ in range(4)]
+        for response in responses:
+            response.headers = httpx.Headers()
+        mock_client, events = _make_client(post_responses=responses)
+        sleep = AsyncMock()
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            patch("asyncio.sleep", new=sleep),
+            pytest.raises(httpx.HTTPStatusError) as exc_info,
+        ):
+            await backend.create_txt_record(zone="example.com", name="chat", values=["a=1"])
+
+        assert exc_info.value.response.status_code == 429
+        assert [c.args[0] for c in sleep.await_args_list] == [1.0, 2.0, 4.0]
+        assert len(_posts(events)) == 4
 
 
 class TestDNSimpleBackendFactoryWiring:

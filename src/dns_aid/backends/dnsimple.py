@@ -10,8 +10,11 @@ Uses the DNSimple API v2 with an API access token.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 import structlog
@@ -23,6 +26,18 @@ logger = structlog.get_logger(__name__)
 DEFAULT_BASE_URL = "https://api.dnsimple.com"
 """DNSimple API base URL.  Override via ``DNSIMPLE_BASE_URL`` env var to use
 the sandbox environment (https://api.sandbox.dnsimple.com)."""
+
+# DNSimple rate limits: the API counts requests in a time window. A response
+# with HTTP 429 tells that the limit is reached. The X-RateLimit-Reset header
+# gives the time (Unix epoch seconds) when the window starts again. All API
+# requests go through ``_request``, thus a 429 causes a retry everywhere. The
+# backend waits until X-RateLimit-Reset. If the header is missing or not
+# usable, the backend uses exponential backoff that starts at
+# ``_RETRY_BASE_DELAY``. If the wait is longer than ``_MAX_RETRY_DELAY``,
+# the backend does not retry, because a retry in the same window also fails.
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0
+_MAX_RETRY_DELAY = 30.0
 
 
 def _decode_txt_content(content: str) -> str:
@@ -124,8 +139,6 @@ class DNSimpleBackend(DNSBackend):
         Recreates client if the event loop has changed (e.g., when CLI
         uses multiple asyncio.run() calls).
         """
-        import asyncio
-
         current_loop_id = id(asyncio.get_running_loop())
 
         if self._client is not None and self._client_loop_id != current_loop_id:
@@ -157,6 +170,64 @@ class DNSimpleBackend(DNSBackend):
             self._client_loop_id = current_loop_id
         return self._client
 
+    @staticmethod
+    def _rate_limit_wait(response: httpx.Response) -> float | None:
+        """
+        Return the number of seconds until the rate-limit window starts again.
+
+        Use the X-RateLimit-Reset header (Unix epoch seconds). If the header
+        is missing or not usable, return None.
+        """
+        raw = response.headers.get("X-RateLimit-Reset")
+        if raw is None:
+            return None
+        try:
+            return max(0.0, float(raw) - time.time())
+        except (TypeError, ValueError):
+            return None
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """
+        Send an API request. Retry the request if the response is HTTP 429.
+
+        Wait until the time in X-RateLimit-Reset before a retry. If that
+        header is not usable, use exponential backoff. Do a maximum of
+        ``_MAX_RETRIES`` retries. Do not retry if the wait is longer than
+        ``_MAX_RETRY_DELAY``. If the limit continues, return the last 429
+        response, so that ``raise_for_status`` at the caller raises the error.
+        """
+        client = await self._get_client()
+        send = getattr(client, method.lower())
+        delay = _RETRY_BASE_DELAY
+
+        response = await send(path, **kwargs)
+        for attempt in range(_MAX_RETRIES):
+            if response.status_code != 429:
+                return response
+            wait = self._rate_limit_wait(response)
+            if wait is None:
+                wait = delay
+                delay = min(delay * 2, _MAX_RETRY_DELAY)
+            elif wait > _MAX_RETRY_DELAY:
+                logger.warning(
+                    "DNSimple rate limit resets too late; not retrying",
+                    method=method,
+                    path=path,
+                    wait_seconds=wait,
+                )
+                return response
+            logger.warning(
+                "DNSimple rate limited; waiting before retry",
+                method=method,
+                path=path,
+                attempt=attempt + 1,
+                max_retries=_MAX_RETRIES,
+                wait_seconds=wait,
+            )
+            await asyncio.sleep(wait)
+            response = await send(path, **kwargs)
+        return response
+
     async def _get_account_id(self) -> str:
         """
         Get the DNSimple account ID.
@@ -174,8 +245,7 @@ class DNSimpleBackend(DNSBackend):
         if self._account_id:
             return self._account_id
 
-        client = await self._get_client()
-        response = await client.get("/v2/whoami")
+        response = await self._request("GET", "/v2/whoami")
         response.raise_for_status()
 
         account = response.json().get("data", {}).get("account")
@@ -209,9 +279,8 @@ class DNSimpleBackend(DNSBackend):
             return self._zone_cache[domain]
 
         account_id = await self._get_account_id()
-        client = await self._get_client()
 
-        response = await client.get(f"/v2/{account_id}/zones/{domain}")
+        response = await self._request("GET", f"/v2/{account_id}/zones/{domain}")
         if response.status_code == 404:
             raise ValueError(f"No zone found for domain: {zone}")
         response.raise_for_status()
@@ -241,12 +310,13 @@ class DNSimpleBackend(DNSBackend):
             List of DNSimple record dicts
         """
         path = await self._records_path(domain)
-        client = await self._get_client()
 
         records: list[dict] = []
         page = 1
         while True:
-            response = await client.get(path, params={**params, "page": page, "per_page": 100})
+            response = await self._request(
+                "GET", path, params={**params, "page": page, "per_page": 100}
+            )
             if missing_ok and response.status_code == 404:
                 return records
             response.raise_for_status()
@@ -278,10 +348,9 @@ class DNSimpleBackend(DNSBackend):
         A 404 response is not an error: the record is already gone.
         """
         path = await self._records_path(domain)
-        client = await self._get_client()
 
         for record in records:
-            response = await client.delete(f"{path}/{record['id']}")
+            response = await self._request("DELETE", f"{path}/{record['id']}")
             if response.status_code == 404:
                 continue
             response.raise_for_status()
@@ -332,25 +401,25 @@ class DNSimpleBackend(DNSBackend):
         deletes = unmatched[len(remaining) :]
 
         path = await self._records_path(domain)
-        client = await self._get_client()
 
         updated: list[dict] = []
         created: list[dict] = []
         deleted: list[dict] = []
         try:
             for record, payload in updates:
-                response = await client.patch(f"{path}/{record['id']}", json=payload)
+                response = await self._request("PATCH", f"{path}/{record['id']}", json=payload)
                 response.raise_for_status()
                 updated.append(record)
             for content in creates:
-                response = await client.post(
+                response = await self._request(
+                    "POST",
                     path,
                     json={"name": name, "type": record_type, "content": content, "ttl": ttl},
                 )
                 response.raise_for_status()
                 created.append(response.json()["data"])
             for record in deletes:
-                response = await client.delete(f"{path}/{record['id']}")
+                response = await self._request("DELETE", f"{path}/{record['id']}")
                 # A 404 is not an error: the record is already gone. Do not
                 # create it again in the undo.
                 if response.status_code == 404:
@@ -382,11 +451,10 @@ class DNSimpleBackend(DNSBackend):
         that the caller can raise the first error.
         """
         path = await self._records_path(domain)
-        client = await self._get_client()
 
         for record in created:
             try:
-                response = await client.delete(f"{path}/{record['id']}")
+                response = await self._request("DELETE", f"{path}/{record['id']}")
                 if response.status_code != 404:
                     response.raise_for_status()
             except Exception as exc:
@@ -399,7 +467,8 @@ class DNSimpleBackend(DNSBackend):
 
         for record in updated:
             try:
-                response = await client.patch(
+                response = await self._request(
+                    "PATCH",
                     f"{path}/{record['id']}",
                     json={"content": record.get("content"), "ttl": record.get("ttl")},
                 )
@@ -414,7 +483,8 @@ class DNSimpleBackend(DNSBackend):
 
         for record in deleted:
             try:
-                response = await client.post(
+                response = await self._request(
+                    "POST",
                     path,
                     json={
                         "name": record.get("name"),
