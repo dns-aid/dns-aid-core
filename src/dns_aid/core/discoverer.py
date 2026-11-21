@@ -1427,7 +1427,7 @@ async def _process_http_agent(
         return None
 
     # Under draft-02 the flat and walkable FQDN shapes don't carry the
-    # agent protocol. Use the HTTP index's declared primary protocol as
+    # agent protocol. Use the HTTP index's first supported declaration as
     # the probe (or a declared member matching the caller's filter). DNS
     # `bap`/`alpn` still determines the resolved protocol. Only entries
     # without a declaration retain the caller-filter / MCP-A2A fallback.
@@ -1444,18 +1444,19 @@ async def _process_http_agent(
             )
             return None
     elif http_agent.protocols:
-        declared_protocol = http_agent.primary_protocol
-        if protocol is not None:
-            if not any(
-                isinstance(value, str) and value.lower() == protocol.value
-                for value in http_agent.protocols
-            ):
-                return None
-            declared_protocol = protocol.value
-        try:
-            candidate_protocols = [Protocol(declared_protocol.lower())]
-        except (ValueError, AttributeError):
-            # An unknown/malformed declaration must not become a guessed MCP agent.
+        candidate_protocols = []
+        for value in http_agent.protocols:
+            if not isinstance(value, str):
+                continue
+            try:
+                declared_protocol = Protocol(value.lower())
+            except ValueError:
+                continue
+            if protocol is None or declared_protocol == protocol:
+                candidate_protocols = [declared_protocol]
+                break
+        if not candidate_protocols:
+            # Unsupported declarations must not become a guessed MCP agent.
             return None
     elif protocol is not None:
         candidate_protocols = [protocol]

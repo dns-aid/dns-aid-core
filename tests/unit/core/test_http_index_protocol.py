@@ -81,9 +81,16 @@ def index_network(monkeypatch):
         (["https", "mcp"], "https"),
         (["mcp", "https"], "mcp"),
         (["HTTPS"], "https"),
+        (["openapi", "https"], "https"),
+        (["unknown", "https"], "https"),
+        ([None, 42, "", "mcp"], "mcp"),
+        ([None, "a2a"], "a2a"),
+        (["", "HTTPS"], "https"),
+        (["unknown", "mcp", "https"], "mcp"),
+        (["unknown", "https", "mcp"], "https"),
     ],
 )
-async def test_declared_primary_protocol(index_network, rrtype, protocols, expected):
+async def test_first_supported_declared_protocol(index_network, rrtype, protocols, expected):
     index_network["rrtype"] = rrtype
     index_network["entry"]["capability"]["protocols"] = protocols
     result = await discover("example.com", use_http_index=True, enrich_endpoints=False)
@@ -98,6 +105,22 @@ async def test_declared_primary_protocol(index_network, rrtype, protocols, expec
     assert ("public-api.example.com", rrtype) in index_network["dns_queries"]
 
 
+@pytest.mark.parametrize("rrtype", ["SVCB", "HTTPS"])
+@pytest.mark.parametrize("caller", [None, "mcp"])
+async def test_unknown_primary_uses_next_supported_protocol(index_network, rrtype, caller):
+    index_network["rrtype"] = rrtype
+    index_network["entry"]["capability"]["protocols"] = ["openapi", "mcp"]
+    result = await discover(
+        "example.com", protocol=caller, use_http_index=True, enrich_endpoints=False
+    )
+    assert ("public-api.example.com", rrtype) in index_network["dns_queries"], (
+        result.agents,
+        index_network["dns_queries"],
+    )
+    assert [agent.protocol.value for agent in result.agents] == ["mcp"]
+    assert result.agents[0].endpoint_source == "dns_svcb_enriched"
+
+
 @pytest.mark.parametrize("caller", ["https", "mcp", "a2a"])
 async def test_caller_filter_against_https_only(index_network, caller):
     result = await discover(
@@ -107,16 +130,29 @@ async def test_caller_filter_against_https_only(index_network, caller):
     if result.agents:
         assert result.agents[0].endpoint_url == ENDPOINT
         assert result.agents[0].capabilities == CAPABILITIES
+    else:
+        assert not any(
+            qname == "public-api.example.com" for qname, _ in index_network["dns_queries"]
+        )
 
 
-@pytest.mark.parametrize("protocols", [["https", "mcp"], ["mcp", "https"]])
+@pytest.mark.parametrize(
+    "protocols",
+    [["https", "mcp"], ["mcp", "https"], ["openapi", "mcp"], ["unknown", "https"]],
+)
 @pytest.mark.parametrize("caller", ["https", "mcp", "a2a"])
-async def test_filter_selects_declared_member(index_network, protocols, caller):
+@pytest.mark.parametrize("dns_present", [True, False])
+async def test_filter_selects_declared_member(index_network, protocols, caller, dns_present):
     index_network["entry"]["capability"]["protocols"] = protocols
+    index_network["dns_present"] = dns_present
     result = await discover(
         "example.com", protocol=caller, use_http_index=True, enrich_endpoints=False
     )
     assert [a.protocol.value for a in result.agents] == ([caller] if caller in protocols else [])
+    if caller not in protocols:
+        assert not any(
+            qname == "public-api.example.com" for qname, _ in index_network["dns_queries"]
+        )
 
 
 @pytest.mark.parametrize("missing", [True, False])
@@ -133,16 +169,21 @@ async def test_undeclared_protocol_keeps_existing_fallback(index_network, missin
     assert [a.protocol.value for a in result.agents] == [caller or "mcp"]
 
 
-@pytest.mark.parametrize("protocols", [["unknown"], [42], [None], [""], ["unknown", "https"]])
-async def test_invalid_primary_protocol_is_not_invented(index_network, protocols):
+@pytest.mark.parametrize("protocols", [["unknown"], [42], [None], [""], [None, 42, "", "unknown"]])
+@pytest.mark.parametrize("dns_present", [True, False])
+async def test_unsupported_protocols_are_not_invented(index_network, protocols, dns_present):
     index_network["entry"]["capability"]["protocols"] = protocols
+    index_network["dns_present"] = dns_present
     result = await discover("example.com", use_http_index=True, enrich_endpoints=False)
     assert result.agents == []
+    assert not any(qname == "public-api.example.com" for qname, _ in index_network["dns_queries"])
 
 
+@pytest.mark.parametrize("protocols", [["https"], ["openapi", "https"]])
 @pytest.mark.parametrize("params", ['alpn="mcp"', 'key65402="mcp=1.0" alpn="https"'])
 @pytest.mark.parametrize("caller", [None, "https"])
-async def test_dns_protocol_remains_authoritative(index_network, params, caller):
+async def test_dns_protocol_remains_authoritative(index_network, protocols, params, caller):
+    index_network["entry"]["capability"]["protocols"] = protocols
     index_network["params"] = params
     result = await discover(
         "example.com", protocol=caller, use_http_index=True, enrich_endpoints=False
@@ -162,16 +203,32 @@ async def test_txt_enumeration_and_https65_unchanged(index_network):
     assert index_network["http_requests"] == []
 
 
-async def test_http_only_fallback_retains_provenance(index_network):
+@pytest.mark.parametrize(
+    ("protocols", "expected"),
+    [
+        (["https"], "https"),
+        (["openapi", "https"], "https"),
+        ([None, 42, "", "mcp", "https"], "mcp"),
+        (["unknown", "a2a"], "a2a"),
+    ],
+)
+async def test_http_only_fallback_retains_provenance(index_network, protocols, expected):
+    index_network["entry"]["capability"]["protocols"] = protocols
     index_network["dns_present"] = False
     result = await discover("example.com", use_http_index=True, enrich_endpoints=False)
     assert len(result.agents) == 1
-    assert result.agents[0].protocol.value == "https"
+    assert result.agents[0].protocol.value == expected
     assert result.agents[0].endpoint_source == "http_index_fallback"
-    assert ("public-api.example.com", "HTTPS") in index_network["dns_queries"]
+    assert result.agents[0].capability_source == "http_index"
+    assert result.agents[0].endpoint_url == ENDPOINT
+    assert result.agents[0].capabilities == CAPABILITIES
+    assert index_network["dns_queries"].count(("public-api.example.com", "SVCB")) == 1
+    assert index_network["dns_queries"].count(("public-api.example.com", "HTTPS")) == 1
 
 
-async def test_duplicate_candidate_deduplicated(index_network):
+@pytest.mark.parametrize("protocols", [["https"], ["openapi", "https", "https"]])
+async def test_duplicate_candidate_deduplicated(index_network, protocols):
+    index_network["entry"]["capability"]["protocols"] = protocols
     index_network["entries"]["duplicate"] = index_network["entry"]
     result = await discover("example.com", use_http_index=True, enrich_endpoints=False)
     assert len(result.agents) == 1
@@ -179,11 +236,27 @@ async def test_duplicate_candidate_deduplicated(index_network):
 
 
 @pytest.mark.parametrize("fqdn", ["public-api._agents.example.com", "public-api.example.com."])
-async def test_walkable_and_absolute_fqdn(index_network, fqdn):
+@pytest.mark.parametrize("protocols", [["https"], ["openapi", "https"]])
+async def test_walkable_and_absolute_fqdn(index_network, fqdn, protocols):
+    index_network["entry"]["capability"]["protocols"] = protocols
     index_network["entry"]["location"]["fqdn"] = fqdn
     result = await discover("example.com", use_http_index=True, enrich_endpoints=False)
     assert [a.protocol.value for a in result.agents] == ["https"]
     assert result.agents[0].endpoint_source == "dns_svcb_enriched"
+
+
+@pytest.mark.parametrize("caller", [None, "a2a", "mcp"])
+async def test_legacy_fqdn_protocol_precedes_declarations(index_network, caller):
+    index_network["entry"]["location"]["fqdn"] = "_public-api._a2a._agents.example.com"
+    index_network["entry"]["capability"]["protocols"] = ["openapi", "mcp"]
+    result = await discover(
+        "example.com", protocol=caller, use_http_index=True, enrich_endpoints=False
+    )
+    assert [agent.protocol.value for agent in result.agents] == ([] if caller == "mcp" else ["a2a"])
+    if caller == "mcp":
+        assert not any(
+            qname == "public-api.example.com" for qname, _ in index_network["dns_queries"]
+        )
 
 
 async def test_scalar_protocol_accepted_by_existing_parser(index_network):
