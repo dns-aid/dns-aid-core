@@ -425,8 +425,11 @@ async def test_auth_handler_passed_through_as_httpx_auth(
             auth_handler=auth,
         )
 
+    from dns_aid.sdk.protocols.mcp import _HTTP_LIB
+
     assert captured["auth"] is not None
-    assert isinstance(captured["auth"], httpx.Auth)
+    # httpx.Auth on mcp 1.x, httpx2.Auth on 2.x: each client only takes its own.
+    assert isinstance(captured["auth"], _HTTP_LIB.Auth)
 
 
 @pytest.mark.asyncio

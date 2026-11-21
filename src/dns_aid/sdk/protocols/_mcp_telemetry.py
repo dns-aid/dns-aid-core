@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -88,7 +88,10 @@ class _TelemetryCapture:
         # For non-streaming JSON responses, content is already buffered.
         try:
             self.response_size_bytes = len(response.content)
-        except (httpx.ResponseNotRead, RuntimeError):
+        except (
+            httpx.ResponseNotRead,
+            RuntimeError,
+        ):  # httpx2's ResponseNotRead is a RuntimeError too
             # Streaming response — size will be tracked separately if needed.
             self.response_size_bytes = 0
 
@@ -120,12 +123,18 @@ class _TelemetryCapture:
         return (self.ttfb_perf - self.start_perf) * 1000
 
 
-def _make_telemetry_factory(capture: _TelemetryCapture) -> McpHttpClientFactory:
+def _make_telemetry_factory(
+    capture: _TelemetryCapture, http_lib: Any = httpx
+) -> McpHttpClientFactory:
     """Build an ``httpx_client_factory`` that records signals into *capture*.
 
     The returned factory matches the signature expected by
     ``streamablehttp_client(httpx_client_factory=...)`` — see
     ``mcp.shared._httpx_utils.create_mcp_http_client``.
+
+    *http_lib* is the HTTP library the client comes from: ``httpx`` for
+    mcp 1.x, ``httpx2`` for mcp 2.x. The two share the client API used here,
+    and the event hooks only read attributes both expose.
     """
 
     def factory(
@@ -133,9 +142,9 @@ def _make_telemetry_factory(capture: _TelemetryCapture) -> McpHttpClientFactory:
         timeout: httpx.Timeout | None = None,
         auth: httpx.Auth | None = None,
     ) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
+        client: httpx.AsyncClient = http_lib.AsyncClient(
             headers=headers,
-            timeout=timeout if timeout is not None else httpx.Timeout(30.0),
+            timeout=timeout if timeout is not None else http_lib.Timeout(30.0),
             auth=auth,
             follow_redirects=True,
             event_hooks={
@@ -147,5 +156,6 @@ def _make_telemetry_factory(capture: _TelemetryCapture) -> McpHttpClientFactory:
                 "response": [capture.on_response],
             },
         )
+        return client
 
     return factory

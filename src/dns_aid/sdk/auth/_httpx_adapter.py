@@ -7,11 +7,17 @@ The official MCP Python SDK's `streamablehttp_client` accepts
 ``auth: httpx.Auth | None``. dns-aid's existing AuthHandler interface
 (in ``base.py``) exposes an async ``apply(request)`` method instead.
 This adapter wraps the latter so it can be passed to the former.
+
+mcp 2.x talks HTTP through httpx2, which only accepts an ``httpx2.Auth``.
+``to_httpx2_auth`` builds the same wrapper on that base class. The handlers
+only touch ``request.headers``, ``request.url`` and ``request.content``, which
+httpx2 requests expose the same way.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import httpx
 
@@ -45,3 +51,22 @@ def to_httpx_auth(handler: AuthHandler | None) -> httpx.Auth | None:
     result directly to ``streamablehttp_client(auth=...)``.
     """
     return _DnsAidHttpxAuth(handler) if handler is not None else None
+
+
+def to_httpx2_auth(handler: AuthHandler | None) -> Any:
+    """Like ``to_httpx_auth``, but returns an ``httpx2.Auth`` for mcp 2.x.
+
+    httpx2 is imported lazily: it is only installed alongside mcp 2.x.
+    """
+    if handler is None:
+        return None
+
+    import httpx2
+
+    class _DnsAidHttpx2Auth(httpx2.Auth):
+        requires_request_body = False
+
+        async def async_auth_flow(self, request: Any) -> AsyncGenerator[Any, Any]:
+            yield await handler.apply(request)
+
+    return _DnsAidHttpx2Auth()
