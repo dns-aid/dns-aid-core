@@ -42,7 +42,7 @@ from dns_aid.sdk.protocols.https import HTTPSProtocolHandler
 from dns_aid.sdk.protocols.mcp import MCPProtocolHandler
 from dns_aid.sdk.search import SearchResponse
 from dns_aid.sdk.signals.collector import SignalCollector
-from dns_aid.sdk.telemetry.otel import TelemetryManager
+from dns_aid.sdk.telemetry.otel import TelemetryManager, _sanitize_endpoint_url
 from dns_aid.utils.url_safety import UnsafeURLError, redact_url_for_log, validate_fetch_url_async
 
 
@@ -608,7 +608,8 @@ class AgentClient:
         # resolution (.well-known/agent.json, then /mcp convention) that
         # core.invoke.call_mcp_tool / list_mcp_tools use, so invoke() works
         # for DNS-discovered MCP agents. Already-pathed endpoints are returned
-        # unchanged. The signal/span keep reporting agent.endpoint_url.
+        # unchanged. The signal/span keep reporting agent.endpoint_url as the
+        # identity and carry the called URL as resolved_endpoint (#293).
         # Imported lazily: core.invoke itself imports the SDK at module load.
         request_endpoint = agent.endpoint_url
         if protocol == "mcp":
@@ -644,6 +645,9 @@ class AgentClient:
             raw=raw,
             auth_type=resolved_auth.auth_type if resolved_auth else None,
             auth_applied=resolved_auth is not None,
+            resolved_endpoint=(
+                request_endpoint if request_endpoint != agent.endpoint_url else None
+            ),
         )
 
         # Enrich signal with policy data
@@ -696,6 +700,12 @@ class AgentClient:
         try:
             payload = signal.model_dump(mode="json")
             payload.pop("id", None)
+            # Only sent when invoke() called a different URL than the
+            # discovered one, so existing payloads stay the same shape.
+            if signal.resolved_endpoint is None:
+                payload.pop("resolved_endpoint", None)
+            else:
+                payload["resolved_endpoint"] = _sanitize_endpoint_url(signal.resolved_endpoint)
             if hasattr(signal.status, "value"):
                 payload["status"] = signal.status.value
             resp = httpx.post(push_url, json=payload, timeout=5.0)

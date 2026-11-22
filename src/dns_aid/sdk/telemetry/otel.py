@@ -83,6 +83,7 @@ ATTR_AGENT_NAME = "dns_aid.agent.name"
 ATTR_AGENT_DOMAIN = "dns_aid.agent.domain"
 ATTR_AGENT_PROTOCOL = "dns_aid.agent.protocol"
 ATTR_AGENT_ENDPOINT = "dns_aid.agent.endpoint"
+ATTR_AGENT_RESOLVED_ENDPOINT = "dns_aid.agent.resolved_endpoint"  # only when it differs
 ATTR_AGENT_FQDN = "dns_aid.agent.fqdn"  # opt-in high-cardinality label only
 ATTR_INVOCATION_METHOD = "dns_aid.invocation.method"
 ATTR_INVOCATION_STATUS = "dns_aid.invocation.status"
@@ -701,6 +702,8 @@ class TelemetryManager:
             attrs[ATTR_INVOCATION_METHOD] = signal.method
         if signal.cost_units is not None:
             attrs[ATTR_INVOCATION_COST] = signal.cost_units
+        if signal.resolved_endpoint:
+            attrs[ATTR_AGENT_RESOLVED_ENDPOINT] = _sanitize_endpoint_url(signal.resolved_endpoint)
         return attrs
 
     @classmethod

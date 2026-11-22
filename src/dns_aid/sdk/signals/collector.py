@@ -45,6 +45,7 @@ class SignalCollector:
         dnssec_validated: bool = False,
         auth_type: str | None = None,
         auth_applied: bool = False,
+        resolved_endpoint: str | None = None,
     ) -> InvocationSignal:
         """
         Enrich a RawResponse into a full InvocationSignal and store it.
@@ -56,6 +57,7 @@ class SignalCollector:
         signal = InvocationSignal(
             agent_fqdn=agent_fqdn,
             agent_endpoint=agent_endpoint,
+            resolved_endpoint=resolved_endpoint,
             protocol=protocol,
             method=method,
             discovery_latency_ms=discovery_latency_ms,

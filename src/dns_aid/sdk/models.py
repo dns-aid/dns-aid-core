@@ -38,6 +38,10 @@ class InvocationSignal(BaseModel):
     # Agent identification
     agent_fqdn: str
     agent_endpoint: str
+    # URL actually called, when invoke() resolved a different one from
+    # agent_endpoint (e.g. the MCP path from agent.json or the /mcp
+    # convention). None when the discovered endpoint was called as-is.
+    resolved_endpoint: str | None = None
     protocol: str
     method: str | None = None
 

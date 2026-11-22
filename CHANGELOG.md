@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`InvocationSignal.resolved_endpoint` and the `dns_aid.agent.resolved_endpoint`
+  span attribute** report the URL `invoke()` actually called when it differs
+  from the discovered endpoint, e.g. an MCP path from `/.well-known/agent.json`
+  or the `/mcp` convention guess. `agent_endpoint` and `dns_aid.agent.endpoint`
+  still carry the discovered endpoint. The field is `None` and the attribute
+  is left off when the endpoint was called as-is; the HTTP push payload only
+  includes it when set. Credentials in the URL are stripped the same way as for
+  `dns_aid.agent.endpoint` (#293).
+
 ### Security
 
 - **`resolve_mcp_endpoint()` now applies the SSRF guard before probing
