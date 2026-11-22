@@ -599,6 +599,9 @@ class TestValidateTargetName:
             "agent.example.com/path",
             "agent.example.com:443",
             "agent.ex\u00e4mple.com",
+            "agent.example.test\n",
+            "agent.example.test.\n",
+            "agent\n.example.test",
         ],
         ids=[
             "empty",
@@ -615,6 +618,9 @@ class TestValidateTargetName:
             "slash",
             "port",
             "non-ascii",
+            "trailing-lf",
+            "trailing-dot-lf",
+            "lf-at-label-end",
         ],
     )
     def test_rejects_value_that_is_not_one_name(self, target):

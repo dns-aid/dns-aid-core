@@ -767,6 +767,9 @@ class TestDNSimpleBackendCreateSVCB:
             "agent.example.test\nkey65400=injected",
             'agent"example.test',
             "agent\\032example.test",
+            "agent.example.test\n",
+            "agent.example.test.\n",
+            "agent\n.example.test",
         ],
         ids=[
             "space-quoted-param",
@@ -776,6 +779,9 @@ class TestDNSimpleBackendCreateSVCB:
             "newline",
             "double-quote",
             "backslash",
+            "trailing-lf",
+            "trailing-dot-lf",
+            "lf-at-label-end",
         ],
     )
     async def test_create_svcb_refuses_target_that_is_not_one_name(self, target):

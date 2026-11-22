@@ -499,8 +499,10 @@ def validate_backend(
 # decision to deployment configuration where humans land it.
 # One label of an SVCB TargetName in presentation format. Underscores are
 # permitted here; validate_no_underscore_in_target() applies the separate
-# draft-02 underscore rule.
-_TARGET_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,63}$")
+# draft-02 underscore rule. Use fullmatch() with this pattern: "$" also
+# matches before a trailing newline, and validate_target_name() returns
+# the target unchanged.
+_TARGET_LABEL_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,63}")
 
 
 def validate_target_name(target: str) -> str:
@@ -539,7 +541,7 @@ def validate_target_name(target: str) -> str:
             target,
         )
     for label in name.split("."):
-        if not _TARGET_LABEL_PATTERN.match(label):
+        if not _TARGET_LABEL_PATTERN.fullmatch(label):
             raise ValidationError(
                 "target",
                 "SVCB TargetName must be one DNS name: labels of 1 to 63 letters, "

@@ -18,6 +18,8 @@ MALFORMED_TARGETS = [
     "agent.example.test\nkey65400=injected",
     'agent"example.test',
     "agent\\032example.test",
+    "agent.example.test\n",
+    "agent\n.example.test",
 ]
 MALFORMED_TARGET_IDS = [
     "space-quoted-param",
@@ -27,6 +29,8 @@ MALFORMED_TARGET_IDS = [
     "newline",
     "double-quote",
     "backslash",
+    "trailing-lf",
+    "lf-at-label-end",
 ]
 
 
