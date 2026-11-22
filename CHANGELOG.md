@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GHSA-45c3-73f7-pv4m). A crafted DNS message could make
   `dns.name.from_wire_parser()` burn excessive CPU on name decompression;
   every discovery lookup parses untrusted wire-format responses.
+- **SVCB TargetName validation** — `AgentRecord.target_host` and
+  `SvcbRecord.target` now must be one DNS name: the root `.`, or labels of 1
+  to 63 letters, digits, hyphens or underscores, with an optional trailing
+  dot. Before this change, a target such as `agent.example.test key65400="x"`
+  went into the SVCB presentation format and added a SvcParamKey. The Python
+  `publish()` API and the CLI did not refuse it (the MCP tools did). The
+  DNSimple backend also refuses such a target on a direct call. The
+  underscore rule of draft-02 §3.2 does not change.
 
 ## [0.28.1] - 2026-08-09
 

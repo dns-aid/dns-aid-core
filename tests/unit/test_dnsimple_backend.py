@@ -757,6 +757,53 @@ class TestDNSimpleBackendCreateSVCB:
         assert _deletes(events) == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "target",
+        [
+            'agent.example.test key65400="injected"',
+            'agent.example.test. key65400="injected"',
+            "agent.example.test key65400=injected",
+            "agent.example.test\tkey65400=injected",
+            "agent.example.test\nkey65400=injected",
+            'agent"example.test',
+            "agent\\032example.test",
+        ],
+        ids=[
+            "space-quoted-param",
+            "trailing-dot-space-quoted-param",
+            "space-unquoted-param",
+            "tab",
+            "newline",
+            "double-quote",
+            "backslash",
+        ],
+    )
+    async def test_create_svcb_refuses_target_that_is_not_one_name(self, target):
+        """Test that a target that is not one DNS TargetName is refused.
+
+        A target with whitespace, a double quote or a backslash changes the
+        SvcParams of the SVCB content. The backend must refuse the target
+        before it sends a request.
+        """
+        backend = _make_backend()
+        mock_client, events = _make_client(pages=[_records_page([_record(11)])])
+
+        with (
+            patch.object(backend, "_get_client", return_value=mock_client),
+            pytest.raises(ValueError, match="target"),
+        ):
+            await backend.create_svcb_record(
+                zone="example.com",
+                name="chat",
+                priority=1,
+                target=target,
+                params={"alpn": "mcp", "port": "443"},
+                ttl=300,
+            )
+
+        assert events == []
+
+    @pytest.mark.asyncio
     async def test_create_svcb_target_without_trailing_dot_unchanged(self):
         """Test that a target without a trailing dot is sent unchanged."""
         backend = _make_backend()

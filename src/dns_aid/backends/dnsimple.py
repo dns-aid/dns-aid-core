@@ -20,6 +20,7 @@ import httpx
 import structlog
 
 from dns_aid.backends.base import DNSBackend
+from dns_aid.utils.validation import validate_target_name
 
 logger = structlog.get_logger(__name__)
 
@@ -558,9 +559,17 @@ class DNSimpleBackend(DNSBackend):
         param value that has one of these characters. Refuse such a value
         before a request is sent, so that the existing records do not change.
 
+        The target goes into the content without quotes. Thus, a target that
+        is not one DNS name (for example, a target with a space) adds
+        SvcParams. The shared models refuse such a target, but a direct call
+        to this backend does not go through the models. Thus, refuse the
+        target here also.
+
         Raises:
-            ValueError: If a param value has a backslash or a double quote
+            ValueError: If the target is not one DNS name, or if a param
+                value has a backslash or a double quote
         """
+        validate_target_name(target)
         if target != "." and target.endswith("."):
             target = target[:-1]
 

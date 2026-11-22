@@ -497,6 +497,58 @@ def validate_backend(
 # MCP tool arg alone would let a calling LLM flip a draft-02 §Known
 # Organization MUST to a warning on its own. The env gate moves that
 # decision to deployment configuration where humans land it.
+# One label of an SVCB TargetName in presentation format. Underscores are
+# permitted here; validate_no_underscore_in_target() applies the separate
+# draft-02 underscore rule.
+_TARGET_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,63}$")
+
+
+def validate_target_name(target: str) -> str:
+    """Validate that an SVCB target is exactly one DNS TargetName.
+
+    The backends write the target into the SVCB presentation format
+    ``<priority> <target> <params>`` without quotes. Whitespace, a double
+    quote, a backslash or a control character in the target changes the
+    parse of the record. For example, the target
+    ``agent.example.test key65400="x"`` adds a SvcParamKey.
+
+    The permitted values are:
+
+    - The root name ``.``.
+    - One or more labels that are separated by dots, with an optional
+      trailing dot. Each label has 1 to 63 letters, digits, hyphens or
+      underscores. The name has a maximum of 253 characters without the
+      trailing dot.
+
+    Returns:
+        The target string, unchanged.
+
+    Raises:
+        ValidationError: If the target is not one DNS TargetName.
+    """
+    if not isinstance(target, str) or not target:
+        raise ValidationError("target", "SVCB TargetName cannot be empty", target)
+    if target == ".":
+        return target
+
+    name = target[:-1] if target.endswith(".") else target
+    if len(name) > MAX_DOMAIN_LENGTH:
+        raise ValidationError(
+            "target",
+            f"SVCB TargetName cannot exceed {MAX_DOMAIN_LENGTH} characters",
+            target,
+        )
+    for label in name.split("."):
+        if not _TARGET_LABEL_PATTERN.match(label):
+            raise ValidationError(
+                "target",
+                "SVCB TargetName must be one DNS name: labels of 1 to 63 letters, "
+                "digits, hyphens or underscores, separated by dots",
+                target,
+            )
+    return target
+
+
 _UNDERSCORE_BYPASS_ENV = "DNS_AID_ALLOW_UNDERSCORE_TARGET"
 
 
