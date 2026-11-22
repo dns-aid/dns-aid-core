@@ -381,9 +381,11 @@ class DNSimpleBackend(DNSBackend):
         """
         Replace all records with the given name and type.
 
-        The DNSimple API has no atomic replace operation. Thus, do the
-        changes in an order that keeps the existing records if the API
-        refuses a change:
+        This backend uses the individual record endpoints of the DNSimple
+        API, thus a replacement is not atomic. (DNSimple also has an atomic
+        batch change endpoint, in Public Preview and only on the Enterprise
+        plan. This backend does not use it.) Thus, do the changes in an
+        order that keeps the existing records if the API refuses a change:
 
         1. Keep each existing record that has a new value. Update its TTL
            if necessary.
@@ -392,7 +394,9 @@ class DNSimpleBackend(DNSBackend):
         3. Create one record for each new value that is still remaining.
         4. Delete the existing records that are not necessary.
 
-        If a request fails, undo the changes and raise the error. The API
+        If a request fails, try to undo the recorded changes (see
+        ``_undo_replace``) and raise the error. The undo is best-effort:
+        it does not guarantee that the old records come back. The API
         refuses a record that is equal to an existing record. Step 1
         prevents this error.
         """
@@ -453,13 +457,21 @@ class DNSimpleBackend(DNSBackend):
         deleted: list[dict],
     ) -> None:
         """
-        Undo the changes of a failed replacement.
+        Try to undo the recorded changes of a failed replacement.
+
+        This is best-effort compensation, not a rollback:
+
+        - Only the changes with a successful response are recorded. If the
+          API completed a request but the response was lost (for example,
+          after a timeout), that change is not undone.
+        - If an undo request fails, the zone can keep a part of the old
+          records and a part of the new records.
+        - A record that is created again gets a new ID.
 
         Delete the created records, set the updated records back to their
         old content and TTL, and create the deleted records again. Do these
         steps in this order, so that no request makes a record that is equal
-        to an existing record. A record that is created again gets a new ID.
-        Send the old content as the API gave it.
+        to an existing record. Send the old content as the API gave it.
         Do not send the decoded TXT value: the API reads a value that starts
         with a quote as serialized TXT content, thus a decoded value that has
         literal quotes would change. Log a failure, but do not raise it, so
@@ -557,7 +569,9 @@ class DNSimpleBackend(DNSBackend):
         contain backslashes"). A double quote in a param value stops the
         quoted string, also when it is escaped. Thus, the API cannot keep a
         param value that has one of these characters. Refuse such a value
-        before a request is sent, so that the existing records do not change.
+        before a request changes a record, so that the existing records do
+        not change. (The zone lookup can send a GET request before this
+        check.)
 
         The target goes into the content without quotes. Thus, a target that
         is not one DNS name (for example, a target with a space) adds

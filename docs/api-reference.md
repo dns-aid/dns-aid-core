@@ -979,9 +979,14 @@ backend = DNSimpleBackend(
 
 **DNS-AID Compliance**: DNSimple supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65409`). DNSimple natively accepts private-use SVCB keys via the `supports_private_svcb_keys` property — cap_uri, policy_uri, and realm go directly into the SVCB record without TXT demotion. Each TXT value is stored as a separate API record.
 
-**Limits**: The backend removes a trailing dot from the SVCB target, because the API refuses it. The backend raises `ValueError` for an SVCB param value with a double quote or a backslash, because the API cannot keep it.
+**Limits**: The backend removes a trailing dot from the SVCB target, because the API refuses it. The backend raises `ValueError` for an SVCB param value with a double quote or a backslash, because the API cannot keep it. The backend does this check before it sends a request that changes a record (the zone lookup can send a GET request before the check).
 
-**Replace**: The API has no atomic replace. `create_svcb_record()` and `create_txt_record()` keep equal records, update the other records in place, and create and delete records as the last steps. If a request fails, the backend undoes its changes and raises the first error.
+**Replace**: The backend uses the individual record endpoints of the API, thus a replacement is not atomic. (DNSimple also has a [batch change endpoint](https://developer.dnsimple.com/v2/zones/batch-change-zone-records/), in Public Preview and only on the Enterprise plan. This backend does not use it.) `create_svcb_record()` and `create_txt_record()` keep equal records, update the other records in place, and create and delete records as the last steps. If a request fails, the backend tries to undo its recorded changes and raises the first error. This is best-effort compensation, not a guaranteed rollback:
+
+- A change that the API completed, but whose response was lost (for example, after a timeout), is not recorded. Thus, the backend does not undo it.
+- If an undo request fails, the zone can keep a part of the old records and a part of the new records. The backend logs each failed undo request.
+- A record that is created again gets a new ID.
+- The SVCB record and the TXT records of an agent are separate replacements. They are not published in one transaction.
 
 ### MockBackend
 

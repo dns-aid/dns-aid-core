@@ -14,13 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Private-use SVCB keys (`key65400`–`key65409`) go directly into the SVCB
   record. Each TXT value is a separate API record. The account ID is found
   from `/v2/whoami` when `DNSIMPLE_ACCOUNT_ID` is not set. `DNSIMPLE_BASE_URL`
-  selects the sandbox. The DNSimple API has no atomic replace, so the backend
-  keeps equal records, updates the other records in place, creates and deletes
-  as the last steps, and undoes its changes if a request fails. The backend
-  removes a trailing dot from the SVCB target (the API refuses it) and refuses
-  an SVCB param value with a double quote or a backslash (the API cannot keep
-  it). Available in the CLI (`--backend dnsimple`), `dns-aid doctor` and the
-  MCP tools.
+  selects the sandbox. The backend uses the individual record endpoints, so a
+  replacement is not atomic. The backend keeps equal records, updates the
+  other records in place, creates and deletes as the last steps, and tries to
+  undo its recorded changes if a request fails. This undo is best-effort: the
+  old records do not always come back, and a record that is created again
+  gets a new ID. The backend removes a trailing dot from the SVCB target (the
+  API refuses it) and refuses an SVCB param value with a double quote or a
+  backslash (the API cannot keep it). Available in the CLI
+  (`--backend dnsimple`), `dns-aid doctor` and the MCP tools.
 
 ### Security
 

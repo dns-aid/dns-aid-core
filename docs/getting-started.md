@@ -849,8 +849,8 @@ backend = DNSimpleBackend(
 
 - **Native private-use SVCB keys**: cap_uri, policy_uri, realm go directly into SVCB — single-record agent discovery
 - **SVCB target**: the API refuses a target with a trailing dot. The backend removes it before it sends the record.
-- **SVCB param values**: the API cannot keep a param value with a double quote (`"`) or a backslash (`\`). The backend refuses such a value before it sends a request.
-- **Replace**: the API has no atomic replace. The backend keeps equal records, updates the other records in place, and creates and deletes records as the last steps. If a request fails, the backend undoes its changes and raises the error.
+- **SVCB param values**: the API cannot keep a param value with a double quote (`"`) or a backslash (`\`). The backend refuses such a value before it sends a request that changes a record.
+- **Replace**: the backend uses the individual record endpoints of the API, thus a replacement is not atomic. The SVCB record and the TXT records of an agent are also not published in one transaction. The backend keeps equal records, updates the other records in place, and creates and deletes records as the last steps. If a request fails, the backend tries to undo its recorded changes (best-effort compensation) and raises the error. The old records do not always come back: a change whose response was lost is not undone, an undo request can also fail, and a record that is created again gets a new ID.
 - **TXT**: each TXT value is a separate API record. The API adds the quotes.
 
 ## End-to-End Test
