@@ -8,10 +8,11 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import dns.rdata
 import httpx
 import pytest
 
-from dns_aid.backends.dnsimple import DEFAULT_BASE_URL, DNSimpleBackend
+from dns_aid.backends.dnsimple import DEFAULT_BASE_URL, DNSimpleBackend, _decode_txt_content
 
 DNSIMPLE_ENV_VARS = ("DNSIMPLE_TOKEN", "DNSIMPLE_ACCOUNT_ID", "DNSIMPLE_BASE_URL")
 
@@ -35,6 +36,52 @@ def _json_response(data: dict) -> MagicMock:
 def _whoami_response(account: dict | None, user: dict | None = None) -> MagicMock:
     """Make a mock response for GET /v2/whoami."""
     return _json_response({"user": user, "account": account})
+
+
+class TestDecodeTXTContent:
+    """Tests for _decode_txt_content."""
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            '"a\\032b"',
+            '"\\065\\066\\067"',
+            '"description=a\\032b"',
+            '"x\\0329"',
+            '"a\\032b" "c\\\\d"',
+            '"say \\"hi\\"\\033"',
+        ],
+        ids=["space", "letters", "description", "digit-after-escape", "mixed", "quote-and-decimal"],
+    )
+    def test_decodes_rfc1035_decimal_escapes(self, content):
+        """Test that a \\DDD escape is decoded to one octet, as RFC 1035 section 5.1 tells.
+
+        The result must agree with the dnspython parser.
+        """
+        expected = b"".join(dns.rdata.from_text("IN", "TXT", content).strings)
+
+        assert _decode_txt_content(content).encode("ascii") == expected
+
+    def test_decodes_utf8_octets(self):
+        """Test that \\DDD escapes of UTF-8 octets decode to the UTF-8 text."""
+        assert _decode_txt_content('"caf\\195\\169"') == "café"
+
+    def test_keeps_invalid_utf8_octets_distinct(self):
+        """Test that octets that are not valid UTF-8 do not decode to the same value."""
+        first = _decode_txt_content('"a\\255"')
+        second = _decode_txt_content('"a\\254"')
+
+        assert first != second
+        assert first.encode("utf-8", errors="surrogateescape") == b"a\xff"
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [('"\\256"', "256"), ('"\\03x"', "03x"), ('"\\\\032"', "\\032")],
+        ids=["above-255", "not-three-digits", "escaped-backslash-before-digits"],
+    )
+    def test_other_escapes_drop_the_backslash(self, content, expected):
+        """Test that a backslash that does not start a \\DDD escape escapes one character."""
+        assert _decode_txt_content(content) == expected
 
 
 class TestDNSimpleBackendInit:
@@ -933,6 +980,59 @@ class TestDNSimpleBackendCreateTXT:
         assert _deletes(events) == []
 
     @pytest.mark.asyncio
+    async def test_create_txt_decimal_escape_is_not_equal_to_digits(self):
+        """Test that a stored \\DDD escape is not equal to a value with the same digits.
+
+        The stored content '"description=a\\032b"' means "description=a b".
+        The new value "description=a032b" is different. Thus, the backend
+        must update the record.
+        """
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[
+                _records_page([_record(31, rtype="TXT", content='"description=a\\032b"')]),
+            ],
+        )
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            await backend.create_txt_record(
+                zone="example.com",
+                name="chat",
+                values=["description=a032b"],
+                ttl=3600,
+            )
+
+        assert _patches(events) == [
+            ("PATCH", f"{RECORDS_PATH}/31", {"content": "description=a032b", "ttl": 3600}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_create_txt_keeps_value_equal_to_decimal_escape(self):
+        """Test that a stored \\DDD escape is equal to the decoded value.
+
+        The stored content '"description=a\\032b"' means "description=a b".
+        The backend must not send a request for the equal value.
+        """
+        backend = _make_backend()
+        mock_client, events = _make_client(
+            pages=[
+                _records_page([_record(31, rtype="TXT", content='"description=a\\032b"')]),
+            ],
+        )
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            await backend.create_txt_record(
+                zone="example.com",
+                name="chat",
+                values=["description=a b"],
+                ttl=3600,
+            )
+
+        assert _patches(events) == []
+        assert _posts(events) == []
+        assert _deletes(events) == []
+
+    @pytest.mark.asyncio
     async def test_create_txt_equal_value_with_other_ttl_updates_ttl_only(self):
         """Test that an equal value with a different TTL gets a TTL-only update."""
         backend = _make_backend()
@@ -1441,6 +1541,30 @@ class TestDNSimpleBackendListRecords:
         ]
 
     @pytest.mark.asyncio
+    async def test_list_records_decodes_txt_decimal_escapes(self):
+        """Test that a \\DDD escape in TXT content is decoded to one character."""
+        backend = _make_backend()
+        mock_client, _events = _make_client(
+            pages=[
+                _records_page(
+                    [
+                        _record(
+                            1,
+                            name="_chat._mcp._agents",
+                            rtype="TXT",
+                            content='"description=a\\032b"',
+                        ),
+                    ]
+                )
+            ]
+        )
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            records = await _collect(backend)
+
+        assert records[0]["values"] == ["description=a b"]
+
+    @pytest.mark.asyncio
     async def test_list_records_joins_txt_character_strings(self):
         """Test that several character-strings in one TXT record become one value."""
         backend = _make_backend()
@@ -1621,6 +1745,33 @@ class TestDNSimpleBackendGetRecord:
             'description=Say "hi" to the agent',
             "aaabbb",
         ]
+
+    @pytest.mark.asyncio
+    async def test_get_record_decodes_txt_decimal_escapes(self):
+        """Test that get_record decodes a \\DDD escape in TXT content."""
+        backend = _make_backend()
+        mock_client, _events = _make_client(
+            pages=[
+                _records_page(
+                    [
+                        _record(
+                            1,
+                            name="_chat._mcp._agents",
+                            rtype="TXT",
+                            content='"description=a\\032b"',
+                        ),
+                    ]
+                )
+            ]
+        )
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            result = await backend.get_record(
+                zone="example.com", name="_chat._mcp._agents", record_type="TXT"
+            )
+
+        assert result is not None
+        assert result["values"] == ["description=a b"]
 
     @pytest.mark.asyncio
     async def test_get_record_follows_pages(self):

@@ -44,27 +44,41 @@ def _decode_txt_content(content: str) -> str:
     """
     Decode TXT content from DNS presentation format.
 
-    Join the quoted character-strings and unescape "\\X" to "X".
+    Join the quoted character-strings and decode the escapes of RFC 1035
+    section 5.1:
+
+    - "\\DDD" (three decimal digits, 0 to 255) is the octet with that value.
+    - "\\X" (any other character) is "X".
+
+    The decoded octets are UTF-8 text. An octet sequence that is not
+    valid UTF-8 is kept as surrogate escapes. Thus, two different octet
+    sequences do not decode to the same value.
+
     Content that does not start with a quote is returned unchanged.
     """
     if not content.startswith('"'):
         return content
 
-    out: list[str] = []
+    out = bytearray()
     in_quotes = False
     i = 0
     while i < len(content):
         c = content[i]
         if c == "\\" and i + 1 < len(content):
-            out.append(content[i + 1])
+            digits = content[i + 1 : i + 4]
+            if len(digits) == 3 and digits.isascii() and digits.isdigit() and int(digits) <= 255:
+                out.append(int(digits))
+                i += 4
+                continue
+            out += content[i + 1].encode("utf-8")
             i += 2
             continue
         if c == '"':
             in_quotes = not in_quotes
         elif in_quotes:
-            out.append(c)
+            out += c.encode("utf-8")
         i += 1
-    return "".join(out)
+    return out.decode("utf-8", errors="surrogateescape")
 
 
 class DNSimpleBackend(DNSBackend):
