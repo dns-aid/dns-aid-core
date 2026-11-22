@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dns.name.from_wire_parser()` burn excessive CPU on name decompression;
   every discovery lookup parses untrusted wire-format responses.
 
+### Fixed
+
+- **`dns-aid discover --require-dnssec` reports a refusal as an error, not a
+  traceback.** When the DNSSEC requirement refused one or more agents, the CLI
+  let `DNSSECError` propagate, printing a full Python traceback and, with
+  `--json`, nothing on stdout. It now prints one `DNSSEC validation failed:`
+  line on stderr in text mode, or an `{"error": {"class": "DNSSECError",
+  "message": ...}}` object on stderr with `--json` (the `error` envelope that
+  `dns-aid directory` uses), and exits with code 1.
+  ([#295](https://github.com/dns-aid/dns-aid-core/issues/295))
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed
