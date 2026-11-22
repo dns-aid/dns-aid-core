@@ -38,6 +38,7 @@ The DNS-AID specification is defined in the IETF draft: https://datatracker.ietf
   - [NS1Backend](#ns1backend)
   - [CloudflareBackend](#cloudflarebackend)
   - [DDNSBackend](#ddnsbackend)
+  - [DNSimpleBackend](#dnsimplebackend)
   - [MockBackend](#mockbackend)
 - [JWS Signatures](#jws-signatures)
   - [generate_keypair()](#generate_keypair)
@@ -953,6 +954,40 @@ async with DDNSBackend() as backend:
 
 **Full DNS-AID Compliance**: DDNSBackend supports ServiceMode SVCB records (priority > 0) with all required parameters (`alpn`, `port`, `mandatory`).
 
+### DNSimpleBackend
+
+DNSimple API v2 implementation.
+
+```python
+from dns_aid.backends.dnsimple import DNSimpleBackend
+
+backend = DNSimpleBackend()  # reads DNSIMPLE_TOKEN from env
+
+# Or with explicit configuration
+backend = DNSimpleBackend(
+    token="your-api-token",
+    account_id="12345",                  # optional
+    base_url="https://api.dnsimple.com",  # default
+)
+```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DNSIMPLE_TOKEN` | Yes | - | DNSimple API access token (account token, or user token with `DNSIMPLE_ACCOUNT_ID`) |
+| `DNSIMPLE_ACCOUNT_ID` | No | from `/v2/whoami` | Account ID. Required for a user token |
+| `DNSIMPLE_BASE_URL` | No | `https://api.dnsimple.com` | API base URL (sandbox: `https://api.sandbox.dnsimple.com`) |
+
+**DNS-AID Compliance**: DNSimple supports ServiceMode SVCB records with full SVC parameters including private-use keys (`key65400`–`key65409`). DNSimple natively accepts private-use SVCB keys via the `supports_private_svcb_keys` property — cap_uri, policy_uri, and realm go directly into the SVCB record without TXT demotion. Each TXT value is stored as a separate API record.
+
+**Limits**: The backend removes a trailing dot from the SVCB target, because the API refuses it. The backend raises `ValueError` for an SVCB param value with a double quote or a backslash, because the API cannot keep it. The backend does this check before it sends a request that changes a record (the zone lookup can send a GET request before the check).
+
+**Replace**: The backend uses the individual record endpoints of the API, thus a replacement is not atomic. (DNSimple also has a [batch change endpoint](https://developer.dnsimple.com/v2/zones/batch-change-zone-records/), in Public Preview and only on the Enterprise plan. This backend does not use it.) `create_svcb_record()` and `create_txt_record()` keep equal records, update the other records in place, and create and delete records as the last steps. If a request fails, the backend tries to undo its recorded changes and raises the first error. This is best-effort compensation, not a guaranteed rollback:
+
+- A change that the API completed, but whose response was lost (for example, after a timeout), is not recorded. Thus, the backend does not undo it.
+- If an undo request fails, the zone can keep a part of the old records and a part of the new records. The backend logs each failed undo request.
+- A record that is created again gets a new ID.
+- The SVCB record and the TXT records of an agent are separate replacements. They are not published in one transaction.
+
 ### MockBackend
 
 In-memory backend for testing.
@@ -1198,7 +1233,7 @@ dns-aid call --domain example.com --name network-specialist get_subnets \
 
 | Variable | Description |
 |----------|-------------|
-| `DNS_AID_BACKEND` | Default backend: "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", or "mock" |
+| `DNS_AID_BACKEND` | Default backend: "route53", "cloudflare", "ns1", "infoblox", "nios", "akamai-edgedns", "ddns", "dnsimple", or "mock" |
 | `DNS_AID_LOG_LEVEL` | Logging level: DEBUG, INFO, WARNING, ERROR |
 
 **AWS Route 53:**
@@ -1240,6 +1275,14 @@ Route 53 uses boto3's credential chain. No env vars are required if `~/.aws/cred
 | `DDNS_KEY_SECRET` | TSIG key secret, base64 (required) |
 | `DDNS_KEY_ALGORITHM` | TSIG algorithm (default: hmac-sha256) |
 | `DDNS_PORT` | DNS server port (default: 53) |
+
+**DNSimple:**
+
+| Variable | Description |
+|----------|-------------|
+| `DNSIMPLE_TOKEN` | DNSimple API access token (required) |
+| `DNSIMPLE_ACCOUNT_ID` | Account ID (found from an account token if not set) |
+| `DNSIMPLE_BASE_URL` | API URL (default: https://api.dnsimple.com) |
 
 **Akamai Edge DNS:**
 

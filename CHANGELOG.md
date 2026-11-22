@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **DNSimple DNS backend** — new `DNSimpleBackend` for the DNSimple API v2 with
+  an API access token (`DNSIMPLE_TOKEN`). Install with `dns-aid[dnsimple]`.
+  Private-use SVCB keys (`key65400`–`key65409`) go directly into the SVCB
+  record. Each TXT value is a separate API record. The account ID is found
+  from `/v2/whoami` when `DNSIMPLE_ACCOUNT_ID` is not set. `DNSIMPLE_BASE_URL`
+  selects the sandbox. The backend uses the individual record endpoints, so a
+  replacement is not atomic. The backend keeps equal records, updates the
+  other records in place, creates and deletes as the last steps, and tries to
+  undo its recorded changes if a request fails. This undo is best-effort: the
+  old records do not always come back, and a record that is created again
+  gets a new ID. The backend removes a trailing dot from the SVCB target (the
+  API refuses it) and refuses an SVCB param value with a double quote or a
+  backslash (the API cannot keep it). Available in the CLI
+  (`--backend dnsimple`), `dns-aid doctor` and the MCP tools.
+
 ### Security
 
 - **Bumped dependency floors to clear the Dependency Audit gate** — `mcp` to
@@ -19,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GHSA-45c3-73f7-pv4m). A crafted DNS message could make
   `dns.name.from_wire_parser()` burn excessive CPU on name decompression;
   every discovery lookup parses untrusted wire-format responses.
+- **SVCB TargetName validation** — `AgentRecord.target_host` and
+  `SvcbRecord.target` now must be one DNS name: the root `.`, or labels of 1
+  to 63 letters, digits, hyphens or underscores, with an optional trailing
+  dot. Before this change, a target such as `agent.example.test key65400="x"`
+  went into the SVCB presentation format and added a SvcParamKey. The Python
+  `publish()` API and the CLI did not refuse it (the MCP tools did). The
+  DNSimple backend also refuses such a target on a direct call. The
+  underscore rule of draft-02 §3.2 does not change.
 
 ## [0.28.1] - 2026-08-09
 

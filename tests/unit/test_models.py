@@ -8,9 +8,45 @@ from pydantic import ValidationError
 
 from dns_aid.core.models import AgentRecord, DiscoveryResult, Protocol, SvcbRecord, VerifyResult
 
+# Values that are not one DNS TargetName. In SVCB presentation format, each
+# of these values adds SvcParams or changes the parse of the record.
+MALFORMED_TARGETS = [
+    'agent.example.test key65400="injected"',
+    'agent.example.test. key65400="injected"',
+    "agent.example.test key65400=injected",
+    "agent.example.test\tkey65400=injected",
+    "agent.example.test\nkey65400=injected",
+    'agent"example.test',
+    "agent\\032example.test",
+    "agent.example.test\n",
+    "agent\n.example.test",
+]
+MALFORMED_TARGET_IDS = [
+    "space-quoted-param",
+    "trailing-dot-space-quoted-param",
+    "space-unquoted-param",
+    "tab",
+    "newline",
+    "double-quote",
+    "backslash",
+    "trailing-lf",
+    "lf-at-label-end",
+]
+
 
 class TestAgentRecord:
     """Tests for AgentRecord model."""
+
+    @pytest.mark.parametrize("target_host", MALFORMED_TARGETS, ids=MALFORMED_TARGET_IDS)
+    def test_target_host_must_be_one_name(self, target_host):
+        """Test that a target_host that is not one DNS TargetName is refused."""
+        with pytest.raises(ValidationError):
+            AgentRecord(
+                name="chat",
+                domain="example.com",
+                protocol=Protocol.MCP,
+                target_host=target_host,
+            )
 
     def test_create_basic_agent(self):
         """Test creating a basic agent record."""
@@ -459,6 +495,17 @@ class TestSvcbRecord:
     def test_normalized_target_adds_trailing_dot(self):
         record = SvcbRecord(target="svc.example.com", alpn="mcp")
         assert record.normalized_target == "svc.example.com."
+
+    @pytest.mark.parametrize("target", MALFORMED_TARGETS, ids=MALFORMED_TARGET_IDS)
+    def test_target_must_be_one_name(self, target):
+        """Test that a target that is not one DNS TargetName is refused."""
+        with pytest.raises(ValidationError):
+            SvcbRecord(target=target, alpn="mcp")
+
+    @pytest.mark.parametrize("target", [".", "svc.example.com", "svc.example.com."])
+    def test_target_accepts_valid_names(self, target):
+        """Test that the root, a name and a name with a trailing dot are accepted."""
+        assert SvcbRecord(target=target, alpn="mcp").target == target
 
 
 class TestDiscoveryResult:

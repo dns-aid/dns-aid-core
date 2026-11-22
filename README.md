@@ -62,7 +62,7 @@ pip install "dns-aid[cli,mcp]"
 pip install "dns-aid[cli,mcp] @ git+https://github.com/dns-aid/dns-aid-core.git"
 ```
 
-For backend-specific extras (`route53`, `cloudflare`, `ns1`, `cloud_dns`, `infoblox`, `akamai-edgedns`, `ddns`), see the [Getting Started Guide](docs/getting-started.md#install).
+For backend-specific extras (`route53`, `cloudflare`, `ns1`, `cloud_dns`, `infoblox`, `akamai-edgedns`, `ddns`, `dnsimple`), see the [Getting Started Guide](docs/getting-started.md#install).
 
 ### Python Library
 
@@ -759,6 +759,7 @@ DNS-AID supports multiple DNS backends:
 | Infoblox NIOS | Infoblox NIOS (on-prem WAPI) | `dns-aid[nios]` | ✅ Production |
 | Infoblox UDDI | Infoblox Universal DDI (cloud) | `dns-aid[infoblox]` | ✅ Production |
 | DDNS | RFC 2136 Dynamic DNS (BIND, etc.) | `dns-aid[ddns]` | ✅ Production |
+| DNSimple | DNSimple DNS (API v2) | `dns-aid[dnsimple]` | ✅ Production |
 | Mock | In-memory (testing only) | (built-in) | ✅ Production |
 
 ### Route 53 Setup

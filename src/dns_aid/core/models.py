@@ -238,7 +238,14 @@ class SvcbRecord(BaseModel):
     @field_validator("target", mode="after")
     @classmethod
     def _enforce_no_underscore_in_target(cls, v: str) -> str:
-        """Enforce draft-02 §3.2 (Known Organization, Unknown Agent) at the type boundary.
+        """Enforce the TargetName rules at the type boundary.
+
+        The target must be one DNS TargetName (see ``validate_target_name``).
+        A value with whitespace, a quote or a backslash can add SvcParams
+        when a backend writes the SVCB presentation format.
+
+        The target must also obey draft-02 §3.2 (Known Organization,
+        Unknown Agent): no underscores.
 
         Earlier the no-underscore rule fired only inside ``publish()``;
         anyone constructing an ``SvcbRecord`` directly (or via
@@ -256,8 +263,10 @@ class SvcbRecord(BaseModel):
         from dns_aid.utils.validation import (
             _underscore_bypass_env_enabled,
             validate_no_underscore_in_target,
+            validate_target_name,
         )
 
+        validate_target_name(v)
         validate_no_underscore_in_target(v, allow_underscore=_underscore_bypass_env_enabled())
         return v
 
@@ -906,7 +915,10 @@ class AgentRecord(BaseModel):
     @field_validator("target_host", mode="after")
     @classmethod
     def _enforce_no_underscore_in_target_host(cls, v: str) -> str:
-        """Mirror the SvcbRecord.target rule on AgentRecord's target_host.
+        """Mirror the SvcbRecord.target rules on AgentRecord's target_host.
+
+        The target_host must be one DNS TargetName (see
+        ``validate_target_name``), and it must not have underscores.
 
         Honours the operator env gate
         ``DNS_AID_ALLOW_UNDERSCORE_TARGET=1`` so the publisher's
@@ -917,8 +929,10 @@ class AgentRecord(BaseModel):
         from dns_aid.utils.validation import (
             _underscore_bypass_env_enabled,
             validate_no_underscore_in_target,
+            validate_target_name,
         )
 
+        validate_target_name(v)
         validate_no_underscore_in_target(v, allow_underscore=_underscore_bypass_env_enabled())
         return v
 

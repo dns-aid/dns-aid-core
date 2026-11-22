@@ -17,6 +17,7 @@ from dns_aid.utils.validation import (
     validate_no_underscore_in_target,
     validate_port,
     validate_protocol,
+    validate_target_name,
     validate_ttl,
     validate_version,
     validate_well_known_path,
@@ -548,3 +549,84 @@ class TestValidateWellKnownPath:
     def test_rejects_non_string(self):
         with pytest.raises(ValidationError):
             validate_well_known_path(None)  # type: ignore[arg-type]
+
+
+class TestValidateTargetName:
+    """Tests for validate_target_name."""
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            ".",
+            "agent.example.com",
+            "agent.example.com.",
+            "Agent-1.Example.COM",
+            "svc_internal.example.com",
+            "localhost",
+            "a" * 63 + ".example.com",
+            ".".join(["a" * 63] * 3) + "." + "a" * 61,
+            ".".join(["a" * 63] * 3) + "." + "a" * 61 + ".",
+        ],
+        ids=[
+            "root",
+            "name",
+            "trailing-dot",
+            "mixed-case-and-hyphen",
+            "underscore",
+            "one-label",
+            "label-63",
+            "name-253",
+            "name-253-trailing-dot",
+        ],
+    )
+    def test_accepts_one_name(self, target):
+        assert validate_target_name(target) == target
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "",
+            "..",
+            ".example.com",
+            "agent..example.com",
+            "agent.example.com..",
+            "a" * 64 + ".example.com",
+            ".".join(["a" * 63] * 3) + "." + "a" * 62,
+            'agent.example.test key65400="injected"',
+            "agent.example.test\tkey65400=x",
+            "agent.example.test\x00",
+            "*.example.com",
+            "agent.example.com/path",
+            "agent.example.com:443",
+            "agent.ex\u00e4mple.com",
+            "agent.example.test\n",
+            "agent.example.test.\n",
+            "agent\n.example.test",
+        ],
+        ids=[
+            "empty",
+            "two-dots",
+            "leading-dot",
+            "empty-label",
+            "two-trailing-dots",
+            "label-64",
+            "name-254",
+            "space-param",
+            "tab",
+            "nul",
+            "wildcard",
+            "slash",
+            "port",
+            "non-ascii",
+            "trailing-lf",
+            "trailing-dot-lf",
+            "lf-at-label-end",
+        ],
+    )
+    def test_rejects_value_that_is_not_one_name(self, target):
+        with pytest.raises(ValidationError, match="target"):
+            validate_target_name(target)
+
+    def test_rejects_non_string(self):
+        with pytest.raises(ValidationError):
+            validate_target_name(None)  # type: ignore[arg-type]
