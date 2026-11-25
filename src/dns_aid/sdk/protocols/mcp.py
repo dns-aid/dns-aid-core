@@ -22,6 +22,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
@@ -154,6 +155,25 @@ if _MCP_V2:
 
 
 _TransportClass = Literal["transport_mismatch", "real_failure"]
+
+
+@dataclass
+class _Handshake:
+    """How far the modern transport got before failing.
+
+    The legacy fallback is only safe while nothing has run on the server, i.e.
+    before ``initialize()`` completes. After that the server has proven it
+    speaks streamable HTTP, so an error is a real failure, and falling back
+    would re-send the request (a ``tools/call`` would run twice).
+
+    ``status`` is the HTTP status the transport had seen when ``initialize()``
+    failed. ``_TelemetryCapture.http_status_code`` keeps the *last* status, so
+    reading it later can pick up a 405 from the GET stream or the
+    session-closing DELETE instead of the response that actually failed.
+    """
+
+    completed: bool = False
+    status: int | None = None
 
 
 def _classify_transport_failure(
@@ -330,11 +350,13 @@ class MCPProtocolHandler(ProtocolHandler):
 
         start = time.perf_counter()
         capture = _TelemetryCapture()
+        handshake = _Handshake()
 
         # ── Modern Streamable HTTP path ──────────────────────────────────
         try:
             return await self._invoke_via_streamable_http(
                 capture=capture,
+                handshake=handshake,
                 endpoint=endpoint,
                 mcp_method=mcp_method,
                 mcp_arguments=mcp_arguments,
@@ -347,8 +369,12 @@ class MCPProtocolHandler(ProtocolHandler):
             elapsed = (time.perf_counter() - start) * 1000
             return _build_failure_response(exc, elapsed)
         except BaseException as exc:  # noqa: BLE001 - we classify and re-raise via fallback if not transport_mismatch
-            status = capture.http_status_code
-            classification = _classify_transport_failure(exc, status)
+            # Only a failure before the handshake completed can be a transport
+            # mismatch; anything later must not be replayed via the legacy path.
+            status = handshake.status if handshake.status is not None else capture.http_status_code
+            classification = (
+                "real_failure" if handshake.completed else _classify_transport_failure(exc, status)
+            )
             if classification != "transport_mismatch":
                 elapsed = (time.perf_counter() - start) * 1000
                 return _build_failure_response(exc, elapsed)
@@ -378,6 +404,7 @@ class MCPProtocolHandler(ProtocolHandler):
         self,
         *,
         capture: _TelemetryCapture,
+        handshake: _Handshake,
         endpoint: str,
         mcp_method: str,
         mcp_arguments: dict[str, Any],
@@ -399,7 +426,12 @@ class MCPProtocolHandler(ProtocolHandler):
             ) as (read_stream, write_stream, _get_session_id),
             ClientSession(read_stream, write_stream) as session,
         ):
-            await session.initialize()
+            try:
+                await session.initialize()
+            except BaseException:
+                handshake.status = capture.http_status_code
+                raise
+            handshake.completed = True
 
             if mcp_method == "tools/list":
                 list_result = await session.list_tools()
