@@ -91,6 +91,7 @@ cloud-dns = [
     "google-auth>=2.30.0",
     "requests>=2.33.0",
     "urllib3>=2.8.0",   # PYSEC-2026-4175/4176/4177 (fixed in 2.8.0); earlier CVE-2026-44431 + CVE-2026-44432 — via boto3/requests
+    "pyasn1>=0.6.5",    # CVE-2026-119194..119197 (fixed in 0.6.5) — via google-auth -> pyasn1-modules
 ]
 infoblox = [
     # Uses httpx from core deps
@@ -126,11 +127,13 @@ otel = [
     # OpenTelemetry integration for SDK telemetry (spec 005).
     # Upper bound pinned at <2.0.0 — major version bumps are coordinated
     # via a deliberate compat audit (FR-027 / hardening H6).
-    "opentelemetry-api>=1.20.0,<2.0.0",
-    "opentelemetry-sdk>=1.20.0,<2.0.0",
+    # Floors at 1.45.2: CVE-2026-114603 (fixed in 1.45.1) + CVE-2026-126360
+    # (fixed in 1.45.2) in opentelemetry-api; sdk/exporter kept in lockstep.
+    "opentelemetry-api>=1.45.2,<2.0.0",
+    "opentelemetry-sdk>=1.45.2,<2.0.0",
     # OTLP gRPC exporter — required for otel_export_format="otlp"; without
     # this package, OTLP export silently falls back to console (a footgun).
-    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.45.2,<2.0.0",
 ]
 cel = [
     # CEL (Common Expression Language) custom policy rules

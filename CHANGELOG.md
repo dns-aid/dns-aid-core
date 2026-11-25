@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A crafted DNS message could make `dns.name.from_wire_parser()` burn
   excessive CPU on name decompression; every discovery lookup parses
   untrusted wire-format responses.
+- **Bumped `opentelemetry-*` floors to `>=1.45.2`** in the `otel` extra
+  (CVE-2026-114603, fixed in 1.45.1; CVE-2026-126360, fixed in 1.45.2, in
+  `opentelemetry-api`). `opentelemetry-sdk` and the OTLP gRPC exporter move
+  in lockstep.
+- **Added a `pyasn1>=0.6.5` floor to the `cloud-dns` extra**
+  (CVE-2026-119194..119197). It is pulled transitively via `google-auth` ->
+  `pyasn1-modules`.
 
 ## [0.28.1] - 2026-08-09
 
