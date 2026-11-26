@@ -67,7 +67,7 @@ structlog.configure(
 # stateless_http, ...) in the constructor and its streamable_http_app() takes
 # no arguments, while 2.x rejects them in the constructor and accepts them on
 # streamable_http_app(). See _build_server() and the http transport in main().
-try:  # mcp >= 1.28.1, < 2
+try:  # mcp >= 1.30.0, < 2
     from mcp.server.fastmcp import FastMCP as MCPServer  # noqa: E402
 
     _MCP_MAJOR = 1
