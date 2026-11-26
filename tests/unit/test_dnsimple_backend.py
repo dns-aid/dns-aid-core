@@ -2051,3 +2051,86 @@ class TestDNSimpleBackendFactoryWiring:
         from dns_aid.cli.backends import BACKEND_REGISTRY
 
         assert BACKEND_REGISTRY["dnsimple"].optional_dep == "dnsimple"
+
+
+class TestDNSimpleSVCBComparison:
+    """The API sorts SvcParams and quotes all values, so text never matches.
+
+    Without a parsed comparison, step 1 of ``_replace_records`` never keeps
+    an existing SVCB record: every republish of an unchanged agent writes,
+    and with two existing records the PATCH of the other one to an equal
+    value is refused by the API.
+    """
+
+    SENT = '1 chat.example.com alpn="mcp" port="443" mandatory="alpn,port" key65400="https://x/cap.json"'
+    # The same record as the API returns it: keys sorted, all values quoted.
+    STORED = '1 chat.example.com mandatory="alpn,port" alpn="mcp" port="443" key65400="https://x/cap.json"'
+
+    PARAMS = {
+        "alpn": "mcp",
+        "port": "443",
+        "mandatory": "alpn,port",
+        "key65400": "https://x/cap.json",
+    }
+
+    @pytest.mark.parametrize(
+        ("a", "b", "equal"),
+        [
+            (SENT, STORED, True),
+            ('1 chat.example.com. alpn="mcp"', "1 CHAT.example.com alpn=mcp", True),
+            ('1 . mandatory="port,alpn"', '1 . mandatory="alpn,port"', True),
+            ('1 . alpn="mcp,h2"', '1 . alpn="h2,mcp"', False),  # preference order
+            ('1 . port="443"', '1 . port="8443"', False),
+            ('1 . port="443"', '2 . port="443"', False),
+            ('1 a.example.com port="443"', '1 b.example.com port="443"', False),
+            ('1 . alpn="mcp"', '1 . alpn="mcp" port="443"', False),
+            ("garbage", "garbage", False),
+        ],
+    )
+    def test_same_value(self, a, b, equal):
+        assert DNSimpleBackend._same_value("SVCB", a, b) is equal
+
+    @pytest.mark.asyncio
+    async def test_republish_of_an_unchanged_record_does_not_write(self):
+        backend = _make_backend()
+        stored = _record(11, content=self.STORED)
+        stored["ttl"] = 300
+        mock_client, events = _make_client(pages=[_records_page([stored])])
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            await backend.create_svcb_record(
+                zone="example.com",
+                name="chat",
+                priority=1,
+                target="chat.example.com.",
+                params=self.PARAMS,
+                ttl=300,
+            )
+
+        assert _patches(events) == []
+        assert _posts(events) == []
+        assert _deletes(events) == []
+
+    @pytest.mark.asyncio
+    async def test_equal_second_record_is_kept_and_the_other_deleted(self):
+        """The record already equal to the new value stays; nothing is PATCHed to it."""
+        backend = _make_backend()
+        other = _record(11, content='1 chat.example.com alpn="a2a" port="443"')
+        equal = _record(12, content=self.STORED)
+        for r in (other, equal):
+            r["ttl"] = 300
+        mock_client, events = _make_client(pages=[_records_page([other, equal])])
+
+        with patch.object(backend, "_get_client", return_value=mock_client):
+            await backend.create_svcb_record(
+                zone="example.com",
+                name="chat",
+                priority=1,
+                target="chat.example.com.",
+                params=self.PARAMS,
+                ttl=300,
+            )
+
+        assert _patches(events) == []
+        assert _posts(events) == []
+        assert _deletes(events) == [("DELETE", f"{RECORDS_PATH}/11")]

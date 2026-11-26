@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -39,6 +40,42 @@ the sandbox environment (https://api.sandbox.dnsimple.com)."""
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0
 _MAX_RETRY_DELAY = 30.0
+
+
+_SVCB_TOKEN = re.compile(r'(?:[^\s"]+|"[^"]*")+')
+
+
+def _svcb_identity(content: str) -> tuple[int, str, frozenset[tuple[str, str]]] | None:
+    """
+    Return a comparable form of SVCB content, or None if it does not parse.
+
+    The API does not return SVCB content as it was sent: it sorts the
+    SvcParams and quotes all values. Thus, a text comparison of the sent
+    and the returned content never matches. Compare these parts:
+
+    - the priority,
+    - the target (lowercase, without a trailing dot; "." stays "."),
+    - the set of SvcParams, with the quotes removed. The order of the keys
+      does not matter, and the order of the keys in "mandatory" does not
+      matter. The order in "alpn" matters (it is a preference order).
+
+    The backend refuses a backslash or a double quote in a param value
+    (see ``_format_svcb_content``), thus a quoted value has no escapes.
+    """
+    tokens = [t.replace('"', "") for t in _SVCB_TOKEN.findall(content)]
+    if len(tokens) < 2 or not tokens[0].isdigit():
+        return None
+    target = tokens[1].lower()
+    if target != ".":
+        target = target.rstrip(".")
+    params: set[tuple[str, str]] = set()
+    for token in tokens[2:]:
+        key, _, value = token.partition("=")
+        key = key.lower()
+        if key == "mandatory":
+            value = ",".join(sorted(v.lower() for v in value.split(",")))
+        params.add((key, value))
+    return int(tokens[0]), target, frozenset(params)
 
 
 def _decode_txt_content(content: str) -> str:
@@ -407,8 +444,12 @@ class DNSimpleBackend(DNSBackend):
         updates: list[tuple[dict, dict]] = []
         for record in existing:
             value = self._record_value(record)
-            if value in remaining:
-                remaining.remove(value)
+            match = next(
+                (c for c in remaining if self._same_value(record_type, value, c)),
+                None,
+            )
+            if match is not None:
+                remaining.remove(match)
                 if record.get("ttl") != ttl:
                     updates.append((record, {"ttl": ttl}))
             else:
@@ -528,6 +569,20 @@ class DNSimpleBackend(DNSBackend):
                     record_id=record.get("id"),
                     error=str(exc),
                 )
+
+    @staticmethod
+    def _same_value(record_type: str, existing: str, new: str) -> bool:
+        """
+        Tell if an existing record value is equal to a new value.
+
+        For SVCB, compare the parsed content (see ``_svcb_identity``),
+        because the API changes the order and the quotes of the SvcParams.
+        For other types, compare the text.
+        """
+        if record_type == "SVCB":
+            identity = _svcb_identity(existing)
+            return identity is not None and identity == _svcb_identity(new)
+        return existing == new
 
     @staticmethod
     def _record_value(record: dict) -> str:
