@@ -610,6 +610,8 @@ async def discover(
 
     elapsed_ms = (time.perf_counter() - start_time) * 1000
 
+    _stamp_discovered_at(agents)
+
     result = DiscoveryResult(
         query=query,
         domain=domain,
@@ -771,6 +773,21 @@ async def _query_single_agent(
             # Custom/private-use params may appear as string keys in the
             # presentation format. We parse the text representation to extract them.
             svcb_text = str(rdata)
+
+            # RFC 9460 §8: a client MUST ignore an RR whose ``mandatory`` list
+            # names a key it does not implement. This is how a publisher
+            # fails closed, e.g. making ``cap-sha256`` mandatory so a client
+            # that would not check the pin skips the record instead of using
+            # it unpinned. Skip this RR only; others in the RRset may be fine.
+            unsupported = _unsupported_mandatory_keys(svcb_text)
+            if unsupported:
+                logger.warning(
+                    "Skipping SVCB record with unsupported mandatory keys",
+                    fqdn=fqdn,
+                    unsupported_keys=unsupported,
+                )
+                continue
+
             custom_params = _parse_svcb_custom_params(svcb_text)
 
             cap_uri = custom_params.get("cap")
@@ -1062,6 +1079,44 @@ async def _query_single_agent(
 from dns_aid.core.models import DNS_AID_KEY_MAP, DNS_AID_KEY_MAP_REVERSE  # noqa: E402
 
 _DNS_AID_KEY_NAMES: frozenset[str] = frozenset(DNS_AID_KEY_MAP.keys())
+
+
+# SvcParamKeys this client implements, for the RFC 9460 §8 mandatory check.
+# ech (5) and dohpath (7) are parsed by dnspython but not acted on, so a record
+# that makes them mandatory is skipped, as the RFC requires.
+_RFC9460_KEY_NAMES: dict[str, str] = {
+    "key0": "mandatory",
+    "key1": "alpn",
+    "key2": "no-default-alpn",
+    "key3": "port",
+    "key4": "ipv4hint",
+    "key5": "ech",
+    "key6": "ipv6hint",
+    "key7": "dohpath",
+}
+_SUPPORTED_MANDATORY_KEYS: frozenset[str] = (
+    frozenset(_RFC9460_KEY_NAMES.values()) - {"ech", "dohpath"}
+) | frozenset(DNS_AID_KEY_MAP)
+
+
+def _unsupported_mandatory_keys(svcb_text: str) -> list[str]:
+    """Keys in the record's ``mandatory`` list that this client does not implement.
+
+    Keys are compared by name; ``keyNNNNN`` forms are mapped to names first
+    (RFC 9460 keys and the DNS-AID keys in ``DNS_AID_KEY_MAP``).
+    """
+    try:
+        parts = shlex.split(svcb_text)
+    except ValueError:
+        return []
+    for part in parts:
+        key, sep, value = part.partition("=")
+        if not sep or key.strip().lower() != "mandatory":
+            continue
+        listed = [k.strip().lower() for k in value.split(",") if k.strip()]
+        names = [_RFC9460_KEY_NAMES.get(k, DNS_AID_KEY_MAP_REVERSE.get(k, k)) for k in listed]
+        return [k for k in names if k not in _SUPPORTED_MANDATORY_KEYS]
+    return []
 
 
 def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
@@ -2047,7 +2102,17 @@ async def discover_at_fqdn(fqdn: str) -> AgentRecord | None:
         except ValueError:
             logger.error("Unknown protocol", protocol=protocol_str)
             return None
-    return await _query_single_agent(domain, name, probe)
+    agent = await _query_single_agent(domain, name, probe)
+    if agent is not None:
+        _stamp_discovered_at([agent])
+    return agent
+
+
+def _stamp_discovered_at(agents: list[AgentRecord]) -> None:
+    """Record when discovery returned these agents (SDK freshness check)."""
+    now = time.time()
+    for agent in agents:
+        agent.discovered_at = now
 
 
 def _dns_name_eq(a: str, b: str) -> bool:

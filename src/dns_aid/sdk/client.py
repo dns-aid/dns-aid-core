@@ -46,6 +46,49 @@ from dns_aid.sdk.telemetry.otel import TelemetryManager
 from dns_aid.utils.url_safety import UnsafeURLError, redact_url_for_log, validate_fetch_url_async
 
 
+async def _reverify_agent(
+    agent: AgentRecord, *, require_dnssec: bool
+) -> tuple[AgentRecord | None, str | None]:
+    """Re-resolve a stale agent and check it still is what was discovered.
+
+    Returns ``(fresh, None)`` when the agent resolves to the same target,
+    port and cap-sha256, and still passes every check the original record
+    passed: DNSSEC if it was validated, DANE if it was verified. Returns
+    ``(None, reason)`` otherwise, including when re-resolution fails.
+    """
+    from dns_aid.core.discoverer import discover as _discover
+
+    # No downgrade: whatever the record was verified with, the fresh answer
+    # has to pass again.
+    need_dnssec = require_dnssec or agent.dnssec_validated
+    need_dane = agent.dane_verified is True
+    try:
+        result = await _discover(
+            agent.domain,
+            name=agent.name,
+            protocol=agent.protocol.value,
+            require_dnssec=need_dnssec,
+            verify_dane=need_dane,
+        )
+    except Exception as exc:  # noqa: BLE001 — any failure refuses the call
+        return None, f"re-resolve failed: {type(exc).__name__}: {exc}"
+
+    for fresh in result.agents:
+        if fresh.fqdn.rstrip(".").lower() != agent.fqdn.rstrip(".").lower():
+            continue
+        drifted = [
+            field
+            for field in ("target_host", "port", "cap_sha256")
+            if getattr(fresh, field) != getattr(agent, field)
+        ]
+        if drifted:
+            return None, f"record changed since discovery: {', '.join(drifted)}"
+        if need_dane and fresh.dane_verified is not True:
+            return None, "DANE verification no longer holds"
+        return fresh, None
+    return None, "agent missing from fresh discovery"
+
+
 class _OTELInvocationContext:
     """Minimal sync context wrapper around an OTEL span for one invoke (spec 005).
 
@@ -442,6 +485,19 @@ class AgentClient:
                 "async with AgentClient() as client: ..."
             )
 
+        # --- Freshness re-verification (verify_freshness_seconds) ---
+        # Runs before auth and policy so both are decided against the record
+        # the call will actually go to.
+        if (
+            self._config.verify_freshness_seconds > 0
+            and agent.discovered_at is not None
+            and _time.time() - agent.discovered_at > self._config.verify_freshness_seconds
+        ):
+            fresh, reason = await _reverify_agent(agent, require_dnssec=self._config.require_dnssec)
+            if fresh is None:
+                return self._refuse_stale(agent, method, reason or "record changed")
+            agent = fresh
+
         protocol = agent.protocol.value if hasattr(agent.protocol, "value") else str(agent.protocol)
         handler = self._get_handler(protocol)
         effective_timeout = timeout or self._config.timeout_seconds
@@ -508,6 +564,40 @@ class AgentClient:
         finally:
             if not _otel_ctx._exited:
                 _otel_ctx.__exit__(None, None, None)
+
+    def _refuse_stale(
+        self, agent: AgentRecord, method: str | None, reason: str
+    ) -> InvocationResult:
+        """Refusal result for a stale record that failed re-verification."""
+        protocol = agent.protocol.value if hasattr(agent.protocol, "value") else str(agent.protocol)
+        logger.warning(
+            "sdk.freshness_reverify_failed",
+            agent_fqdn=agent.fqdn,
+            reason=reason,
+            age_seconds=round(_time.time() - (agent.discovered_at or 0), 1),
+        )
+        signal = InvocationSignal(
+            agent_fqdn=agent.fqdn,
+            agent_endpoint=agent.endpoint_url,
+            protocol=protocol,
+            method=method,
+            invocation_latency_ms=0.0,
+            status=InvocationStatus.REFUSED,
+            error_type="stale_record",
+            error_message=reason,
+            caller_id=self._config.caller_id,
+        )
+        otel_ctx = _OTELInvocationContext(self._otel_mgr, agent, method)
+        otel_ctx.__enter__()
+        try:
+            otel_ctx.record_outcome(signal)
+        finally:
+            otel_ctx.__exit__(None, None, None)
+        return InvocationResult(
+            success=False,
+            data={"error": "stale_record", "agent_fqdn": agent.fqdn, "reason": reason},
+            signal=signal,
+        )
 
     async def _invoke_inner(
         self,

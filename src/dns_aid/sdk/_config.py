@@ -197,6 +197,21 @@ class SDKConfig(BaseModel):
         ge=1.0,
         description="Seconds before an open circuit transitions to half-open.",
     )
+    verify_freshness_seconds: int = Field(
+        default=0,
+        ge=0,
+        description="When > 0, invoke() re-resolves an agent whose discovered_at is older "
+        "than this many seconds and refuses the call if the target, port or cap-sha256 "
+        "changed, or if DNSSEC/DANE verification the record originally passed no longer "
+        "holds. Closes the window between discovery and invocation. 0 (default) disables "
+        "it; records without discovered_at are never re-resolved.",
+    )
+    require_dnssec: bool = Field(
+        default=False,
+        description="Require a DNSSEC-validated answer when invoke() re-resolves a stale "
+        "agent (see verify_freshness_seconds). A record that was DNSSEC-validated when "
+        "discovered must stay validated on re-resolution regardless of this flag.",
+    )
     credential_provider_timeout: float = Field(
         default=30.0,
         gt=0.0,
@@ -253,6 +268,8 @@ class SDKConfig(BaseModel):
             circuit_breaker_enabled=os.getenv("DNS_AID_CIRCUIT_BREAKER", "").lower() == "true",
             circuit_breaker_threshold=int(os.getenv("DNS_AID_CIRCUIT_BREAKER_THRESHOLD", "5")),
             circuit_breaker_cooldown=float(os.getenv("DNS_AID_CIRCUIT_BREAKER_COOLDOWN", "60")),
+            verify_freshness_seconds=int(os.getenv("DNS_AID_VERIFY_FRESHNESS_SECONDS", "0")),
+            require_dnssec=os.getenv("DNS_AID_REQUIRE_DNSSEC", "").lower() in ("1", "true", "yes"),
             credential_provider_timeout=float(
                 os.getenv("DNS_AID_CREDENTIAL_PROVIDER_TIMEOUT", "30")
             ),
