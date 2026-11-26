@@ -420,17 +420,36 @@ async def sync_index(
         primary = primary_records.get(name)
         if not primary:
             return UNKNOWN_PROTOCOL
-        params = primary.get("data", {}).get("params", {}) or {}
+        from dns_aid.core.models import DNS_AID_KEY_MAP_REVERSE, Protocol
+
+        raw_params = primary.get("data", {}).get("params", {}) or {}
+        # Backends report custom SvcParams by name (``bap``) or by number
+        # (``key65402``); the discoverer accepts both, so must this. Reading
+        # only ``bap`` ignored the token on every keyNNNNN backend.
+        params = {
+            DNS_AID_KEY_MAP_REVERSE.get(str(k).lower(), str(k).lower()): v
+            for k, v in raw_params.items()
+        }
+
         # SVCB params from list_records may carry stray quoting.
-        raw = params.get("bap") or params.get("alpn")
-        if not raw:
-            return UNKNOWN_PROTOCOL
-        cleaned = raw.strip('"') if isinstance(raw, str) else raw
-        normalized = normalize_bap(cleaned)
-        if normalized is None:
-            return UNKNOWN_PROTOCOL
-        proto_token, _version = split_bap_token(normalized)
-        return proto_token or UNKNOWN_PROTOCOL
+        def _clean(value: object) -> str:
+            return value.strip().strip('"') if isinstance(value, str) else ""
+
+        # Same order as the discoverer's _reconcile_protocol: the bap token,
+        # then each alpn id, first one that names a protocol we model. A bap
+        # token that is not a protocol (e.g. ``webmcp``) must not become the
+        # index entry's protocol: the discoverer cannot parse ``site:webmcp``
+        # and drops the entry, losing an agent whose alpn is a real protocol.
+        normalized = normalize_bap(_clean(params.get("bap"))) if params.get("bap") else None
+        bap_token = split_bap_token(normalized)[0] if normalized else None
+        alpn_ids = [a.strip().lower() for a in _clean(params.get("alpn")).split(",") if a.strip()]
+        candidates = [c for c in (bap_token, *alpn_ids) if c]
+        modeled = {p.value for p in Protocol}
+        for candidate in candidates:
+            if candidate.lower() in modeled:
+                return candidate.lower()
+        # Nothing modeled: keep the record's own first token, as before.
+        return candidates[0] if candidates else UNKNOWN_PROTOCOL
 
     try:
         # Two enumerations, one per record type. The SVCB pass builds

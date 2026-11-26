@@ -745,3 +745,81 @@ class TestSyncIndexScanException:
         result = await sync_index("example.com", mock_backend)
         assert result.success is False
         assert "scan boom" in result.message
+
+
+class TestSyncIndexProtocol:
+    """The index entry's protocol follows the discoverer's reconciliation."""
+
+    @pytest.mark.asyncio
+    async def test_non_protocol_bap_token_falls_back_to_alpn(self, mock_backend: MockBackend):
+        """bap=webmcp is a marker, not a protocol: the entry must be site:https.
+
+        Writing site:webmcp made the discoverer drop the entry, because it
+        cannot map ``webmcp`` to a protocol.
+        """
+        await publish(
+            name="site",
+            domain="example.com",
+            protocol="https",
+            endpoint="example.com",
+            bap="webmcp",
+            backend=mock_backend,
+        )
+
+        result = await sync_index("example.com", mock_backend)
+
+        assert result.success is True
+        assert IndexEntry(name="site", protocol="https") in result.entries
+        assert IndexEntry(name="site", protocol="webmcp") not in result.entries
+
+    @pytest.mark.asyncio
+    async def test_protocol_bap_token_still_wins(self, mock_backend: MockBackend):
+        await publish(
+            name="chat",
+            domain="example.com",
+            protocol="mcp",
+            endpoint="mcp.example.com",
+            bap="mcp=1.0",
+            backend=mock_backend,
+        )
+
+        result = await sync_index("example.com", mock_backend)
+
+        assert IndexEntry(name="chat", protocol="mcp") in result.entries
+
+    @pytest.mark.asyncio
+    async def test_bap_reported_by_name_is_reconciled(self, mock_backend: MockBackend):
+        """A backend that reports the param as ``bap`` (not key65402) must not yield site:webmcp."""
+        await mock_backend.create_svcb_record(
+            zone="example.com",
+            name="site",
+            priority=1,
+            target="example.com.",
+            params={"alpn": "https", "port": "443", "bap": "webmcp"},
+        )
+        await mock_backend.create_txt_record(
+            zone="example.com", name="site", values=["version=1.0.0"]
+        )
+
+        result = await sync_index("example.com", mock_backend)
+
+        assert IndexEntry(name="site", protocol="https") in result.entries
+        assert IndexEntry(name="site", protocol="webmcp") not in result.entries
+
+    @pytest.mark.asyncio
+    async def test_bap_reported_as_key65402_is_read(self, mock_backend: MockBackend):
+        """The numeric form carries the protocol too; alpn=h2 must not win over bap=mcp."""
+        await mock_backend.create_svcb_record(
+            zone="example.com",
+            name="chat",
+            priority=1,
+            target="mcp.example.com.",
+            params={"alpn": "h2", "port": "443", "key65402": "mcp"},
+        )
+        await mock_backend.create_txt_record(
+            zone="example.com", name="chat", values=["version=1.0.0"]
+        )
+
+        result = await sync_index("example.com", mock_backend)
+
+        assert IndexEntry(name="chat", protocol="mcp") in result.entries

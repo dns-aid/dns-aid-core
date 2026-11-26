@@ -700,6 +700,9 @@ async def _query_single_agent(
                 return None
 
         for rdata in answers:
+            # Owner of the ServiceMode record we end up parsing: the queried
+            # name, or the alias target when AliasMode is followed below.
+            service_owner = fqdn
             # AliasMode (priority 0): follow alias to canonical name
             # Per RFC 9460 and IETF draft Section 4.4.2, AliasMode maps a
             # friendly name to a canonical SVCB owner name.
@@ -717,6 +720,7 @@ async def _query_single_agent(
                         for alias_rdata in answers:
                             if alias_rdata.priority > 0:
                                 rdata = alias_rdata
+                                service_owner = alias_target
                                 break
                         else:
                             return None  # No ServiceMode record found
@@ -726,6 +730,11 @@ async def _query_single_agent(
 
             # Parse ServiceMode SVCB record
             target = str(rdata.target).rstrip(".")
+            if not target:
+                # RFC 9460 §2.5.2: in ServiceMode a TargetName of "." means
+                # the owner name itself. Stripping the dot left "", which
+                # failed AgentRecord validation and dropped the record.
+                target = service_owner.rstrip(".")
 
             # Extract standard parameters
             port = 443
