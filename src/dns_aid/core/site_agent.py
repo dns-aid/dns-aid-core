@@ -100,6 +100,11 @@ async def discover_site_agent(domain: str) -> AgentRecord | None:
     querying the flat owner ``site.<domain>`` (the form draft-02 says
     requestors MUST try first). Returns None when the domain does not
     publish the convention.
+
+    Returns a single record: discovery takes the first ServiceMode record
+    at the owner, so when the RRset holds both a remote-MCP and a WebMCP
+    record, record order decides which one comes back. See "Known
+    limitations" in docs/site-agent.md.
     """
     from dns_aid.core.discoverer import discover_at_fqdn
 

@@ -111,6 +111,24 @@ if agent is not None:
 the generic paths (`dns-aid discover example.com`, `dns-aid verify
 site.example.com`) work unchanged.
 
+## Known limitations
+
+- **Publishing both shapes overwrites the first.** The two `publish` calls above
+  target the same owner, and today a second publish at a flat owner replaces
+  the existing SVCB record instead of adding a sibling to the RRset (#246),
+  and overwrites the shared TXT metadata (#247). Until that is fixed, publish
+  one surface per domain, or write the two-record RRset at the DNS provider
+  directly.
+- **`discover_site_agent` returns one record.** Discovery returns the first
+  ServiceMode record at an owner, so with both a remote-MCP and a WebMCP
+  record in the RRset only one comes back, and record order decides which.
+  Returning every surface needs multi-record support in the core discoverer,
+  which goes with #246.
+- **TargetName `.` and index sync need #315.** Before it, a record whose
+  TargetName is `.` was dropped during discovery (empty target), and
+  `sync_index` wrote the WebMCP record as `site:webmcp`, an index entry
+  discovery cannot parse.
+
 ## Open questions
 
 - **The name.** `site` is the strawman (role-based, mirroring how `_index`
