@@ -511,9 +511,9 @@ async def resolve_a2a_endpoint(
                 card = await fetch_agent_card(discovered_endpoint, timeout=5.0)
                 if card:
                     # endpoint_for falls back to supportedInterfaces when the
-                    # card has no top-level url (every A2A 1.0 card), and
-                    # prefers the JSONRPC binding because _invoke_raw_a2a
-                    # speaks JSON-RPC over HTTP.
+                    # card has no top-level url (every A2A 1.0 card). JSONRPC
+                    # only, because the SDK and _invoke_raw_a2a speak JSON-RPC;
+                    # a card with no JSONRPC endpoint keeps the DNS endpoint.
                     card_url = card.endpoint_for("JSONRPC")
                     card_host = urlparse(card_url).hostname if card_url else None
                     dns_host = urlparse(discovered_endpoint).hostname
@@ -557,6 +557,7 @@ async def resolve_a2a_endpoint(
     try:
         card = await fetch_agent_card(normalized, timeout=5.0)
         if card:
+            # JSONRPC only, as above: no JSONRPC endpoint keeps the given one.
             card_url = card.endpoint_for("JSONRPC")
             card_host = urlparse(card_url).hostname if card_url else None
             given_host = urlparse(normalized).hostname

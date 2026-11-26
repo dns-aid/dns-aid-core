@@ -833,6 +833,38 @@ class TestResolveA2AEndpoint:
         assert resolved.endpoint == "https://agent.example.com"
 
     @pytest.mark.asyncio
+    async def test_card_without_a_jsonrpc_interface_keeps_the_given_endpoint(self):
+        """We speak JSON-RPC to whatever comes back, so a gRPC URL must not."""
+        card = _card(
+            "",
+            interfaces=[
+                ("https://agent.example.com/grpc", "GRPC"),
+                ("https://agent.example.com/rest", "HTTP+JSON"),
+            ],
+        )
+
+        with patch("dns_aid.core.a2a_card.fetch_agent_card", AsyncMock(return_value=card)):
+            resolved = await resolve_a2a_endpoint("agent.example.com")
+
+        assert resolved.endpoint == "https://agent.example.com"
+
+    @pytest.mark.asyncio
+    async def test_dns_mode_card_without_jsonrpc_keeps_the_dns_endpoint(self):
+        agent = _discovered_agent()
+        card = _card("", interfaces=[("https://a2a.example.com/grpc", "GRPC")])
+
+        with (
+            patch(
+                "dns_aid.core.discoverer.discover",
+                AsyncMock(return_value=SimpleNamespace(agents=[agent])),
+            ),
+            patch("dns_aid.core.a2a_card.fetch_agent_card", AsyncMock(return_value=card)),
+        ):
+            resolved = await resolve_a2a_endpoint(domain="example.com", name="chat")
+
+        assert resolved.endpoint == agent.endpoint_url
+
+    @pytest.mark.asyncio
     async def test_agent_card_fetch_error_uses_direct(self):
         with patch(
             "dns_aid.core.a2a_card.fetch_agent_card",

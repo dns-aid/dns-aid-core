@@ -1519,8 +1519,9 @@ async def _apply_ard_card(record: AgentRecord, http_agent: HttpIndexAgent) -> No
         # carries no top-level url, which is every A2A 1.0 card. Without
         # the fallback the entry keeps the endpoint _http_agent_to_record
         # derived from the catalog -- the identifier-as-locator this
-        # function exists to avoid.
-        card_endpoint = card.endpoint_for()
+        # function exists to avoid. JSONRPC only: that is what the SDK's
+        # A2A handler speaks, so a gRPC or HTTP+JSON URL would not work.
+        card_endpoint = card.endpoint_for("JSONRPC")
         if card_endpoint:
             _set_endpoint(card_endpoint)
         if card.skills:
@@ -1841,23 +1842,32 @@ def _apply_agent_card(agent: AgentRecord, card: A2AAgentCard) -> None:
 
     # A2A 1.0 carries neither the `endpoints` block (a dns-aid convention,
     # not an A2A field) nor a top-level url: supportedInterfaces is the only
-    # place the path lives. Read it when nothing above resolved a path, and
-    # only while the interface stays on the host DNS resolved -- the SVCB
-    # record is the authority for *where* the agent is, the card only for
-    # *which path* on it. An interface pointing at another host is an
-    # internal runtime URL or a redirection the DNS owner never signed for,
-    # so it is logged and dropped rather than followed.
-    if not agent.endpoint_override:
-        card_endpoint = card.endpoint_for()
+    # place the path lives. Read it only for A2A agents, only for that 1.0
+    # shape (0.2/0.3 cards resolve exactly as before), and only when nothing
+    # above resolved a path. Cards are fetched per host, so without the
+    # protocol check an MCP agent sharing the host would pick up the A2A path.
+    #
+    # The SVCB record is the authority for *where* the agent is, the card only
+    # for *which path* on it: the path is taken from the card and the DNS
+    # host:port kept, like the `endpoints` block. An interface on another
+    # host is an internal runtime URL or a redirection the DNS owner never
+    # signed for, so it is logged and dropped rather than followed.
+    if agent.protocol == Protocol.A2A and not card.url and not agent.endpoint_override:
+        card_endpoint = card.endpoint_for("JSONRPC")
         if card_endpoint:
-            card_host = urlparse(card_endpoint).hostname
-            if card_host == agent.target_host:
-                agent.endpoint_override = card_endpoint
+            parsed = urlparse(card_endpoint)
+            card_host = (parsed.hostname or "").casefold()
+            if card_host == agent.target_host.casefold().rstrip("."):
+                path = parsed.path or "/"
+                if parsed.query:
+                    path = f"{path}?{parsed.query}"
+                agent.endpoint_override = f"https://{agent.target_host}:{agent.port}{path}"
                 agent.endpoint_source = "dns_svcb_enriched"
                 logger.debug(
                     "Enriched agent endpoint from agent card interfaces",
                     agent=agent.name,
-                    endpoint=card_endpoint,
+                    endpoint=agent.endpoint_override,
+                    path=path,
                 )
             else:
                 logger.debug(

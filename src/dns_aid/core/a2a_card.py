@@ -366,45 +366,45 @@ class A2AAgentCard:
         """Convert skills to DNS-AID capability format (skill IDs)."""
         return self.skill_ids
 
-    def endpoint_for(self, preferred_binding: str | None = None) -> str | None:
-        """The https endpoint this card advertises, or None if it advertises none.
+    def endpoint_for(self, binding: str | None = None) -> str | None:
+        """The https endpoint this card advertises for *binding*, or None.
 
-        Precedence: the top-level ``url`` when it is https (the 0.2/0.3 shape),
-        then the interface list -- the entry whose ``protocol_binding`` equals
-        *preferred_binding* when one is asked for, otherwise the first https
-        entry.
+        Candidates, in order: the top-level ``url`` (the 0.2/0.3 shape), whose
+        binding is ``preferredTransport`` and defaults to ``JSONRPC`` per the
+        0.3 spec; then each ``supportedInterfaces`` / ``additionalInterfaces``
+        entry with its ``protocolBinding``. Only https URLs count.
 
-        The fallback is not a nicety for exotic cards: A2A 1.0 removed the
-        top-level ``url`` from ``AgentCard`` and made ``supportedInterfaces``
-        the required carrier of every endpoint (``a2a.proto``, ``AgentCard``
-        field 3), so a card that is conformant to the current spec reaches this
-        method with ``url == ""`` and resolves only through the list. The list
-        is ordered and "the first entry is preferred", per the same field's
-        comment, which is where the untargeted tie-break comes from.
+        A2A 1.0 removed the top-level ``url`` from ``AgentCard`` and made
+        ``supportedInterfaces`` the required carrier of every endpoint
+        (``a2a.proto``, ``AgentCard`` field 3), so a conformant 1.0 card
+        resolves only through the list. The list is ordered and "the first
+        entry is preferred", per the same field's comment.
 
         Args:
-            preferred_binding: Transport binding to prefer, e.g. ``"JSONRPC"``.
-                Compared case-insensitively. Absent or unmatched falls back to
-                the first https entry.
+            binding: Transport binding the caller speaks, e.g. ``"JSONRPC"``,
+                compared case-insensitively. When given, only a candidate with
+                that binding is returned: handing a JSON-RPC client a gRPC or
+                HTTP+JSON URL is worse than falling back to the endpoint it
+                already has. When None, the first candidate wins.
 
         Returns:
-            An https URL, or None when neither the url nor any interface
-            carries one.
+            An https URL, or None when no candidate matches.
         """
+        candidates: list[tuple[str, str | None]] = []
         if isinstance(self.url, str) and self.url.startswith("https://"):
-            return self.url
-
-        https_interfaces = [
-            i for i in self.interfaces if isinstance(i.url, str) and i.url.startswith("https://")
-        ]
-        if not https_interfaces:
-            return None
-        if preferred_binding:
-            wanted = preferred_binding.casefold()
-            for i in https_interfaces:
-                if (i.protocol_binding or "").casefold() == wanted:
-                    return i.url
-        return https_interfaces[0].url
+            candidates.append((self.url, self.preferred_transport or "JSONRPC"))
+        candidates.extend(
+            (i.url, i.protocol_binding)
+            for i in self.interfaces
+            if isinstance(i.url, str) and i.url.startswith("https://")
+        )
+        if binding is None:
+            return candidates[0][0] if candidates else None
+        wanted = binding.casefold()
+        for url, candidate_binding in candidates:
+            if (candidate_binding or "").casefold() == wanted:
+                return url
+        return None
 
     def to_publish_params(
         self,
