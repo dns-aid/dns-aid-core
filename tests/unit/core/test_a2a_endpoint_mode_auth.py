@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 import structlog
 
@@ -262,3 +263,79 @@ class TestSameOrigin:
         from dns_aid.core.invoke import _same_origin
 
         assert _same_origin(a, b) is expected
+
+
+def _api_key_card(scheme: dict) -> A2AAgentCard:
+    return A2AAgentCard.from_dict(
+        {"name": "Agent", "description": "d", "url": ENDPOINT, "securitySchemes": {"k": scheme}}
+    )
+
+
+class TestApiKeySchemesMapToTheRegistry:
+    """Cards say ``apiKey``; the SDK registry only knows ``api_key``.
+
+    Unmapped, an apiKey card plus credentials failed with "Unknown auth_type:
+    apiKey" once the card's auth started reaching the SDK.
+    """
+
+    def test_openapi_header_scheme(self):
+        auth = _api_key_card({"type": "apiKey", "in": "header", "name": "X-Agent-Key"})
+        assert auth.authentication.sdk_auth() == (
+            "api_key",
+            {"schemes": ["api_key"], "location": "header", "header_name": "X-Agent-Key"},
+        )
+
+    def test_openapi_query_scheme(self):
+        auth = _api_key_card({"type": "apiKey", "in": "query", "name": "key"})
+        assert auth.authentication.sdk_auth() == (
+            "api_key",
+            {"schemes": ["api_key"], "location": "query", "query_param": "key"},
+        )
+
+    def test_proto_style_scheme(self):
+        auth = _api_key_card(
+            {"apiKeySecurityScheme": {"location": "header", "name": "X-Agent-Key"}}
+        )
+        assert auth.authentication.sdk_auth()[1]["header_name"] == "X-Agent-Key"
+
+    @pytest.mark.parametrize(
+        "scheme",
+        [
+            {"type": "apiKey", "in": "cookie", "name": "session"},  # no handler support
+            {"type": "apiKey", "in": "header", "name": "X-Key\r\nX-Evil: 1"},  # not a token
+            {"type": "apiKey", "in": "query", "name": "a&b=c"},
+            {"type": "apiKey"},
+        ],
+    )
+    def test_unusable_placement_falls_back_to_handler_defaults(self, scheme):
+        auth = _api_key_card(scheme)
+        assert auth.authentication.sdk_auth() == ("api_key", {"schemes": ["api_key"]})
+
+    def test_v02_scheme_names_are_normalized(self):
+        card = A2AAgentCard.from_dict(
+            {
+                "name": "Agent",
+                "url": ENDPOINT,
+                "authentication": {"schemes": ["Bearer", "apiKey", "bearer"]},
+            }
+        )
+        assert card.authentication.schemes == ["bearer", "api_key"]
+
+    @pytest.mark.asyncio
+    async def test_endpoint_mode_api_key_card_applies_the_key_where_declared(self):
+        card = _api_key_card({"type": "apiKey", "in": "header", "name": "X-Agent-Key"})
+        with patch("dns_aid.core.a2a_card.fetch_agent_card", AsyncMock(return_value=card)):
+            resolved = await resolve_a2a_endpoint(ENDPOINT)
+
+        record = _build_agent_record_from_endpoint(
+            resolved.endpoint,
+            protocol="a2a",
+            auth_type=resolved.auth_type,
+            auth_config=resolved.auth_config,
+        )
+        async with AgentClient(config=SDKConfig(caller_id="t")) as client:
+            handler = await client._resolve_auth(record, {"api_key": "k-123"})
+
+        request = await handler.apply(httpx.Request("POST", resolved.endpoint))
+        assert request.headers["X-Agent-Key"] == "k-123"
+        assert "k-123" not in str(request.url)

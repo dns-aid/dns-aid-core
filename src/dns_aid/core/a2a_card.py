@@ -12,6 +12,7 @@ Reference: https://google.github.io/A2A/
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
@@ -115,20 +116,72 @@ class A2ASkill:
         )
 
 
+# Card spellings of a scheme -> the SDK auth registry's names. Cards use the
+# OpenAPI names ("apiKey", "http"+"bearer"); the registry is case-sensitive and
+# uses "api_key" / "bearer". Anything else passes through unchanged.
+_SCHEME_ALIASES = {"bearer": "bearer", "apikey": "api_key", "api_key": "api_key"}
+
+# RFC 9110 token, for an API key header name taken from a card.
+_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
+# Unreserved characters only, for an API key query parameter name.
+_QUERY_PARAM = re.compile(r"^[A-Za-z0-9._~-]{1,64}$")
+
+
+def _normalize_scheme(kind: str) -> str:
+    return _SCHEME_ALIASES.get(kind.casefold(), kind)
+
+
+def _api_key_placement(inner: dict[str, Any]) -> dict[str, str] | None:
+    """Where an OpenAPI-style apiKey scheme puts the key, as ApiKeyAuthHandler config.
+
+    Only a syntactically valid header or query parameter name is taken from
+    the card. ``in: cookie`` (no handler support) or a bad name yields None,
+    which leaves the handler on its defaults.
+    """
+    location = str(inner.get("in", inner.get("location", ""))).casefold()
+    name = inner.get("name")
+    if not isinstance(name, str):
+        return None
+    if location == "header" and _HEADER_NAME.match(name):
+        return {"location": "header", "header_name": name}
+    if location == "query" and _QUERY_PARAM.match(name):
+        return {"location": "query", "query_param": name}
+    return None
+
+
 @dataclass
 class A2AAuthentication:
     """Authentication requirements for the agent."""
 
     schemes: list[str] = field(default_factory=list)
     credentials: str | None = None
+    # Placement of the first apiKey scheme (header/query name), if the card
+    # declared a usable one. Feeds ApiKeyAuthHandler; see sdk_auth().
+    api_key: dict[str, str] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> A2AAuthentication:
         """Parse the 0.2 `authentication` object."""
-        return cls(
-            schemes=data.get("schemes", []),
-            credentials=data.get("credentials"),
-        )
+        raw = data.get("schemes", [])
+        schemes: list[str] = []
+        for kind in raw if isinstance(raw, list) else []:
+            if isinstance(kind, str) and (kind := _normalize_scheme(kind)) not in schemes:
+                schemes.append(kind)
+        return cls(schemes=schemes, credentials=data.get("credentials"))
+
+    def sdk_auth(self) -> tuple[str | None, dict[str, Any] | None]:
+        """The ``(auth_type, auth_config)`` an AgentRecord should carry for this card.
+
+        The type is the first declared scheme. The config lists every scheme
+        and, for api_key, only where the key goes; it never carries a token URL
+        or other endpoint a card could use to redirect a secret.
+        """
+        if not self.schemes:
+            return None, None
+        config: dict[str, Any] = {"schemes": list(self.schemes)}
+        if self.schemes[0] == "api_key" and self.api_key:
+            config.update(self.api_key)
+        return self.schemes[0], config
 
     @classmethod
     def from_security_schemes(cls, schemes: dict[str, Any]) -> A2AAuthentication:
@@ -142,6 +195,7 @@ class A2AAuthentication:
         """
         found: list[str] = []
         credentials: str | None = None
+        api_key: dict[str, str] | None = None
         for entry in schemes.values():
             if not isinstance(entry, dict):
                 continue
@@ -160,6 +214,10 @@ class A2AAuthentication:
                 and str(inner.get("scheme", "")).casefold() == "bearer"
             ):
                 kind = "bearer"
+            if isinstance(kind, str):
+                kind = _normalize_scheme(kind)
+                if kind == "api_key" and api_key is None:
+                    api_key = _api_key_placement(inner)
             if kind and kind not in found:
                 found.append(kind)
             for url_field in ("tokenUrl", "openIdConnectUrl", "authorizationUrl"):
@@ -171,7 +229,7 @@ class A2AAuthentication:
                     if isinstance(flow, dict) and isinstance(flow.get("tokenUrl"), str):
                         credentials = flow["tokenUrl"]
                         break
-        return cls(schemes=found, credentials=credentials)
+        return cls(schemes=found, credentials=credentials, api_key=api_key)
 
 
 @dataclass

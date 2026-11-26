@@ -215,3 +215,24 @@ class TestApplyAuthFromMetadata:
             "key_directory_url": "https://example.com/.well-known/jwks.json",
             "supported_algorithms": ["ed25519", "ml-dsa-65"],
         }
+
+
+class TestApiKeyCardEnrichment:
+    def test_discovered_agent_gets_registry_type_and_placement(self):
+        """Discovery and endpoint mode share A2AAuthentication.sdk_auth()."""
+        agent = _make_agent()
+        card = A2AAgentCard.from_dict(
+            {
+                "name": "Agent",
+                "url": "https://agent.example/a2a",
+                "securitySchemes": {"k": {"type": "apiKey", "in": "header", "name": "X-Agent-Key"}},
+            }
+        )
+        _apply_agent_card(agent, card)
+
+        assert agent.auth_type == "api_key"
+        assert agent.auth_config == {
+            "schemes": ["api_key"],
+            "location": "header",
+            "header_name": "X-Agent-Key",
+        }

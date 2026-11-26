@@ -1535,8 +1535,7 @@ async def _apply_ard_card(record: AgentRecord, http_agent: HttpIndexAgent) -> No
             record.capabilities = card.to_capabilities()[:_MAX_ARD_CARD_CAPABILITIES]
             record.capability_source = "agent_card"
         if card.authentication and card.authentication.schemes:
-            record.auth_type = card.authentication.schemes[0]
-            record.auth_config = {"schemes": list(card.authentication.schemes)}
+            record.auth_type, record.auth_config = card.authentication.sdk_auth()
         logger.debug("ard_card.applied", agent=record.name, protocol="a2a", source=source)
     else:  # MCP server card — no typed parser exists; extract minimally
         endpoint = raw.get("endpoint") or raw.get("url")
@@ -1850,8 +1849,7 @@ def _apply_agent_card(agent: AgentRecord, card: A2AAgentCard) -> None:
     # Extract auth metadata from card (A2A format)
     # Only populate if not already set (DNS-AID native AuthSpec takes precedence)
     if not agent.auth_type and card.authentication and card.authentication.schemes:
-        agent.auth_type = card.authentication.schemes[0]
-        agent.auth_config = {"schemes": card.authentication.schemes}
+        agent.auth_type, agent.auth_config = card.authentication.sdk_auth()
         logger.debug(
             "Auth metadata from A2A Agent Card",
             agent=agent.name,

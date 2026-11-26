@@ -478,14 +478,11 @@ class ResolvedAgent:
 def _card_auth(card: object) -> tuple[str | None, dict | None]:
     """The auth type and config an A2A agent card declares, or ``(None, None)``.
 
-    Mirrors how discovery derives them (first declared scheme), so a call made
+    Same mapping discovery uses (``A2AAuthentication.sdk_auth``), so a call made
     with only an endpoint authenticates the same way a discovered agent does.
     """
-    authentication = getattr(card, "authentication", None)
-    schemes = getattr(authentication, "schemes", None)
-    if not schemes:
-        return None, None
-    return schemes[0], {"schemes": list(schemes)}
+    sdk_auth = getattr(getattr(card, "authentication", None), "sdk_auth", None)
+    return sdk_auth() if callable(sdk_auth) else (None, None)
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}

@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for an agent with no auth type instead of dropping them without a trace. The
   card chooses only the auth type; it cannot supply a token URL or other
   handler configuration (#256).
+- **A2A cards declaring an `apiKey` scheme now authenticate.** The SDK
+  registry only knows `api_key`, so an apiKey card plus `{"api_key": ...}`
+  failed with "Unknown auth_type: apiKey". Card scheme names are now mapped
+  to the registry's (`apiKey` -> `api_key`, any-case `Bearer` -> `bearer`, for
+  0.2 `authentication.schemes` too), and the card's `in`/`name` sets where the
+  key goes (header name or query parameter) when it is a valid header token or
+  query name. Discovered agents report `auth_type="api_key"` instead of
+  `"apiKey"`, which affects the `auth_type=` discovery filter.
 
 ## [0.28.1] - 2026-08-09
 
