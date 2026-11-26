@@ -46,6 +46,7 @@ the first.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from collections.abc import Iterable
@@ -58,6 +59,22 @@ if TYPE_CHECKING:
     from dns_aid.core.models import AgentRecord
 
 logger = structlog.get_logger(__name__)
+
+# Operator opt-in for both sides of the feature: publishing TXT instead of
+# SVCB, and discovery reading TXT when SVCB is absent.
+EXPERIMENTAL_FLAG = "DNS_AID_EXPERIMENTAL_TXT_FALLBACK"
+
+
+def txt_fallback_enabled() -> bool:
+    """True when ``DNS_AID_EXPERIMENTAL_TXT_FALLBACK`` is 1/true/yes.
+
+    Discovery reads TXT-fallback records only when this is set. TXT is easier
+    to write than SVCB in shared or multi-tenant zones (many control panels
+    and delegations allow TXT and nothing else), so reading it by default
+    would let anyone with TXT access at an agent name inject an agent.
+    """
+    return os.environ.get(EXPERIMENTAL_FLAG, "").lower() in ("1", "true", "yes")
+
 
 # Current wire-format version. Bump only on a wire-incompatible change.
 TXT_FALLBACK_VERSION: str = "1"

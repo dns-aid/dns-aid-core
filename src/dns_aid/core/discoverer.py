@@ -1198,7 +1198,12 @@ async def _try_txt_fallback(
     in TXT key=value form so the consumer parser stays symmetric with
     :func:`_parse_svcb_custom_params`.
     """
-    from dns_aid.core._txt_fallback import parse_txt_fallback
+    from dns_aid.core._txt_fallback import parse_txt_fallback, txt_fallback_enabled
+
+    # Opt-in, like publishing: TXT is writable by more parties than SVCB in
+    # shared zones, so it is not read unless the operator turned it on.
+    if not txt_fallback_enabled():
+        return None
 
     try:
         answers = await resolver.resolve(fqdn, "TXT")

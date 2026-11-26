@@ -26,6 +26,13 @@ import pytest
 from dns_aid.core.discoverer import _query_single_agent
 from dns_aid.core.models import Protocol
 
+
+@pytest.fixture(autouse=True)
+def _txt_fallback_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Discovery reads TXT fallback only when opted in; these tests exercise it."""
+    monkeypatch.setenv("DNS_AID_EXPERIMENTAL_TXT_FALLBACK", "1")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -484,3 +491,21 @@ async def test_signed_params_survive_publish_and_txt_discovery() -> None:
     assert found is not None
     assert found.sig == published.sig
     assert svcb_digest(params_from_record(found)) == svcb_digest(params_from_record(published))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", [None, "", "0", "false"])
+async def test_txt_fallback_is_not_read_unless_opted_in(
+    monkeypatch: pytest.MonkeyPatch, flag: str | None
+) -> None:
+    """Without the flag, a v=1 TXT record is ignored and no TXT endpoint query is made."""
+    if flag is None:
+        monkeypatch.delenv("DNS_AID_EXPERIMENTAL_TXT_FALLBACK", raising=False)
+    else:
+        monkeypatch.setenv("DNS_AID_EXPERIMENTAL_TXT_FALLBACK", flag)
+    resolver = _txt_only("v=1 target=attacker.example.net")
+
+    result = await _discover(resolver)
+
+    assert result is None
+    assert not [c for c in resolver.resolve.await_args_list if c.args[1] == "TXT"]

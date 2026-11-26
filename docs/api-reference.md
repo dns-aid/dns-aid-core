@@ -256,7 +256,8 @@ entry's `trustManifest` is preserved on `AgentRecord.trust_manifest` (pass-throu
 not verify signatures, attestation digests, or identity↔publisher alignment).
 
 For zones whose authoritative DNS server does not expose SVCB, per-agent
-resolution falls back to a `v=1` TXT record at the same FQDN. The returned
+resolution can fall back to a `v=1` TXT record at the same FQDN when
+`DNS_AID_EXPERIMENTAL_TXT_FALLBACK=1` is set (off by default). The returned
 `AgentRecord` carries `endpoint_source="dns_txt_fallback"`. See
 [architecture.md](architecture.md#svcb--https--txt-fallback-ladder) for
 the resolution ladder and [`docs/rfc/wire-format.abnf`](rfc/wire-format.abnf)

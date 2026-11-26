@@ -237,7 +237,8 @@ each owner name before the next owner name is tried:
 1. SVCB at the flat FQDN `{name}.{domain}` — primary, preserves existing
    behaviour
 2. HTTPS RR (type 65, same SVCB family) at the flat FQDN
-3. **TXT `v=1` fallback** at the flat FQDN — for SVCB-less zones; produces
+3. **TXT `v=1` fallback** at the flat FQDN, only when
+   `DNS_AID_EXPERIMENTAL_TXT_FALLBACK=1` is set — for SVCB-less zones; produces
    a complete `AgentRecord` with `endpoint_source="dns_txt_fallback"`.
    Coexists with metadata TXT (`capabilities=...`) on the same owner name
 4. Only when legacy fallback is active (`allow_legacy=True` or
@@ -249,7 +250,15 @@ A flat TXT `v=1` record therefore takes precedence over a leftover legacy
 SVCB record: a publisher who deliberately placed a draft-02 flat TXT
 record has migrated, and stale `-01` records must not shadow it.
 
-The publisher side is opt-in: a backend declaring `supports_svcb=False`
+Both sides are opt-in through `DNS_AID_EXPERIMENTAL_TXT_FALLBACK=1`. Discovery
+does not read TXT fallback without it: in shared or multi-tenant zones more
+parties can write TXT than SVCB (many control panels and delegations allow
+TXT and nothing else), so reading it by default would let anyone with TXT
+access at an agent name inject an agent. A TXT record never overrides an
+SVCB record; it is only consulted when SVCB and HTTPS return NoAnswer or
+NXDOMAIN.
+
+On the publisher side, a backend declaring `supports_svcb=False`
 combined with `DNS_AID_EXPERIMENTAL_TXT_FALLBACK=1` writes the fallback
 TXT instead of SVCB. Backends that do support SVCB (every bundled
 backend today) are unaffected. Full grammar in

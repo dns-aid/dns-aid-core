@@ -1802,14 +1802,20 @@ DNS system that doesn't — an older managed-DNS appliance, a smaller hosted
 provider, or self-hosted DNS that hasn't adopted SVCB yet — the SDK can still
 discover agents at your zone via a TXT-encoded fallback record.
 
-### Consuming TXT-fallback zones (no opt-in needed)
+### Consuming TXT-fallback zones (experimental, opt-in)
 
-`discover()` automatically falls back to a `v=1` TXT record when SVCB and
-HTTPS RR both return NoAnswer. The returned `AgentRecord` carries
-`endpoint_source="dns_txt_fallback"`; otherwise the API is identical:
+With `DNS_AID_EXPERIMENTAL_TXT_FALLBACK=1` set, `discover()` falls back to a
+`v=1` TXT record when SVCB and HTTPS RR both return NoAnswer. The returned
+`AgentRecord` carries `endpoint_source="dns_txt_fallback"`; otherwise the API
+is identical. It is off by default because in shared zones more parties can
+usually write TXT than SVCB, so only enable it for zones whose TXT you trust
+(or pair it with `require_dnssec=True`):
 
 ```python
+import os
 import dns_aid
+
+os.environ["DNS_AID_EXPERIMENTAL_TXT_FALLBACK"] = "1"
 
 # Works against SVCB-publishing zones AND against TXT-fallback-publishing zones.
 result = await dns_aid.discover("legacy.example.com", protocol="mcp", name="chat")

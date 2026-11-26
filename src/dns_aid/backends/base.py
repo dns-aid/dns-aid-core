@@ -10,7 +10,6 @@ implement this interface.
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -107,11 +106,9 @@ class DNSBackend(ABC):
         """
         if self.supports_svcb:
             return False
-        return os.environ.get("DNS_AID_EXPERIMENTAL_TXT_FALLBACK", "").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
+        from dns_aid.core._txt_fallback import txt_fallback_enabled
+
+        return txt_fallback_enabled()
 
     async def _publish_via_txt_fallback(
         self, agent: AgentRecord, zone: str, name: str
