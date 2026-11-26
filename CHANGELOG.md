@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GHSA-45c3-73f7-pv4m). A crafted DNS message could make
   `dns.name.from_wire_parser()` burn excessive CPU on name decompression;
   every discovery lookup parses untrusted wire-format responses.
+- **An A2A agent card can no longer move a call's credentials to another
+  origin.** `resolve_a2a_endpoint` swapped the endpoint for the card's `url`
+  whenever the hostname matched, ignoring scheme and port, so a card saying
+  `http://agent.example:8080/...` received the caller's credentials in
+  plaintext on another port. The card's `url` is now used only when scheme,
+  host and port all match the given or DNS-discovered endpoint; otherwise the
+  call stays on that endpoint. Applies to both endpoint mode and DNS discovery.
 
 ### Fixed
 

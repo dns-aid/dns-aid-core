@@ -165,3 +165,100 @@ class TestIgnoredCredentialsAreReported:
                 await client._resolve_auth(record, None)
 
         assert not [e for e in logs if e["event"] == "sdk.credentials_ignored"]
+
+
+def _bearer_card_at(url: str) -> A2AAgentCard:
+    return A2AAgentCard.from_dict(
+        {
+            "name": "Agent",
+            "description": "d",
+            "url": url,
+            "securitySchemes": {"svc": {"type": "http", "scheme": "bearer"}},
+        }
+    )
+
+
+class TestCardCannotMoveCredentialsToAnotherOrigin:
+    """The card's url only replaces the given endpoint when the origin matches.
+
+    Credentials go to whatever endpoint ``resolve_a2a_endpoint`` returns, and
+    the card is untrusted metadata. A hostname match alone would let a card
+    pull the caller's bearer token to plain http or to another port.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "card_url",
+        [
+            "http://agent.example:8080/a2a/jsonrpc",  # downgrade + port
+            "http://agent.example/a2a/jsonrpc",  # downgrade, same host
+            "https://agent.example:8443/a2a/jsonrpc",  # same scheme, other port
+            "https://other.example/a2a/jsonrpc",  # other host
+        ],
+    )
+    async def test_cross_origin_card_url_keeps_the_given_endpoint(self, card_url: str):
+        with patch(
+            "dns_aid.core.a2a_card.fetch_agent_card",
+            AsyncMock(return_value=_bearer_card_at(card_url)),
+        ):
+            resolved = await resolve_a2a_endpoint(ENDPOINT)
+
+        assert resolved.endpoint == ENDPOINT
+        assert resolved.auth_type == "bearer"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "card_url",
+        [
+            "https://agent.example/a2a/v1",
+            "https://agent.example:443/a2a/v1",  # explicit default port
+            "https://AGENT.example/a2a/v1",  # hostnames are case-insensitive
+        ],
+    )
+    async def test_same_origin_card_url_is_still_used(self, card_url: str):
+        with patch(
+            "dns_aid.core.a2a_card.fetch_agent_card",
+            AsyncMock(return_value=_bearer_card_at(card_url)),
+        ):
+            resolved = await resolve_a2a_endpoint(ENDPOINT)
+
+        assert resolved.endpoint == card_url
+
+    @pytest.mark.asyncio
+    async def test_token_is_only_sent_to_the_given_endpoint(self):
+        """End to end through send_a2a_message: the SDK gets the caller's endpoint."""
+        card = _bearer_card_at("http://agent.example:8080/a2a/jsonrpc")
+        with (
+            patch("dns_aid.core.invoke._sdk_available", True),
+            patch("dns_aid.core.a2a_card.fetch_agent_card", AsyncMock(return_value=card)),
+            patch(
+                "dns_aid.core.invoke._invoke_via_sdk",
+                AsyncMock(return_value=InvokeResult(success=True, data={})),
+            ) as sdk,
+        ):
+            await send_a2a_message(ENDPOINT, "hello", credentials={"token": "t"})
+
+        assert sdk.call_args.args[0] == ENDPOINT
+        assert sdk.call_args.kwargs["credentials"] == {"token": "t"}
+
+
+class TestSameOrigin:
+    @pytest.mark.parametrize(
+        ("a", "b", "expected"),
+        [
+            ("https://h.example/x", "https://h.example/y", True),
+            ("https://h.example", "https://h.example:443/", True),
+            ("http://h.example", "http://h.example:80", True),
+            ("https://H.Example/x", "https://h.example/x", True),
+            ("https://h.example", "http://h.example", False),
+            ("https://h.example", "https://h.example:8443", False),
+            ("https://h.example", "https://g.example", False),
+            ("https://h.example:notaport", "https://h.example", False),
+            ("ftp://h.example", "ftp://h.example", False),
+            ("", "https://h.example", False),
+        ],
+    )
+    def test_origin_comparison(self, a: str, b: str, expected: bool):
+        from dns_aid.core.invoke import _same_origin
+
+        assert _same_origin(a, b) is expected

@@ -488,6 +488,32 @@ def _card_auth(card: object) -> tuple[str | None, dict | None]:
     return schemes[0], {"schemes": list(schemes)}
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _same_origin(a: str, b: str) -> bool:
+    """True when two URLs share scheme, host and port (RFC 6454 origin).
+
+    Gates whether ``resolve_a2a_endpoint`` may swap the endpoint it was given
+    for the ``url`` an agent card declares. Credentials go to whatever endpoint
+    comes back, so a card must not be able to move the call to plain http, to
+    another port, or to another host, even when the hostname matches.
+    """
+    pa, pb = urlparse(a), urlparse(b)
+    try:
+        port_a = pa.port or _DEFAULT_PORTS.get(pa.scheme.lower())
+        port_b = pb.port or _DEFAULT_PORTS.get(pb.scheme.lower())
+    except ValueError:  # malformed port
+        return False
+    if not pa.hostname or not pb.hostname or port_a is None:
+        return False
+    return (
+        pa.scheme.lower() == pb.scheme.lower()
+        and pa.hostname.lower() == pb.hostname.lower()
+        and port_a == port_b
+    )
+
+
 async def resolve_a2a_endpoint(
     endpoint: str | None = None,
     *,
@@ -523,19 +549,19 @@ async def resolve_a2a_endpoint(
                 )
 
                 # Try to fetch agent card for metadata (name, skills, description).
-                # Use card.url ONLY if it shares the same host as the DNS endpoint,
-                # otherwise it may be an internal URL (e.g., Bedrock AgentCore runtime)
-                # that isn't publicly reachable via the same proxy/CDN.
+                # Use card.url ONLY if it has the same origin as the DNS endpoint.
+                # Otherwise it may be an internal URL (e.g., Bedrock AgentCore
+                # runtime) that isn't reachable via the same proxy/CDN, or a
+                # downgrade to http / another port that the record's credentials
+                # would then be sent to.
                 card = await fetch_agent_card(discovered_endpoint, timeout=5.0)
                 if card:
-                    card_host = urlparse(card.url).hostname if card.url else None
-                    dns_host = urlparse(discovered_endpoint).hostname
-                    use_card_url = card_host == dns_host if card_host else False
-                    if not use_card_url and card_host:
+                    use_card_url = bool(card.url) and _same_origin(card.url, discovered_endpoint)
+                    if not use_card_url and card.url:
                         logger.debug(
-                            "resolve.card_host_mismatch",
-                            card_host=card_host,
-                            dns_host=dns_host,
+                            "resolve.card_origin_mismatch",
+                            card_url=card.url,
+                            dns_endpoint=discovered_endpoint,
                         )
 
                     return ResolvedAgent(
@@ -565,14 +591,20 @@ async def resolve_a2a_endpoint(
         )
 
     # Path 2: Fetch agent card from the given endpoint for metadata.
-    # Use card.url only if it matches the host we were given.
+    # Use card.url only if it has the same origin as the endpoint we were given:
+    # the card's declared auth is applied to the returned endpoint, so a card
+    # saying http://same-host:8080 must not pull the caller's token there.
     normalized = normalize_endpoint(endpoint)
     try:
         card = await fetch_agent_card(normalized, timeout=5.0)
         if card:
-            card_host = urlparse(card.url).hostname if card.url else None
-            given_host = urlparse(normalized).hostname
-            use_card_url = card_host == given_host if card_host else False
+            use_card_url = bool(card.url) and _same_origin(card.url, normalized)
+            if not use_card_url and card.url:
+                logger.debug(
+                    "resolve.card_origin_mismatch",
+                    card_url=card.url,
+                    given_endpoint=normalized,
+                )
 
             card_auth_type, card_auth_config = _card_auth(card)
             return ResolvedAgent(

@@ -724,6 +724,27 @@ class TestResolveA2AEndpoint:
         assert resolved.resolved_via == "dns_discover+agent_card"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "card_url",
+        ["http://a2a.example.com/rpc", "https://a2a.example.com:8443/rpc"],
+    )
+    async def test_dns_discovery_card_origin_mismatch_keeps_dns_endpoint(self, card_url):
+        """Same hostname is not enough: the record's credentials follow the endpoint."""
+        agent = _discovered_agent()
+        card = _card(card_url)
+
+        with (
+            patch(
+                "dns_aid.core.discoverer.discover",
+                AsyncMock(return_value=SimpleNamespace(agents=[agent])),
+            ),
+            patch("dns_aid.core.a2a_card.fetch_agent_card", AsyncMock(return_value=card)),
+        ):
+            resolved = await resolve_a2a_endpoint(domain="example.com", name="chat")
+
+        assert resolved.endpoint == agent.endpoint_url
+
+    @pytest.mark.asyncio
     async def test_dns_discovery_without_card(self):
         agent = _discovered_agent()
 
