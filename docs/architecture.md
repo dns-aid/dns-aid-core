@@ -102,9 +102,12 @@ The DNS-AID draft defines custom SVCB parameters:
 | `policy` | `policy_uri` | URI to agent policy document |
 | `realm` | `realm` | Multi-tenant scope / authorization realm |
 
-**Note:** AWS Route 53 does not currently support custom SVCB parameter names.
-These must be encoded using the RFC 9460 generic `keyNNNNN` wire format for
-Route 53 compatibility. This is tracked as a known interoperability issue.
+**Note:** AWS Route 53 rejects SVCB parameters it does not recognise, including
+the RFC 9460 generic `keyNNNNN` form (`InvalidChangeBatch: SVCB does not support
+undefined parameters`). On Route 53, dns-aid-core publishes only the standard
+SVCB parameters and moves the custom ones into the agent's TXT record as
+`dnsaid_keyNNNNN=value` (see `supports_private_svcb_keys` in
+`src/dns_aid/backends/base.py`).
 
 ---
 

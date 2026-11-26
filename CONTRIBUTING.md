@@ -190,13 +190,14 @@ refactor: extract credential detection into backends registry
 
 ## What CI Checks on Your PR
 
-Every PR must pass **8 required checks** before merging:
+Every PR must pass **9 required checks** before merging:
 
 | Check | What it does | How to run locally |
 |-------|-------------|-------------------|
 | **Test (Python 3.11)** | Unit tests on 3.11 | `uv run pytest tests/unit/` |
 | **Test (Python 3.12)** | Unit tests on 3.12 | (same) |
 | **Test (Python 3.13)** | Unit tests on 3.13 | (same) |
+| **Mock Integration Tests** | Integration tests against mocked backends | `uv run pytest tests/integration/ -m "not live"` |
 | **Lint** | `ruff check` + `ruff format --check` | `uv run ruff check src/ && uv run ruff format --check src/` |
 | **Type Check** | `mypy src/dns_aid` | `uv run mypy src/dns_aid` |
 | **SAST (Bandit)** | Security static analysis | `uv run bandit -r src/dns_aid -c pyproject.toml` |
