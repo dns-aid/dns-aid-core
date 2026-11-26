@@ -11,7 +11,6 @@ import pytest
 
 from dns_aid.core.catalog_pointer import (
     CATALOG_POINTER_LABELS,
-    DEFAULT_CATALOG_FILENAME,
     PointerResolution,
     publish_catalog_pointer,
     resolve_catalog_pointer,
@@ -113,16 +112,84 @@ class TestResolveCatalogPointer:
         assert url == "https://ard.acme.com/.well-known/catalog2.json"
 
     @pytest.mark.asyncio
-    async def test_malicious_wellknown_path_ignored(self):
-        # Path traversal / separators in the override are rejected → default used.
+    async def test_malicious_wellknown_path_skips_the_record(self):
+        """A present but unusable override makes the RR malformed (wk-01 §2.1, #317).
+
+        It used to fall back to the default filename silently, fetching a URL
+        the publisher never named; now the record is skipped with a warning.
+        """
+        import structlog
+
         for evil in (b"../../etc/passwd", b"a/b.json", b""):
             mapping = {"_catalog._agents.acme.com": [_svcb_rdata("ard.acme.com.", wellknown=evil)]}
-            with patch(
-                "dns_aid.core.catalog_pointer.dns.asyncresolver.Resolver",
-                return_value=_resolver_returning(mapping),
+            with (
+                patch(
+                    "dns_aid.core.catalog_pointer.dns.asyncresolver.Resolver",
+                    return_value=_resolver_returning(mapping),
+                ),
+                structlog.testing.capture_logs() as logs,
             ):
                 url = await resolve_catalog_pointer("acme.com")
-            assert url == f"https://ard.acme.com/.well-known/{DEFAULT_CATALOG_FILENAME}"
+            assert url is None
+            assert any(e["event"] == "catalog_pointer.well_known_malformed" for e in logs)
+
+    @pytest.mark.asyncio
+    async def test_wk01_length_prefixed_filename_is_used(self):
+        """#317 repro: 00 10 | "modelmarket.json" must not fall back to ai-catalog.json."""
+        value = len(b"modelmarket.json").to_bytes(2, "big") + b"modelmarket.json"
+        mapping = {"_index._agents.market.test": [_svcb_rdata("market.test.", wellknown=value)]}
+        with patch(
+            "dns_aid.core.catalog_pointer.dns.asyncresolver.Resolver",
+            return_value=_resolver_returning(mapping),
+        ):
+            url = await resolve_catalog_pointer("market.test")
+        assert url == "https://market.test/.well-known/modelmarket.json"
+
+    @pytest.mark.asyncio
+    async def test_wk01_first_valid_suffix_wins(self):
+        def entry(b: bytes) -> bytes:
+            return len(b).to_bytes(2, "big") + b
+
+        value = entry(b"../evil") + entry(b"api-catalog") + entry(b"other.json")
+        mapping = {"_catalog._agents.acme.com": [_svcb_rdata("ard.acme.com.", wellknown=value)]}
+        with patch(
+            "dns_aid.core.catalog_pointer.dns.asyncresolver.Resolver",
+            return_value=_resolver_returning(mapping),
+        ):
+            url = await resolve_catalog_pointer("acme.com")
+        assert url == "https://ard.acme.com/.well-known/api-catalog"
+
+    @pytest.mark.asyncio
+    async def test_malformed_record_does_not_hide_a_good_one(self):
+        mapping = {
+            "_catalog._agents.acme.com": [
+                _svcb_rdata("bad.acme.com.", wellknown=b"\xff\xfe"),
+                _svcb_rdata("ard.acme.com.", wellknown=b"catalog.json"),
+            ]
+        }
+        with patch(
+            "dns_aid.core.catalog_pointer.dns.asyncresolver.Resolver",
+            return_value=_resolver_returning(mapping),
+        ):
+            url = await resolve_catalog_pointer("acme.com")
+        assert url == "https://ard.acme.com/.well-known/catalog.json"
+
+    @pytest.mark.asyncio
+    async def test_real_rdata_from_the_issue(self):
+        """The exact records from #317, parsed by dnspython."""
+        import dns.rdata
+        import dns.rdataclass
+        import dns.rdatatype
+
+        from dns_aid.core.catalog_pointer import _read_wellknown_filename
+
+        def rr(text: str):
+            return dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.SVCB, text)
+
+        plain = rr('1 market.test. alpn="h2" key65409="modelmarket.json"')
+        wk01 = rr('1 market.test. alpn="h2" key65409="\\000\\016modelmarket.json"')
+        assert _read_wellknown_filename(plain) == "modelmarket.json"
+        assert _read_wellknown_filename(wk01) == "modelmarket.json"
 
     @pytest.mark.asyncio
     async def test_aliasmode_skipped(self):

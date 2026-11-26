@@ -42,6 +42,7 @@ import structlog
 from dns_aid.backends.base import DNSBackend
 from dns_aid.core.models import SVCB_SERVICE_MODE
 from dns_aid.core.publisher import get_default_backend
+from dns_aid.core.well_known import WELL_KNOWN_KEY, WellKnownDecodeError, read_well_known
 from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
 from dns_aid.utils.validation import (
     validate_no_underscore_in_target,
@@ -60,7 +61,7 @@ CATALOG_POINTER_LABELS: tuple[str, ...] = ("_catalog._agents", "_index._agents")
 DEFAULT_CATALOG_FILENAME = "ai-catalog.json"
 
 # DNS-AID ``well-known`` SvcParamKey (numeric wire form; see DNS_AID_KEY_MAP).
-_WELL_KNOWN_KEY = 65409
+_WELL_KNOWN_KEY = WELL_KNOWN_KEY
 
 DEFAULT_RESOLVE_TIMEOUT = 5.0
 
@@ -116,28 +117,32 @@ async def _resolve_svcb(
 def _read_wellknown_filename(rdata: object) -> str | None:
     """Read an optional catalog-filename override from the well-known SvcParam.
 
-    Runs the decoded value through the SAME validator the publish side uses
-    (``validate_well_known_path`` — RFC 8615 single-segment, length-bounded,
+    Accepts both wire formats (see :mod:`dns_aid.core.well_known`): the plain
+    string DNS-AID publishes and the draft-mk-dnsop-svcb-well-known-01
+    length-prefixed list, of which the first valid suffix is used. Each
+    suffix goes through the SAME validator the publish side uses
+    (``validate_well_known_path``: RFC 8615 single-segment, length-bounded,
     control-char / separator / traversal rejecting) so a forged inbound SVCB
-    can't push an oversized or control-laden path into the URL. Returns None
-    (→ caller uses the default filename) on any non-conforming value.
+    can't push an oversized or control-laden path into the URL.
+
+    Returns None when the param is absent (the caller uses the default
+    filename).
+
+    Raises:
+        WellKnownDecodeError: The param is present but undecodable, or no
+            suffix in it is valid. wk-01 §2.1 makes that a malformed RR; the
+            caller skips it instead of fetching a URL the publisher never
+            named.
     """
-    params = getattr(rdata, "params", None) or {}
-    param = params.get(_WELL_KNOWN_KEY)
-    if param is None:
+    suffixes = read_well_known(rdata)
+    if suffixes is None:
         return None
-    value = getattr(param, "value", param)
-    if isinstance(value, (bytes, bytearray)):
+    for suffix in suffixes:
         try:
-            text = value.decode("utf-8", "strict")
-        except UnicodeDecodeError:
-            return None
-    else:
-        text = str(value)
-    try:
-        return validate_well_known_path(text.strip().lstrip("/"))
-    except Exception:  # noqa: BLE001 — any invalid value → fall back to default
-        return None
+            return validate_well_known_path(suffix.strip().lstrip("/"))
+        except Exception:  # noqa: BLE001 — try the next suffix
+            continue
+    raise WellKnownDecodeError(f"no valid well-known suffix in {suffixes!r}")
 
 
 async def resolve_catalog_pointer_detail(
@@ -184,7 +189,21 @@ async def resolve_catalog_pointer_detail(
             target = str(getattr(rdata, "target", "")).rstrip(".")
             if not target or target == ".":
                 continue
-            filename = _read_wellknown_filename(rdata) or DEFAULT_CATALOG_FILENAME
+            try:
+                filename = _read_wellknown_filename(rdata) or DEFAULT_CATALOG_FILENAME
+            except WellKnownDecodeError as exc:
+                # A malformed well-known (wk-01 §2.1 / RFC 9460 §2.2) makes the
+                # RR unusable. Falling back to the default filename would fetch
+                # a URL the publisher never named and hide the mistake from
+                # both sides, so skip this RR, loudly.
+                logger.warning(
+                    "catalog_pointer.well_known_malformed",
+                    domain=domain,
+                    target=target,
+                    error=str(exc),
+                    note="skipping this pointer record; not using the default filename",
+                )
+                continue
             url = f"https://{target}/.well-known/{filename}"
             # SSRF guard: a pointer targets an arbitrary host (host-anywhere),
             # so reject one that resolves to a private/loopback/link-local/
