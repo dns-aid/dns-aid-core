@@ -4,9 +4,9 @@
 
 ## vs Competing Proposals
 
-| Approach | Problem | DNS-AID Advantage |
-|----------|---------|-------------------|
-| **ANS (GoDaddy)** | Centralized registry, KYC required, single gatekeeper | Federated — you control your domain, publish instantly |
+| Approach | Trade-off | DNS-AID Advantage |
+|----------|-----------|-------------------|
+| **ANS (GoDaddy)** | Adjacent registration/identity layer: RA-issued identity certificates, registration via ACME domain-control validation (DNS-01/HTTP-01); organizational verification is an optional higher trust tier. RA federation is specified; one RA operational today | No registration step at all — publish SVCB records in the zone you already control |
 | **Google (A2A + UCP)** | Discovery via Gemini/Search, payments via UCP | Neutral discovery — no platform lock-in or transaction fees |
 | **.agent gTLD** | Requires ICANN approval, ongoing domain fees | Works NOW with domains you already own |
 | **AgentDNS (China Telecom)** | Requires 6G infrastructure, carrier control | Works NOW on existing DNS infrastructure |
@@ -26,8 +26,8 @@
 
 ## The Sovereignty Question
 
-> **Who controls agent discovery?**
-> - ANS: GoDaddy (US company as gatekeeper)
+> **Who sits in the trust path?**
+> - ANS: a Registration Authority validates domain control and issues identity certificates — names anchor to domains the operator already owns; RA federation is specified, one RA operational today
 > - AgentDNS: China Telecom (state-owned carrier)
 > - Web3: Ethereum Foundation
 > - **DNS-AID: You control your own domain**

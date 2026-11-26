@@ -108,6 +108,31 @@ Route 53 compatibility. This is tracked as a known interoperability issue.
 
 ---
 
+
+### A2A agent card versions
+
+Cards are read at protocol version 0.2 and 0.3. The version a card declares in
+`protocolVersion` is recorded on the parsed card (absent means 0.2), and the
+newer fields are optional throughout, so one reader handles both.
+
+Two naming differences are worth knowing because real cards mix them. 0.3 lists
+extra transports under `additionalInterfaces`; 1.0 renamed that to
+`supportedInterfaces`. The flag saying an authenticated client can fetch a richer
+card is top-level in 0.3 and moved under `capabilities` in 1.0. Both spellings
+are accepted in each case rather than assuming which a publisher used -- the
+Infoblox `ddi-agent` card declares `protocolVersion: "0.3"` and uses the 1.0
+interface name.
+
+Authentication is taken from the 0.3 `securitySchemes` map when present and the
+0.2 `authentication` object otherwise. `securitySchemes` itself appears in two
+shapes: OpenAPI style, where the entry carries a `type`, and the proto-derived
+style, where the entry has a single `<kind>SecurityScheme` key. Both are read,
+and the credential endpoint is taken from `tokenUrl`, `openIdConnectUrl` or an
+OAuth flow's `tokenUrl`, whichever the card provides.
+
+Card-level `signatures` are parsed and carried but not verified here; record
+signatures (the `sig` SvcParam) are the trust anchor DNS-AID acts on.
+
 ## Path A vs Path B (search surfaces)
 
 DNS-AID exposes two complementary surfaces for finding agents:

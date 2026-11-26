@@ -24,13 +24,14 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 # Standard SVCB SvcParamKeys accepted by all known DNS providers (RFC 9460).
-# Private-use keys (key65280–key65534) are rejected by Route 53, Cloudflare,
-# and Cloud DNS. NIOS and NS1 support them natively.
+# Private-use keys (key65280–key65534) are rejected by Route 53 and Cloud DNS.
+# NIOS, NS1, and Cloudflare support them natively (Cloudflare's SVCB
+# data.value accepts key65280–key65534 verbatim, verified against the v4 API).
 # DDNS returns None (auto-detect): tries native first, falls back to demotion.
 #
 # supports_private_svcb_keys property:
-#   True  → pass all params to SVCB (NS1, NIOS)
-#   False → demote custom params to TXT (Route53, Cloudflare, CloudDNS, BloxOne)
+#   True  → pass all params to SVCB (NS1, NIOS, Cloudflare)
+#   False → demote custom params to TXT (Route53, CloudDNS, BloxOne)
 #   None  → try native, auto-fallback on server rejection (DDNS)
 _STANDARD_SVCB_KEYS = frozenset(
     {
@@ -77,9 +78,9 @@ class DNSBackend(ABC):
         """Whether this backend accepts private-use SVCB keys (key65280–key65534).
 
         Returns:
-            ``True``  — backend accepts private keys natively (NS1, NIOS).
-                        All params go directly to SVCB.
-            ``False`` — backend rejects private keys (Route53, Cloudflare).
+            ``True``  — backend accepts private keys natively (NS1, NIOS,
+                        Cloudflare). All params go directly to SVCB.
+            ``False`` — backend rejects private keys (Route53, CloudDNS).
                         Custom params demoted to TXT.
             ``None``  — unknown, try native first, auto-fallback on error (DDNS).
                         First publish attempts full SVCB; if server rejects,

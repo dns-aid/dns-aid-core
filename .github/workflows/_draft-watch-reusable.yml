@@ -39,6 +39,12 @@ on:
         type: string
         default: ""
 
+# Least-privilege default for the workflow. The single job below overrides this
+# with its own block to add `issues: write` (job-level permissions fully replace
+# the workflow default), so this line does not reduce what the job can do.
+permissions:
+  contents: read
+
 jobs:
   draft-watch:
     name: IETF draft watch
@@ -49,7 +55,7 @@ jobs:
       issues: write
     steps:
       - name: Check out repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Default behaviour: on pull_request events, actions/checkout
           # checks out the merge-ref (what the code would look like
