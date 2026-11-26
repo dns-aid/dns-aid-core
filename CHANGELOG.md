@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also keys off the recorded HTTP status. A new `mcp-2x-client` CI job runs the
   SDK and server tests on 2.x, including round trips against a real 2.x server
   over SSE and JSON. The lock file stays on 1.x.
+  Two behaviours differ on 2.x: a 404 on the first POST now falls back to the
+  legacy transport, which 1.x did not do, and `follow_redirects=True` is
+  ignored, so cross-origin redirects that 1.x followed are refused.
 
 ### Security
 
