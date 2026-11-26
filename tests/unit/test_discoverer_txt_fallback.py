@@ -372,3 +372,115 @@ async def test_txt_fallback_model_invalid_logs_and_returns_none() -> None:
     assert result is None
     warning_events = [c.args[0] for c in mock_logger.warning.call_args_list if c.args]
     assert "txt_fallback.model_rejected" in warning_events
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: the TXT path applies the same descriptor safeguards as SVCB
+# ---------------------------------------------------------------------------
+
+
+def _txt_only(body: str) -> MagicMock:
+    return _dispatching_resolver(txt=_make_txt_answer([[body.encode()]]))
+
+
+async def _discover(resolver: MagicMock):
+    with patch("dns_aid.core.discoverer.dns.asyncresolver.Resolver", return_value=resolver):
+        return await _query_single_agent("example.com", "chat", Protocol.MCP)
+
+
+@pytest.mark.asyncio
+async def test_txt_cap_sha256_mismatch_refuses_the_record() -> None:
+    from dns_aid.core.cap_fetcher import CapDigestMismatchError
+
+    resolver = _txt_only("v=1 target=mcp.example.com cap=https://example.com/cap cap-sha256=pin")
+    fetch = AsyncMock(side_effect=CapDigestMismatchError("https://example.com/cap", "pin", "other"))
+    with patch("dns_aid.core.discoverer.fetch_cap_document", fetch):
+        assert await _discover(resolver) is None
+
+
+@pytest.mark.asyncio
+async def test_txt_slow_descriptor_is_bounded_by_the_fetch_budget() -> None:
+    import asyncio
+
+    async def slow(*_a, **_k):
+        await asyncio.sleep(5)
+
+    resolver = _txt_only("v=1 target=mcp.example.com cap=https://example.com/cap")
+    with (
+        patch("dns_aid.core.discoverer.fetch_cap_document", side_effect=slow),
+        patch("dns_aid.core.discoverer._DESCRIPTOR_FETCH_BUDGET_SECONDS", 0.05),
+    ):
+        result = await _discover(resolver)
+
+    assert result is not None
+    assert result.capability_source == "descriptor_unreachable"
+
+
+@pytest.mark.asyncio
+async def test_txt_pinned_descriptor_sets_verified_and_cap_metadata() -> None:
+    from dns_aid.core.cap_fetcher import CapabilityDocument
+
+    doc = CapabilityDocument(capabilities=["chat"], metadata={"tier": "gold"})
+    resolver = _txt_only("v=1 target=mcp.example.com cap=https://example.com/cap cap-sha256=pin")
+    with patch("dns_aid.core.discoverer.fetch_cap_document", AsyncMock(return_value=doc)):
+        result = await _discover(resolver)
+
+    assert result is not None
+    assert result.capabilities == ["chat"]
+    assert result.capability_source == "cap_uri"
+    assert result.cap_sha256_verified is True
+    assert result.cap_metadata == {"tier": "gold"}
+
+
+@pytest.mark.asyncio
+async def test_txt_well_known_is_fetched_from_the_target() -> None:
+    from dns_aid.core.cap_fetcher import CapabilityDocument
+
+    resolver = _txt_only("v=1 target=mcp.example.com well-known=agent-card.json")
+    fetch = AsyncMock(return_value=CapabilityDocument(capabilities=["chat"]))
+    with patch("dns_aid.core.discoverer.fetch_cap_document", fetch):
+        result = await _discover(resolver)
+
+    assert fetch.await_args.args[0] == "https://mcp.example.com/.well-known/agent-card.json"
+    assert result is not None
+    assert result.well_known_path == "agent-card.json"
+    assert result.capability_source == "well_known"
+
+
+@pytest.mark.asyncio
+async def test_txt_multi_value_alpn_resolves_the_protocol() -> None:
+    resolver = _txt_only("v=1 target=mcp.example.com alpn=a2a,h2")
+    result = await _discover(resolver)
+
+    assert result is not None
+    assert result.protocol == Protocol.A2A
+
+
+@pytest.mark.asyncio
+async def test_signed_params_survive_publish_and_txt_discovery() -> None:
+    """The digest the publisher signs equals the one computed from the TXT-discovered record."""
+    from dns_aid.core._txt_fallback import build_txt_fallback
+    from dns_aid.core.jwks import params_from_record, svcb_digest
+    from dns_aid.core.models import AgentRecord
+
+    published = AgentRecord(
+        name="chat",
+        domain="example.com",
+        protocol=Protocol.MCP,
+        target_host="mcp.example.com",
+        port=443,
+        capabilities=["chat"],
+        connect_meta="a b",
+        realm="prod",
+        well_known_path="agent-card.json",
+        sig="eyJhbGciOiJFUzI1NiJ9." + "A" * 300 + "." + "B" * 86,
+    )
+    body = build_txt_fallback(published).encode()
+    chunks = [body[i : i + 255] for i in range(0, len(body), 255)]
+    resolver = _dispatching_resolver(txt=_make_txt_answer([chunks]))
+    with patch("dns_aid.core.discoverer.fetch_cap_document", AsyncMock(return_value=None)):
+        found = await _discover(resolver)
+
+    assert found is not None
+    assert found.sig == published.sig
+    assert svcb_digest(params_from_record(found)) == svcb_digest(params_from_record(published))

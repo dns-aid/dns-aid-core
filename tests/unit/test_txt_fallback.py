@@ -75,11 +75,15 @@ def test_parse_full_record() -> None:
 
 
 def test_parse_multi_string_concatenation() -> None:
-    """RFC 1035 multi-string TXT — strings join on a single space before parse."""
+    """Multi-string TXT concatenates with no separator (SPF convention, RFC 7208 §3.3).
+
+    A publisher splitting by hand keeps the spaces between tokens inside the
+    strings; a backend splitting a long body may cut mid-token.
+    """
     result = parse_txt_fallback(
         [
-            b"v=1 target=mcp.example.com",
-            b"port=8443 alpn=mcp",
+            b"v=1 target=mcp.example.com ",
+            b"port=8443 alpn=mcp ",
             b"cap=https://example.com/cap/v1",
         ]
     )
@@ -87,6 +91,16 @@ def test_parse_multi_string_concatenation() -> None:
     assert result.target == "mcp.example.com"
     assert result.port == 8443
     assert result.alpn == "mcp"
+    assert result.cap == "https://example.com/cap/v1"
+
+
+def test_parse_split_mid_token_round_trips() -> None:
+    """A split inside a value (255-byte chunking) must not insert a space."""
+    result = parse_txt_fallback(
+        [b"v=1 target=mcp.exam", b"ple.com cap=https://example.com/c", b"ap/v1"]
+    )
+    assert result is not None
+    assert result.target == "mcp.example.com"
     assert result.cap == "https://example.com/cap/v1"
 
 
@@ -271,3 +285,69 @@ def test_round_trip_full() -> None:
     assert parsed.connect_class == original.connect_class
     assert parsed.connect_meta == original.connect_meta
     assert parsed.enroll_uri == original.enroll_uri
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: quoting, well-known, chunked bodies
+# ---------------------------------------------------------------------------
+
+
+def _chunk(body: str, size: int = 255) -> list[bytes]:
+    """Split like a backend: fixed byte offsets, no regard for token boundaries."""
+    raw = body.encode()
+    return [raw[i : i + size] for i in range(0, len(raw), size)]
+
+
+def test_values_with_spaces_and_quotes_round_trip() -> None:
+    # The model refuses double quotes and backslashes in SvcParams; spaces and
+    # single quotes are allowed and used to split or end tokens.
+    agent = _agent(connect_meta="a b  c", realm="it's")
+    parsed = parse_txt_fallback([build_txt_fallback(agent).encode()])
+    assert parsed is not None
+    assert parsed.connect_meta == "a b  c"
+    assert parsed.realm == "it's"
+
+
+def test_plain_values_stay_unquoted() -> None:
+    assert build_txt_fallback(_agent()).startswith("v=1 target=mcp.example.com ")
+
+
+def test_well_known_is_written_and_read() -> None:
+    agent = _agent(well_known_path="agent-card.json")
+    assert "well-known=agent-card.json" in build_txt_fallback(agent)
+    parsed = parse_txt_fallback([build_txt_fallback(agent).encode()])
+    assert parsed is not None
+    assert parsed.well_known == "agent-card.json"
+
+
+def test_long_signed_body_survives_255_byte_chunking() -> None:
+    """A sig alone is ~360 chars, so every signed record is split by the backend."""
+    sig = "eyJhbGciOiJFUzI1NiJ9." + "A" * 300 + "." + "B" * 86
+    agent = _agent(
+        sig=sig,
+        cap_uri="https://example.com/cap/chat-v1.json",
+        cap_sha256="q" * 43,
+        connect_meta="arn:aws:vpc-lattice:::service/svc-123 extra",
+        well_known_path="agent-card.json",
+    )
+    body = build_txt_fallback(agent)
+    assert len(body) > 400
+    parsed = parse_txt_fallback(_chunk(body))
+    assert parsed is not None
+    assert parsed.sig == sig
+    assert parsed.cap_sha256 == "q" * 43
+    assert parsed.connect_meta == "arn:aws:vpc-lattice:::service/svc-123 extra"
+    assert parsed.well_known == "agent-card.json"
+
+
+def test_quoted_values_use_the_abnf_double_quote_form() -> None:
+    body = build_txt_fallback(_agent(connect_meta="a b", realm="it's"))
+    assert 'connect-meta="a b"' in body
+    assert 'realm="it\'s"' in body
+    assert "'a b'" not in body
+
+
+def test_parser_reads_abnf_escapes() -> None:
+    parsed = parse_txt_fallback([b'v=1 target=t.example.com realm="a \\"b\\" \\\\ c"'])
+    assert parsed is not None
+    assert parsed.realm == 'a "b" \\ c'

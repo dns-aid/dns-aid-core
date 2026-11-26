@@ -25,19 +25,28 @@ Required fields: ``v`` (must equal ``"1"``), ``target``.
 Defaults: ``port=443``.
 Optional: ``alpn``, ``ipv4hint``, ``ipv6hint``, ``cap``, ``cap-sha256``,
 ``bap``, ``policy``, ``realm``, ``sig``, ``connect-class``,
-``connect-meta``, ``enroll-uri``.
+``connect-meta``, ``enroll-uri``, ``well-known``.
 
 Unknown fields are silently ignored on parse (forward compatibility).
 
-Multiple TXT strings inside a single RR are concatenated with a single
-space before key=value parsing, per RFC 1035 ``<character-string>``
-semantics. Multiple TXT *RRs* at the same FQDN are not supported as
-fallback containers in v1 — callers that see more than one ``v=1`` RR
-should log a warning and use the first.
+A value containing whitespace, a quote or a backslash is written in
+double quotes with ``\"`` and ``\\`` escaped (``quotable-value`` in
+docs/rfc/wire-format.abnf), so it round-trips through the ``shlex``
+parser. Anything else is written bare.
+
+Multiple TXT strings inside a single RR are concatenated with nothing in
+between before key=value parsing, the convention SPF uses (RFC 7208
+§3.3). A body longer than 255 bytes (any signed record: a ``sig`` alone is
+~360 characters) is split by the backend at arbitrary byte offsets, so a
+separator would corrupt whichever token straddles the split. Multiple TXT
+*RRs* at the same FQDN are not supported as fallback containers in v1 —
+callers that see more than one ``v=1`` RR should log a warning and use
+the first.
 """
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -70,6 +79,11 @@ KEY_SIG = "sig"
 KEY_CONNECT_CLASS = "connect-class"
 KEY_CONNECT_META = "connect-meta"
 KEY_ENROLL_URI = "enroll-uri"
+KEY_WELL_KNOWN = "well-known"
+
+# Characters that split or open a token for the shlex parser; a value with
+# any of them is double-quoted on write (ABNF quotable-value).
+_NEEDS_QUOTES = re.compile(r"[\s'\"\\]")
 
 
 @dataclass
@@ -101,15 +115,16 @@ class TxtFallbackRecord:
     connect_class: str | None = None
     connect_meta: str | None = None
     enroll_uri: str | None = None
+    well_known: str | None = None
 
 
 def parse_txt_fallback(strings: Iterable[bytes]) -> TxtFallbackRecord | None:
     """Parse a TXT RR's per-string segments into a :class:`TxtFallbackRecord`.
 
     ``strings`` is the ``rdata.strings`` sequence dnspython exposes — each
-    element is a ``<character-string>`` of at most 255 bytes. They are joined
-    on a single space before parsing, which is the format
-    :func:`build_txt_fallback` emits.
+    element is a ``<character-string>`` of at most 255 bytes. They are
+    concatenated with no separator before parsing (see the module docstring:
+    a backend splits a long body at arbitrary byte offsets).
 
     Returns ``None`` when the body cannot be interpreted as a v1 fallback
     record:
@@ -128,7 +143,7 @@ def parse_txt_fallback(strings: Iterable[bytes]) -> TxtFallbackRecord | None:
     fields this SDK understands.
     """
     try:
-        body = " ".join(s.decode("utf-8") for s in strings)
+        body = b"".join(strings).decode("utf-8")
     except UnicodeDecodeError:
         logger.debug("txt_fallback.invalid_utf8")
         return None
@@ -189,6 +204,7 @@ def parse_txt_fallback(strings: Iterable[bytes]) -> TxtFallbackRecord | None:
         connect_class=kv.get(KEY_CONNECT_CLASS),
         connect_meta=kv.get(KEY_CONNECT_META),
         enroll_uri=kv.get(KEY_ENROLL_URI),
+        well_known=kv.get(KEY_WELL_KNOWN) or None,
     )
 
 
@@ -205,40 +221,41 @@ def build_txt_fallback(agent: AgentRecord) -> str:
     The protocol enum is encoded as ``alpn=`` so the wire shape mirrors a
     SVCB ServiceMode record with ``alpn=`` set.
     """
+
+    def field(key: str, value: object) -> str:
+        text = str(value)
+        if _NEEDS_QUOTES.search(text):
+            text = '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return f"{key}={text}"
+
     parts: list[str] = [
-        f"{KEY_VERSION}={TXT_FALLBACK_VERSION}",
-        f"{KEY_TARGET}={agent.target_host}",
+        field(KEY_VERSION, TXT_FALLBACK_VERSION),
+        field(KEY_TARGET, agent.target_host),
     ]
     if agent.port != 443:
-        parts.append(f"{KEY_PORT}={agent.port}")
+        parts.append(field(KEY_PORT, agent.port))
 
     proto = getattr(agent.protocol, "value", None) or str(agent.protocol)
     if proto:
-        parts.append(f"{KEY_ALPN}={proto}")
+        parts.append(field(KEY_ALPN, proto))
 
-    if agent.ipv4_hint:
-        parts.append(f"{KEY_IPV4HINT}={agent.ipv4_hint}")
-    if agent.ipv6_hint:
-        parts.append(f"{KEY_IPV6HINT}={agent.ipv6_hint}")
-    if agent.cap_uri:
-        parts.append(f"{KEY_CAP}={agent.cap_uri}")
-    if agent.cap_sha256:
-        parts.append(f"{KEY_CAP_SHA256}={agent.cap_sha256}")
-    if agent.bap:
-        # draft-02 scalar form (``mcp`` / ``mcp=1.0``) — AgentRecord.bap is
-        # a single identifier, not a list.
-        parts.append(f"{KEY_BAP}={agent.bap}")
-    if agent.policy_uri:
-        parts.append(f"{KEY_POLICY}={agent.policy_uri}")
-    if agent.realm:
-        parts.append(f"{KEY_REALM}={agent.realm}")
-    if agent.sig:
-        parts.append(f"{KEY_SIG}={agent.sig}")
-    if agent.connect_class:
-        parts.append(f"{KEY_CONNECT_CLASS}={agent.connect_class}")
-    if agent.connect_meta:
-        parts.append(f"{KEY_CONNECT_META}={agent.connect_meta}")
-    if agent.enroll_uri:
-        parts.append(f"{KEY_ENROLL_URI}={agent.enroll_uri}")
+    optional: list[tuple[str, object]] = [
+        (KEY_IPV4HINT, agent.ipv4_hint),
+        (KEY_IPV6HINT, agent.ipv6_hint),
+        (KEY_CAP, agent.cap_uri),
+        (KEY_CAP_SHA256, agent.cap_sha256),
+        # draft-02 scalar form (``mcp`` / ``mcp=1.0``).
+        (KEY_BAP, agent.bap),
+        (KEY_POLICY, agent.policy_uri),
+        (KEY_REALM, agent.realm),
+        (KEY_SIG, agent.sig),
+        (KEY_CONNECT_CLASS, agent.connect_class),
+        (KEY_CONNECT_META, agent.connect_meta),
+        (KEY_ENROLL_URI, agent.enroll_uri),
+        # Covered by the record signature (publisher signs it), so it must
+        # be published or a signed record verifies as unbound.
+        (KEY_WELL_KNOWN, agent.well_known_path),
+    ]
+    parts.extend(field(key, value) for key, value in optional if value)
 
     return " ".join(parts)

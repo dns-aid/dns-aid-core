@@ -293,7 +293,7 @@ target-kv      = "target=" hostname
 fallback-kv    = port-kv / alpn-kv / ipv4hint-kv / ipv6hint-kv /
                  cap-kv / cap-sha256-kv / bap-kv / policy-kv /
                  realm-kv / sig-kv / connect-class-kv /
-                 connect-meta-kv / enroll-uri-kv
+                 connect-meta-kv / enroll-uri-kv / well-known-kv
 
 port-kv          = "port=" 1*5DIGIT          ; default 443 if omitted
 alpn-kv          = "alpn=" 1*32(ALPHA / DIGIT / "-")
@@ -312,6 +312,9 @@ sig-kv           = "sig=" jws-compact
 connect-class-kv = "connect-class=" 1*32(ALPHA / DIGIT / "-")
 connect-meta-kv  = "connect-meta=" quotable-value
 enroll-uri-kv    = "enroll-uri=" URI
+well-known-kv    = "well-known=" wk-path
+                 ; Covered by the record signature, like the SVCB param:
+                 ; a signed record MUST carry it here if it was signed.
 
 quotable-value   = 1*255(vchar-no-sp)
                  / DQUOTE 1*255(%x20-21 / %x23-5B / %x5D-7E / escaped) DQUOTE
@@ -319,16 +322,21 @@ vchar-no-sp      = %x21-7E              ; VCHAR, no space — bare form
 escaped          = "\" (DQUOTE / "\")   ; inside quotes: \" and \\ only
 
 ; ; Tokenization rule: the joined body is split on unquoted spaces.
-; ; A value containing SP MUST be double-quoted; inside quotes the
-; ; only escapes are \" and \\. This matches the POSIX-shell-style
-; ; tokenizer (shlex) used by the reference parser; publishers SHOULD
-; ; emit bare (unquoted) values whenever the value contains no SP,
-; ; and MUST NOT rely on single-quote or other shell-ism forms even
-; ; where the reference parser tolerates them.
+; ; A value containing SP, a quote (DQUOTE or "'") or "\" MUST be
+; ; double-quoted; inside quotes the only escapes are \" and \\. This
+; ; matches the POSIX-shell-style tokenizer (shlex) used by the
+; ; reference parser, which would otherwise read a bare "'" as an
+; ; opening quote. Publishers SHOULD emit bare (unquoted) values
+; ; otherwise, and MUST NOT rely on single-quote or other shell-ism
+; ; forms even where the reference parser tolerates them.
 
-; ; Concatenation rule (RFC 1035 character-string): when a TXT RR
-; ; carries multiple <character-string>s, the parser joins them with
-; ; a single space before key=value tokenization.
+; ; Concatenation rule: when a TXT RR carries multiple
+; ; <character-string>s, the parser concatenates them with NO
+; ; separator before key=value tokenization, as SPF does (RFC 7208
+; ; section 3.3). A body over 255 octets -- any signed record -- is
+; ; split at arbitrary octet offsets, so an inserted separator would
+; ; corrupt the token that straddles a split. A publisher splitting by
+; ; hand keeps the SP between tokens inside the strings.
 ; ;
 ; ; Multiple TXT RRs with v=1 at the same FQDN are not permitted in
 ; ; this version; consumers that observe more than one SHOULD log a
