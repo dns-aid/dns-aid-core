@@ -45,6 +45,7 @@ from dns_aid.core.publisher import get_default_backend
 from dns_aid.core.well_known import WELL_KNOWN_KEY, WellKnownDecodeError, read_well_known
 from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
 from dns_aid.utils.validation import (
+    ValidationError,
     validate_no_underscore_in_target,
     validate_svcparam_value,
     validate_well_known_path,
@@ -140,7 +141,7 @@ def _read_wellknown_filename(rdata: object) -> str | None:
     for suffix in suffixes:
         try:
             return validate_well_known_path(suffix.strip().lstrip("/"))
-        except Exception:  # noqa: BLE001 — try the next suffix
+        except ValidationError:  # try the next suffix
             continue
     raise WellKnownDecodeError(f"no valid well-known suffix in {suffixes!r}")
 
