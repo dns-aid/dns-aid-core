@@ -1426,32 +1426,60 @@ async def _process_http_agent(
         )
         return None
 
-    # Under draft-02 the flat and walkable FQDN shapes don't carry the
-    # agent protocol — it lives in the SVCB `bap`/`alpn` SvcParam. If
-    # _parse_fqdn returned no protocol, use the caller-supplied protocol
-    # filter when present, otherwise try mcp then a2a (the SVCB params
-    # on the discovered record reveal the actual protocol).
-    candidate_protocols: list[Protocol]
+    # Under draft-02 the flat and walkable FQDN shapes don't carry the agent
+    # protocol, and the flat-owner SVCB query is protocol-independent: the
+    # probe only shapes the query and labels a record that names no protocol
+    # itself. The record's bap/alpn is authoritative. The index's declared
+    # protocols are a hint for the probe, never a gate on the DNS lookup:
+    # a caller filter is applied to the DNS-reconciled result (#277).
+    http_only_protocol: Protocol | None
+    require_dns_signal = False
     if fqdn_protocol_str:
         try:
-            candidate_protocols = [Protocol(fqdn_protocol_str.lower())]
+            candidate_protocols = [Protocol(fqdn_protocol_str)]
         except ValueError:
             logger.debug(
-                "Unknown protocol in FQDN",
+                "Unknown protocol in HTTP index FQDN",
                 agent=http_agent.name,
-                fqdn=http_agent.fqdn,
                 protocol=fqdn_protocol_str,
             )
             return None
+        # Apply caller-side protocol filter when the FQDN carries the protocol.
+        if protocol and candidate_protocols[0] != protocol:
+            return None
+        http_only_protocol = candidate_protocols[0]
+    elif http_agent.protocols:
+        declared: list[Protocol] = []
+        for value in http_agent.protocols:
+            if not isinstance(value, str):
+                continue
+            try:
+                declared_protocol = Protocol(value.lower())
+            except ValueError:
+                continue
+            if declared_protocol not in declared:
+                declared.append(declared_protocol)
+        if declared:
+            # Probe with the filter when the index declares it, else with the
+            # first declared protocol, so a record that names no protocol is
+            # labelled as the index says rather than as the caller asked.
+            probe = protocol if protocol in declared else declared[0]
+            candidate_protocols = [probe]
+            http_only_protocol = probe if protocol is None or protocol in declared else None
+        else:
+            # Nothing we support is declared. DNS may still name a protocol we
+            # model, so ask it, but keep the result only if the record itself
+            # names one: an unsupported declaration must not become a guessed
+            # MCP agent, from DNS or from HTTP-only data.
+            candidate_protocols = [protocol] if protocol else [Protocol.MCP, Protocol.A2A]
+            http_only_protocol = None
+            require_dns_signal = True
     elif protocol is not None:
         candidate_protocols = [protocol]
+        http_only_protocol = protocol
     else:
         candidate_protocols = [Protocol.MCP, Protocol.A2A]
-
-    # Apply caller-side protocol filter when the FQDN-carried protocol
-    # is known and doesn't match.
-    if fqdn_protocol_str and protocol and candidate_protocols[0] != protocol:
-        return None
+        http_only_protocol = None  # set from the probe that answered, below
 
     agent_protocol = candidate_protocols[0]
     agent = None
@@ -1461,16 +1489,39 @@ async def _process_http_agent(
             agent_protocol = proto
             break
 
+    if agent and require_dns_signal and agent.protocol == agent_protocol:
+        # The result carries the probe's protocol. Probe with another one: a
+        # record that names its own protocol answers the same both times, a
+        # record that names none just echoes the probe.
+        other = Protocol.A2A if agent_protocol != Protocol.A2A else Protocol.MCP
+        recheck = await _query_single_agent(domain, dns_agent_name, other)
+        if recheck is None or recheck.protocol != agent.protocol:
+            logger.debug(
+                "HTTP index entry declares no supported protocol and DNS names none",
+                agent=http_agent.name,
+                declared=http_agent.protocols,
+            )
+            return None
+
     if agent:
+        # DNS reconciliation may have changed the probe; never return a
+        # different protocol from the one the caller explicitly requested.
+        if protocol is not None and agent.protocol != protocol:
+            return None
         _enrich_from_http_index(agent, http_agent)
         return agent
+
+    if require_dns_signal or (http_agent.protocols and http_only_protocol is None):
+        return None
 
     logger.debug(
         "DNS lookup failed for HTTP index agent, using HTTP data only",
         agent=http_agent.name,
         fqdn=http_agent.fqdn,
     )
-    return _http_agent_to_record(http_agent, domain, dns_agent_name, agent_protocol)
+    return _http_agent_to_record(
+        http_agent, domain, dns_agent_name, http_only_protocol or agent_protocol
+    )
 
 
 # Cap tools/skills lifted from a fetched ARD card onto a record.

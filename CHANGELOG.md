@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (CVE-2026-119194..119197). It is pulled transitively via `google-auth` ->
   `pyasn1-modules`.
 
+### Fixed
+
+- Preserve the declared HTTP index protocol for flat and walkable FQDNs during
+  discovery, including HTTPS entries without a caller protocol filter (#277).
+  The declaration seeds the DNS probe; DNS `bap`/`alpn` stays authoritative,
+  and a caller filter applies to the DNS-reconciled result, so an entry
+  declared `https` whose record says `alpn=mcp` is found by
+  `discover(protocol="mcp")` as well as by `discover()`. An entry declaring no
+  supported protocol is kept only when its DNS record names one; it is never
+  guessed as MCP. Metadata provenance is unchanged.
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed
