@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Bumped dependency floors to clear the Dependency Audit gate** — `mcp` to
+  `>=1.30.0` (CVE-2026-59951, unreclaimed stateful Streamable HTTP sessions),
+  `pyjwt` to `>=2.15.0` (PYSEC-2026-4140..4152 and PYSEC-2026-4183),
+  `urllib3` to `>=2.8.0` (PYSEC-2026-4175/4176/4177) and `certifi` to
+  `>=2026.10.19` (PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2, compromised emSign
+  ECC Root CA - G3). `mcp` stays capped below 2.0.0 for the SDK client path.
+- **Bumped `dnspython` floor to `>=2.9.2`** (CVE-2026-128089, fixed in
+  2.9.2; also covers CVE-2026-114605 / GHSA-45c3-73f7-pv4m, fixed in 2.9.0).
+  A crafted DNS message could make `dns.name.from_wire_parser()` burn
+  excessive CPU on name decompression; every discovery lookup parses
+  untrusted wire-format responses.
+- **Bumped `opentelemetry-*` floors to `>=1.45.2`** in the `otel` extra
+  (CVE-2026-114603, fixed in 1.45.1; CVE-2026-126360, fixed in 1.45.2, in
+  `opentelemetry-api`). `opentelemetry-sdk` and the OTLP gRPC exporter move
+  in lockstep.
+- **Added a `pyasn1>=0.6.5` floor to the `cloud-dns` extra**
+  (CVE-2026-119194..119197). It is pulled transitively via `google-auth` ->
+  `pyasn1-modules`.
+
 ### Fixed
 
 - **A2A 1.0 cards contribute their endpoint.** 1.0 removed the card's
@@ -430,6 +451,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`CloudflareBackend.get_record` no longer masks auth/network/server errors as
   "record not found."** Only an empty result set means not-found; other errors
   propagate so reconciliation cannot silently recreate or overwrite records.
+- **`Route53Backend.get_record` and `NS1Backend.get_record` no longer mask
+  auth/network/server errors as "record not found."** Both previously caught all
+  errors and returned `None` — the same value returned for a genuinely absent
+  record — so a transient failure was indistinguishable from absence. That defeats
+  the masked-failure guard in `publisher._unpublish` (which probes existence with
+  `get_record` before deleting), and could let an unpublish report success while
+  the agent's records are still live in DNS. Now only the real not-found signal
+  (an empty result set for Route 53, a `404` for NS1) returns `None`; every other
+  error propagates — the same "only the real not-found signal returns None"
+  contract used by `CloudflareBackend.get_record`.
 
 ## [0.27.0] - 2026-07-22
 

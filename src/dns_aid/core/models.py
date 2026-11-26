@@ -702,6 +702,19 @@ class AgentRecord(BaseModel):
         "or 'none'",
     )
 
+    # Operator-defined capability-document fields (issue #174)
+    cap_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Operator-defined fields of the fetched capability document — "
+        "every key beyond the known schema (capabilities, version, description, "
+        "use_cases). Opaque passthrough: NOT validated or interpreted by the "
+        "library. Integrity is judged exactly like `capabilities`: the document "
+        "came over HTTPS from the cap/well-known URI, and "
+        "`cap_sha256_verified=True` means it was covered by the record's "
+        "integrity pin. Empty when no capability document was fetched or it "
+        "defined no extra fields.",
+    )
+
     # DNS settings
     ttl: int = Field(default=3600, ge=30, le=86400, description="Time-to-live in seconds")
 
