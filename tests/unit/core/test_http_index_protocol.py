@@ -131,9 +131,9 @@ async def test_caller_filter_against_https_only(index_network, caller):
         assert result.agents[0].endpoint_url == ENDPOINT
         assert result.agents[0].capabilities == CAPABILITIES
     else:
-        assert not any(
-            qname == "public-api.example.com" for qname, _ in index_network["dns_queries"]
-        )
+        # DNS is asked even though the index doesn't declare the filter: the
+        # record, not the index, is authoritative for the protocol.
+        assert any(qname == "public-api.example.com" for qname, _ in index_network["dns_queries"])
 
 
 @pytest.mark.parametrize(
@@ -149,10 +149,8 @@ async def test_filter_selects_declared_member(index_network, protocols, caller, 
         "example.com", protocol=caller, use_http_index=True, enrich_endpoints=False
     )
     assert [a.protocol.value for a in result.agents] == ([caller] if caller in protocols else [])
-    if caller not in protocols:
-        assert not any(
-            qname == "public-api.example.com" for qname, _ in index_network["dns_queries"]
-        )
+    if caller not in protocols and dns_present:
+        assert any(qname == "public-api.example.com" for qname, _ in index_network["dns_queries"])
 
 
 @pytest.mark.parametrize("missing", [True, False])
@@ -175,8 +173,10 @@ async def test_unsupported_protocols_are_not_invented(index_network, protocols, 
     index_network["entry"]["capability"]["protocols"] = protocols
     index_network["dns_present"] = dns_present
     result = await discover("example.com", use_http_index=True, enrich_endpoints=False)
+    # DNS is asked, but this record names no protocol, so nothing is invented.
     assert result.agents == []
-    assert not any(qname == "public-api.example.com" for qname, _ in index_network["dns_queries"])
+    if dns_present:
+        assert any(qname == "public-api.example.com" for qname, _ in index_network["dns_queries"])
 
 
 @pytest.mark.parametrize("protocols", [["https"], ["openapi", "https"]])
@@ -276,4 +276,36 @@ async def test_enrichment_does_not_bypass_signature_filter(index_network):
     result = await discover(
         "example.com", use_http_index=True, enrich_endpoints=False, require_signed=True
     )
+    assert result.agents == []
+
+
+@pytest.mark.parametrize("protocols", [["https"], ["openapi", "https"]])
+async def test_filter_finds_an_agent_dns_names_despite_the_index(index_network, protocols):
+    """Index says https, DNS says alpn=mcp: protocol=mcp finds it, like discover() does."""
+    index_network["entry"]["capability"]["protocols"] = protocols
+    index_network["params"] = 'alpn="mcp"'
+    filtered = await discover(
+        "example.com", protocol="mcp", use_http_index=True, enrich_endpoints=False
+    )
+    unfiltered = await discover("example.com", use_http_index=True, enrich_endpoints=False)
+    assert [a.protocol.value for a in filtered.agents] == ["mcp"]
+    assert [a.protocol.value for a in unfiltered.agents] == ["mcp"]
+
+
+@pytest.mark.parametrize("protocols", [["openapi"], ["rest"], [None, 42]])
+@pytest.mark.parametrize("params", ['alpn="mcp"', 'key65402="a2a"'])
+async def test_unsupported_declaration_found_when_dns_names_the_protocol(
+    index_network, protocols, params
+):
+    index_network["entry"]["capability"]["protocols"] = protocols
+    index_network["params"] = params
+    result = await discover("example.com", use_http_index=True, enrich_endpoints=False)
+    expected = "mcp" if "mcp" in params else "a2a"
+    assert [a.protocol.value for a in result.agents] == [expected]
+
+
+async def test_unsupported_declaration_without_dns_builds_no_http_only_record(index_network):
+    index_network["entry"]["capability"]["protocols"] = ["openapi"]
+    index_network["dns_present"] = False
+    result = await discover("example.com", use_http_index=True, enrich_endpoints=False)
     assert result.agents == []

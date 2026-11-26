@@ -223,16 +223,25 @@ resolvable when consumers set `DNS_AID_LEGACY_01_FALLBACK=1`.
    - Not found → endpoint_source = "http_index_fallback"
 ```
 
-For flat or walkable FQDNs, the first supported protocol in the HTTP index's
-`capability.protocols` list seeds DNS resolution, preserving declaration order.
-Unknown, empty, and non-string declarations are skipped; a nonempty list with
-no supported protocol is rejected.
-An explicit caller protocol filter selects a matching declared member; it does
-not relabel an incompatible entry.
-Entries without a declaration keep the existing caller-filter / MCP-A2A fallback.
-Legacy FQDN protocol labels keep their precedence. DNS `bap`/`alpn` reconciliation
-remains authoritative, and the resolved protocol must still match an explicit
-caller filter. This is HTTP index adapter behavior, not a new DNS wire rule.
+For flat or walkable FQDNs, the HTTP index's `capability.protocols` list is a
+hint for the DNS probe, not a gate on the lookup. The flat-owner SVCB query is
+protocol-independent, and the record's `bap`/`alpn` decides the protocol; the
+probe only labels a record that names none.
+
+- The probe is the caller's filter when the index declares it, otherwise the
+  first supported declaration (declaration order; unknown, empty and non-string
+  values are skipped). So a record that names no protocol is labelled as the
+  index says, and an explicit filter never relabels it.
+- A caller filter applies to the DNS-reconciled result. An entry the index
+  declares as `https` whose record says `alpn=mcp` is found by
+  `discover(protocol="mcp")`, as it is by an unfiltered `discover()`.
+- A nonempty list with no supported protocol still gets a DNS lookup, but the
+  agent is kept only when the record itself names a protocol. It is never
+  turned into a guessed MCP agent, and no HTTP-only record is built for it.
+- Entries without a declaration keep the existing caller-filter / MCP-A2A
+  fallback; legacy FQDN protocol labels keep their precedence.
+
+This is HTTP index adapter behavior, not a new DNS wire rule.
 
 ### Future Enhancement: HTTP Index Fallback in DNS Mode
 
