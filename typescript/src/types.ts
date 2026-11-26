@@ -65,7 +65,10 @@ export interface AgentRecord {
   cap_uri: string | null;
   cap_sha256: string | null;
   cap_sha256_verified: boolean;
+  /** Raw `well-known` SvcParam, as published and signed (Python: same field). */
   well_known_path: string | null;
+  /** `well_known_path` expanded against the target; null when absent or not a safe path. */
+  well_known_url: string | null;
   bap: string | null;
   policy_uri: string | null;
   realm: string | null;

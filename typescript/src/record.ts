@@ -79,7 +79,8 @@ export function buildAgentRecord(input: BuildRecordInput): AgentRecord | null {
 
   const ipv4 = rdata.params.has(4) ? decodeIpv4Hints(rdata.params.get(4)!)[0] ?? null : null;
   const ipv6 = rdata.params.has(6) ? decodeIpv6Hints(rdata.params.get(6)!)[0] ?? null : null;
-  const wk = p["well-known"] ? wellKnownUrl(target, p["well-known"]) : null;
+  const wkRaw = p["well-known"] || null;
+  const wk = wkRaw ? wellKnownUrl(target, wkRaw) : null;
 
   return {
     name: input.name,
@@ -96,7 +97,8 @@ export function buildAgentRecord(input: BuildRecordInput): AgentRecord | null {
     cap_uri: p.cap ?? null,
     cap_sha256: p["cap-sha256"] ?? null,
     cap_sha256_verified: false,
-    well_known_path: wk,
+    well_known_path: wkRaw,
+    well_known_url: wk,
     bap,
     policy_uri: p.policy ?? null,
     realm: p.realm ?? null,

@@ -52,8 +52,24 @@ export async function enrichFromAgentCard(a: AgentRecord, fetchImpl: typeof fetc
       out.capability_source = "agent_card";
     }
   }
-  if (path) {
-    out.endpoint_override = path.startsWith("http") ? path : `https://${a.target_host}:${a.port}${path.startsWith("/") ? path : `/${path}`}`;
+  // DNS says where the agent is; the card only says which path on it. An
+  // absolute URL contributes its path only when it names the SVCB target, and
+  // host:port stay DNS's (Python builds https://{target}:{port}{path} too).
+  // Following an off-host URL would let the card move the agent, and the
+  // caller's credentials with it.
+  let cardPath = typeof path === "string" ? path : null;
+  if (cardPath && /^https?:\/\//i.test(cardPath)) {
+    let u: URL | null = null;
+    try {
+      u = new URL(cardPath);
+    } catch {
+      /* unparseable */
+    }
+    const sameHost = u && u.hostname.toLowerCase() === a.target_host.toLowerCase().replace(/\.$/, "");
+    cardPath = sameHost ? `${u!.pathname}${u!.search}` : null;
+  }
+  if (cardPath) {
+    out.endpoint_override = `https://${a.target_host}:${a.port}${cardPath.startsWith("/") ? cardPath : `/${cardPath}`}`;
     out.endpoint_url = out.endpoint_override;
     out.endpoint_source = "dns_svcb_enriched";
   }

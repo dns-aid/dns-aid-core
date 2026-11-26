@@ -7,7 +7,7 @@
 import dgram from "node:dgram";
 import net from "node:net";
 import { getServers } from "node:dns";
-import { buildQuery, parseResponse } from "./message.js";
+import { buildQuery, parseResponse, type ParsedResponse } from "./message.js";
 import type { DnsResponse, DnsTransport, RrType } from "./types.js";
 
 export interface Do53Options {
@@ -35,11 +35,15 @@ export class Do53Transport implements DnsTransport {
     let lastErr: unknown;
     for (const server of this.servers) {
       try {
-        const id = Math.floor(Math.random() * 0xffff);
+        // Unpredictable id (RFC 5452 §4.3): Math.random is not a CSPRNG.
+        const id = crypto.getRandomValues(new Uint16Array(1))[0]!;
         const q = buildQuery(name, type, id);
-        let res = await this.udp(server, q, timeoutMs);
-        if (res.tc) res = await this.tcp(server, q, timeoutMs);
-        if (res.id !== id) throw new Error("DNS id mismatch");
+        const matches = (r: ParsedResponse) => answersQuery(r, id, name, type);
+        let res = await this.udp(server, q, timeoutMs, matches);
+        if (res.tc) {
+          res = await this.tcp(server, q, timeoutMs);
+          if (!matches(res)) throw new Error("DNS response does not match the query");
+        }
         return res;
       } catch (e) {
         lastErr = e;
@@ -48,8 +52,14 @@ export class Do53Transport implements DnsTransport {
     throw lastErr instanceof Error ? lastErr : new Error("all resolvers failed");
   }
 
-  private udp(server: string, q: Uint8Array, timeoutMs: number) {
-    return new Promise<ReturnType<typeof parseResponse>>((resolve, reject) => {
+  /**
+   * Send over UDP and wait for a reply that comes from the server we asked and
+   * matches the query (id, name, type). Anything else -- a spoofed or stray
+   * datagram -- is ignored and we keep listening until the timeout, so an
+   * off-path packet cannot end the query early (RFC 5452 §9.1).
+   */
+  private udp(server: string, q: Uint8Array, timeoutMs: number, matches: (r: ParsedResponse) => boolean) {
+    return new Promise<ParsedResponse>((resolve, reject) => {
       const sock = dgram.createSocket(net.isIPv6(server) ? "udp6" : "udp4");
       const timer = setTimeout(() => {
         sock.close();
@@ -60,21 +70,26 @@ export class Do53Transport implements DnsTransport {
         sock.close();
         reject(e);
       });
-      sock.once("message", (msg) => {
+      const from = normalizeAddress(server);
+      sock.on("message", (msg, rinfo) => {
+        if (normalizeAddress(rinfo.address) !== from || rinfo.port !== this.port) return;
+        let res: ParsedResponse;
+        try {
+          res = parseResponse(new Uint8Array(msg));
+        } catch {
+          return; // unparseable: not our answer
+        }
+        if (!matches(res)) return;
         clearTimeout(timer);
         sock.close();
-        try {
-          resolve(parseResponse(new Uint8Array(msg)));
-        } catch (e) {
-          reject(e);
-        }
+        resolve(res);
       });
       sock.send(q, this.port, server);
     });
   }
 
   private tcp(server: string, q: Uint8Array, timeoutMs: number) {
-    return new Promise<ReturnType<typeof parseResponse>>((resolve, reject) => {
+    return new Promise<ParsedResponse>((resolve, reject) => {
       const sock = net.connect({ host: server, port: this.port });
       const chunks: Buffer[] = [];
       sock.setTimeout(timeoutMs, () => {
@@ -101,4 +116,17 @@ export class Do53Transport implements DnsTransport {
       });
     });
   }
+}
+
+/** The reply echoes our id and question (case-insensitive name, RFC 4343). */
+export function answersQuery(r: ParsedResponse, id: number, name: string, type: RrType): boolean {
+  if (r.id !== id || !r.question) return false;
+  const norm = (n: string) => n.replace(/\.$/, "").toLowerCase();
+  return norm(r.question.name) === norm(name) && r.question.type === type;
+}
+
+/** IPv4-mapped IPv6 (::ffff:a.b.c.d) and plain IPv4 compare equal; IPv6 is lowercased. */
+function normalizeAddress(a: string): string {
+  const lower = a.toLowerCase();
+  return lower.startsWith("::ffff:") && net.isIPv4(lower.slice(7)) ? lower.slice(7) : lower;
 }

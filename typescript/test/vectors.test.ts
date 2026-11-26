@@ -64,7 +64,8 @@ describe("SVCB presentation -> record", () => {
     const a = rec('1 mcp.example.com. alpn="mcp" port="443" cap="https://cap.example.com/cap.json" realm="demo" key65409="agent-card.json" bap="mcp=1.0" connect-meta="arn:aws:vpc-lattice:::service/svc-123"')!;
     expect(a.cap_uri).toBe("https://cap.example.com/cap.json");
     expect(a.realm).toBe("demo");
-    expect(a.well_known_path).toBe("https://mcp.example.com/.well-known/agent-card.json");
+    expect(a.well_known_path).toBe("agent-card.json"); // raw, as signed (Python stores the same)
+    expect(a.well_known_url).toBe("https://mcp.example.com/.well-known/agent-card.json");
     expect(a.bap).toBe("mcp=1.0");
     expect(a.connect_meta).toBe("arn:aws:vpc-lattice:::service/svc-123");
   });

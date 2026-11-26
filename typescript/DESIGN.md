@@ -80,9 +80,6 @@ Not yet ported (tracked as v0.2):
 - `verify()` security score, DNSSECDetail chain walk, DANE/TLSA.
 - `/.well-known/agent.json` auth fallback and `use_http_index` / ARD catalog pointers.
 - `_catalog._agents` resolution.
-- Known rough edge: `sigParamsFromRecord` re-derives the raw `well-known` value from the expanded URL.
-  Keep the raw param on the record instead (one-line change in record.ts) before relying on
-  `verified` for well-known-bearing records.
 
 ## 5. Verified behaviour (2026-10-27, corporate laptop)
 
@@ -99,7 +96,7 @@ Not yet ported (tracked as v0.2):
 Week 1 (done in this scaffold): codec, transports, discover, sig, card, conformance tests.
 
 Week 2:
-- `cap` fetch + sha256 pin; keep raw well-known param; `verify()` with the Python scoring rubric.
+- `cap` fetch + sha256 pin; `verify()` with the Python scoring rubric.
 - Cross-implementation conformance: a JSON fixture set (SVCB text -> expected AgentRecord JSON)
   generated from dns-aid-core and consumed by both test suites. Put it in dns-aid-core
   `tests/fixtures/conformance/` so Python stays the oracle.

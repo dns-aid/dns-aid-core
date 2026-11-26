@@ -35,7 +35,20 @@ export function buildQuery(name: string, type: RrType, id: number): Uint8Array {
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
-export function parseResponse(bytes: Uint8Array): DnsResponse & { tc: boolean; id: number } {
+function typeNumber(t: string): number {
+  const m = /^(?:TYPE|UNKNOWN_)(\d+)$/i.exec(t);
+  if (m) return Number(m[1]);
+  return ({ TXT: 16, SVCB: 64, HTTPS: 65 } as Record<string, number>)[t.toUpperCase()] ?? -1;
+}
+
+export interface ParsedResponse extends DnsResponse {
+  tc: boolean;
+  id: number;
+  /** First question, echoed by the server; used to match the reply to the query. */
+  question: { name: string; type: number } | null;
+}
+
+export function parseResponse(bytes: Uint8Array): ParsedResponse {
   const pkt = dnsPacket.decode(Buffer.from(bytes)) as dnsPacket.Packet & {
     rcode?: string;
     flag_ad?: boolean;
@@ -54,13 +67,13 @@ export function parseResponse(bytes: Uint8Array): DnsResponse & { tc: boolean; i
       answers.push({ name: anyA.name, type: RRTYPE.TXT, ttl: anyA.ttl ?? 0, rdata: encodeTxt(anyA.data) });
       continue;
     }
-    const m = /^(?:TYPE|UNKNOWN_)(\d+)$/i.exec(anyA.type);
-    const num = m ? Number(m[1]) : anyA.type === "SVCB" ? 64 : anyA.type === "HTTPS" ? 65 : -1;
+    const num = typeNumber(anyA.type);
     if (num === 64 || num === 65) {
       const d = anyA.data as Buffer | Uint8Array;
       answers.push({ name: anyA.name, type: num, ttl: anyA.ttl ?? 0, rdata: new Uint8Array(d) });
     }
   }
+  const q = pkt.questions?.[0] as { name: string; type: string } | undefined;
   return {
     rcode: pkt.rcode ?? "NOERROR",
     ad: Boolean(pkt.flag_ad),
@@ -68,6 +81,7 @@ export function parseResponse(bytes: Uint8Array): DnsResponse & { tc: boolean; i
     answers,
     tc: Boolean(pkt.flag_tc),
     id: pkt.id ?? 0,
+    question: q ? { name: q.name, type: typeNumber(String(q.type)) } : null,
   };
 }
 

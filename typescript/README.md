@@ -21,6 +21,9 @@ for (const a of r.agents) {
 }
 ```
 
+Requires Node 20.19+ (WebCrypto, `fetch`, and `require()` of ES modules). The package is
+ESM; CommonJS callers can `require("@dns-aid/core")` on those Node versions.
+
 Edge/browser: `new DohTransport({ url: "https://your-resolver.example/dns-query" })`.
 Public DoH endpoints are often blocked on corporate networks; prefer the organisation's resolver.
 

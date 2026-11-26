@@ -83,10 +83,28 @@ async function resolveAgent(
   const txt = await queryTxt(t, fqdn);
   const out: AgentRecord[] = [];
   for (const r of rrs.filter((r) => r.priority > 0).sort((a, b) => a.priority - b.priority)) {
-    const rec = buildAgentRecord({ name, domain, rdata: r, ttl, txtStrings: txt, dnssecValidated: ad, legacyResolved: legacy, ...(protocolHint ? { protocolHint } : {}) });
-    if (rec && (!protocolHint || rec.protocol === protocolHint)) out.push(rec);
+    // One malformed rdata (e.g. a port that is not 2 bytes) drops that record only.
+    let rec: AgentRecord | null;
+    try {
+      rec = buildAgentRecord({ name, domain, rdata: r, ttl, txtStrings: txt, dnssecValidated: ad, legacyResolved: legacy, ...(protocolHint ? { protocolHint } : {}) });
+    } catch {
+      continue;
+    }
+    // The record's own bap/alpn decides its protocol; the hint only fills in
+    // when the record names none (Python _reconcile_protocol). A record whose
+    // protocol differs from the index entry is relabelled, not dropped.
+    if (rec) out.push(rec);
   }
   return out;
+}
+
+/** resolveAgent, but a transport error or timeout drops only this agent (Python gathers with return_exceptions). */
+async function resolveAgentSafe(...args: Parameters<typeof resolveAgent>): Promise<AgentRecord[]> {
+  try {
+    return await resolveAgent(...args);
+  } catch {
+    return [];
+  }
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
@@ -130,13 +148,15 @@ export async function discover(deps: DiscovererDeps, domainIn: string, opts: Dis
   const byName = new Map<string, Set<Protocol>>();
   for (const e of entries) byName.set(e.name, (byName.get(e.name) ?? new Set()).add(e.protocol));
 
-  const nested = await mapLimit([...byName.entries()], CONCURRENCY, async ([name, protos]) => {
-    const hint = protos.size === 1 ? [...protos][0] : opts.protocol;
-    const recs = await resolveAgent(deps, name, domain, hint, allowLegacy);
-    return recs.filter((r) => protos.has(r.protocol));
+  const nested = await mapLimit([...byName.entries()], CONCURRENCY, ([name, protos]) => {
+    // Placeholder protocol for a record with no usable bap/alpn (e.g. alpn=h2):
+    // the caller's filter, else the first protocol the index/probe listed.
+    const hint = opts.protocol ?? [...protos][0];
+    return resolveAgentSafe(deps, name, domain, hint, allowLegacy);
   });
 
   let agents = nested.flat();
+  if (opts.protocol) agents = agents.filter((a) => a.protocol === opts.protocol);
   const seen = new Set<string>();
   agents = agents.filter((a) => {
     const k = `${a.fqdn.toLowerCase()}|${a.protocol}`;
@@ -152,13 +172,21 @@ export async function discover(deps: DiscovererDeps, domainIn: string, opts: Dis
   }
 
   if (opts.enrichEndpoints ?? true) {
-    agents = await mapLimit(agents, CONCURRENCY, (a) => enrichFromAgentCard(a, fetchImpl, opts.httpTimeoutMs ?? 10_000));
+    // Enrichment is best-effort: a failure keeps the DNS-only record.
+    agents = await mapLimit(agents, CONCURRENCY, (a) =>
+      enrichFromAgentCard(a, fetchImpl, opts.httpTimeoutMs ?? 10_000).catch(() => a),
+    );
   }
 
   if (opts.verifySignatures) {
     const jwks = deps.jwks ?? defaultJwksFetcher(fetchImpl);
     agents = await mapLimit(agents, CONCURRENCY, async (a) => {
-      const r = await verifyRecordSignature(a, jwks);
+      // A verifier error fails closed for this agent only.
+      const r = await verifyRecordSignature(a, jwks).catch(() => ({
+        status: "invalid" as const,
+        verified: false,
+        expires_at: null,
+      }));
       return { ...a, signature_verified: r.verified, signature_status: r.status, signature_expires_at: r.expires_at };
     });
   }

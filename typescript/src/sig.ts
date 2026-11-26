@@ -34,7 +34,7 @@ export function sigParamsFromRecord(a: AgentRecord): Record<string, string> {
     "connect-class": a.connect_class,
     "connect-meta": a.connect_meta,
     "enroll-uri": a.enroll_uri,
-    "well-known": a.well_known_path ? rawWellKnown(a) : null,
+    "well-known": a.well_known_path,
   };
   const out: Record<string, string> = {};
   for (const k of SIG_PARAM_KEYS) {
@@ -42,13 +42,6 @@ export function sigParamsFromRecord(a: AgentRecord): Record<string, string> {
     if (v) out[k] = v;
   }
   return out;
-}
-// well_known_path is the expanded URL; the signed value is the raw param. Keep the raw
-// value around by re-deriving: this is a known limitation, see design doc "sig well-known".
-function rawWellKnown(a: AgentRecord): string {
-  const u = a.well_known_path!;
-  const prefix = `https://${a.target_host}/.well-known/`;
-  return u.startsWith(prefix) ? u.slice(prefix.length) : u.replace(`https://${a.target_host}`, "");
 }
 
 /** `svcb` claim = base64url(SHA-256("svcb1:" + canonicalJson(params))). */
@@ -68,8 +61,8 @@ export interface SigPayload {
   target: string;
   port: number;
   alpn: string;
-  iat: number;
-  exp: number;
+  iat?: number;
+  exp?: number;
   svcb?: string;
 }
 
@@ -150,19 +143,32 @@ export async function verifyRecordSignature(
     }
   }
   if (!payload) return { ...none, status: "invalid", verified: false, algorithm: "ES256", detail: "signature did not verify" };
-  if (typeof payload.exp === "number" && payload.exp < now)
-    return { ...none, status: "expired", verified: false, algorithm: "ES256", expires_at: payload.exp };
+  // A payload missing a claim, or with one of the wrong type, is invalid rather than a crash.
+  if (
+    typeof payload !== "object" ||
+    typeof payload.fqdn !== "string" ||
+    typeof payload.target !== "string" ||
+    typeof payload.port !== "number" ||
+    typeof payload.alpn !== "string" ||
+    (payload.exp !== undefined && typeof payload.exp !== "number") ||
+    (payload.svcb !== undefined && typeof payload.svcb !== "string")
+  )
+    return { ...none, status: "invalid", verified: false, algorithm: "ES256", detail: "malformed payload" };
+  // No exp is treated as exp=0, i.e. expired (Python jwks.py does the same): a
+  // signature that never expires cannot be revoked by letting it lapse.
+  const exp = payload.exp ?? 0;
+  if (exp < now) return { ...none, status: "expired", verified: false, algorithm: "ES256", expires_at: payload.exp ?? null };
 
   const eq = (x: string, y: string) => x.replace(/\.$/, "").toLowerCase() === y.replace(/\.$/, "").toLowerCase();
   const bound =
     eq(payload.fqdn, a.fqdn) && eq(payload.target, a.target_host) && payload.port === a.port && payload.alpn.toLowerCase() === a.protocol;
-  if (!bound) return { ...none, status: "unbound", verified: false, algorithm: "ES256", expires_at: payload.exp ?? null, detail: "endpoint claims do not match record" };
+  if (!bound) return { ...none, status: "unbound", verified: false, algorithm: "ES256", expires_at: exp, detail: "endpoint claims do not match record" };
 
   if (payload.svcb) {
     const expect = await svcbDigest(sigParamsFromRecord(a));
     if (expect !== payload.svcb)
-      return { ...none, status: "unbound", verified: false, algorithm: "ES256", expires_at: payload.exp, detail: "svcb claim mismatch" };
-    return { status: "verified", verified: true, expires_at: payload.exp, algorithm: "ES256", covers_params: true };
+      return { ...none, status: "unbound", verified: false, algorithm: "ES256", expires_at: exp, detail: "svcb claim mismatch" };
+    return { status: "verified", verified: true, expires_at: exp, algorithm: "ES256", covers_params: true };
   }
-  return { status: "verified_endpoint_only", verified: true, expires_at: payload.exp, algorithm: "ES256", covers_params: false };
+  return { status: "verified_endpoint_only", verified: true, expires_at: exp, algorithm: "ES256", covers_params: false };
 }
