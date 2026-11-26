@@ -20,6 +20,7 @@ from dns_aid.core.discoverer import (
     _parse_svcb_custom_params,
     _process_http_agent,
     _query_capabilities,
+    _query_single_agent,
     _reconcile_protocol,
     discover,
     discover_at_fqdn,
@@ -1107,7 +1108,7 @@ class TestEnrichFromHttpIndex:
         )
         _enrich_from_http_index(agent, http_agent)
         assert agent.endpoint_override == "https://chat.example.com/mcp"
-        assert agent.endpoint_source == "http_index"
+        assert agent.endpoint_source == "dns_svcb_enriched"
 
     def test_does_not_override_existing_endpoint(self):
         from dns_aid.core.models import AgentRecord, Protocol
@@ -1690,9 +1691,9 @@ class TestPerAgentDnssec:
         )
 
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new_callable=AsyncMock,
-            return_value=True,
+            return_value=(True, True),
         ):
             result_level = await _apply_post_discovery(
                 [agent_a, agent_b],
@@ -1726,10 +1727,11 @@ class TestPerAgentDnssec:
         )
 
         async def selective_check(fqdn):
-            return fqdn == "chat.example.com"
+            validated = fqdn == "chat.example.com"
+            return validated, validated
 
         with patch(
-            "dns_aid.core.validator._check_dnssec",
+            "dns_aid.core.validator._check_dnssec_with_evidence",
             new=selective_check,
         ):
             with pytest.raises(DNSSECError) as excinfo:
@@ -1975,3 +1977,117 @@ class TestCollectAgentResultsDedup:
     def test_filters_non_agent_results(self):
         a = self._rec("chat", "example.com", Protocol.MCP)
         assert len(_collect_agent_results([a, ValueError("boom"), None])) == 1
+
+
+class TestCapMetadata:
+    """Operator-defined cap-document fields surface on the record (issue #174)."""
+
+    @staticmethod
+    def _svcb_answers_with_cap() -> MagicMock:
+        mock_rdata = MagicMock()
+        mock_rdata.target = dns.name.from_text("mcp.example.com.")
+        mock_rdata.priority = 1
+        mock_rdata.port = 443
+        mock_rdata.params = {}
+        mock_rdata.__str__ = lambda self: (
+            '1 mcp.example.com. alpn="mcp" port="443" '
+            'cap="https://mcp.example.com/.well-known/agent-cap.json"'
+        )
+        mock_answers = MagicMock()
+        mock_answers.__iter__ = lambda self: iter([mock_rdata])
+        return mock_answers
+
+    @pytest.mark.asyncio
+    async def test_cap_metadata_surfaces_operator_fields(self):
+        """Non-known cap-doc keys land on AgentRecord.cap_metadata verbatim."""
+        mock_resolver = MagicMock()
+        mock_resolver.resolve = AsyncMock(return_value=self._svcb_answers_with_cap())
+
+        cap_doc = CapabilityDocument(
+            capabilities=["booking"],
+            version="1.0.0",
+            metadata={
+                "x-operator-tier": "gold",
+                "x-vendor": {"attestation": "https://example.com/attest"},
+            },
+        )
+
+        with (
+            patch(
+                "dns_aid.core.discoverer.dns.asyncresolver.Resolver",
+                return_value=mock_resolver,
+            ),
+            patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                new_callable=AsyncMock,
+                return_value=cap_doc,
+            ),
+        ):
+            agent = await _query_single_agent("example.com", "booking", Protocol.MCP)
+
+        assert agent is not None
+        assert agent.cap_metadata == {
+            "x-operator-tier": "gold",
+            "x-vendor": {"attestation": "https://example.com/attest"},
+        }
+        # Passthrough is independent of the typed fields.
+        assert agent.capabilities == ["booking"]
+
+    @pytest.mark.asyncio
+    async def test_cap_metadata_populated_even_without_capabilities(self):
+        """A cap doc with ONLY operator fields still surfaces them.
+
+        The extension surface and the capabilities list are independent —
+        an operator may publish a cap document purely to carry extension
+        metadata.
+        """
+        mock_resolver = MagicMock()
+        mock_resolver.resolve = AsyncMock(return_value=self._svcb_answers_with_cap())
+
+        cap_doc = CapabilityDocument(metadata={"x-only-extension": True})
+
+        with (
+            patch(
+                "dns_aid.core.discoverer.dns.asyncresolver.Resolver",
+                return_value=mock_resolver,
+            ),
+            patch(
+                "dns_aid.core.discoverer.fetch_cap_document",
+                new_callable=AsyncMock,
+                return_value=cap_doc,
+            ),
+        ):
+            agent = await _query_single_agent("example.com", "booking", Protocol.MCP)
+
+        assert agent is not None
+        assert agent.cap_metadata == {"x-only-extension": True}
+        assert agent.capabilities == []
+
+    @pytest.mark.asyncio
+    async def test_cap_metadata_empty_without_cap_doc(self):
+        """No cap/well-known param → cap_metadata stays an empty dict."""
+        mock_rdata = MagicMock()
+        mock_rdata.target = dns.name.from_text("mcp.example.com.")
+        mock_rdata.priority = 1
+        mock_rdata.port = 443
+        mock_rdata.params = {}
+        mock_rdata.__str__ = lambda self: '1 mcp.example.com. alpn="mcp" port="443"'
+        mock_answers = MagicMock()
+        mock_answers.__iter__ = lambda self: iter([mock_rdata])
+        mock_resolver = MagicMock()
+
+        async def resolve(qname, rdtype):
+            if rdtype in ("SVCB", "HTTPS"):
+                return mock_answers
+            raise dns.resolver.NoAnswer()
+
+        mock_resolver.resolve = AsyncMock(side_effect=resolve)
+
+        with patch(
+            "dns_aid.core.discoverer.dns.asyncresolver.Resolver",
+            return_value=mock_resolver,
+        ):
+            agent = await _query_single_agent("example.com", "booking", Protocol.MCP)
+
+        assert agent is not None
+        assert agent.cap_metadata == {}

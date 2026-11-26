@@ -19,25 +19,28 @@ jobs:
       id-token: write     # required for Sigstore keyless OIDC signing
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0  # Full history needed for git-cliff changelog
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install build cyclonedx-bom
+      - name: Install build tools (hash-pinned)
+        # Pinned with hashes for supply-chain integrity (OpenSSF Scorecard
+        # Pinned-Dependencies). Regenerate after bumps:
+        #   printf 'build\ncyclonedx-bom\n' | uv pip compile --generate-hashes \
+        #     --python-version 3.12 --python-platform linux \
+        #     -o .github/workflows/requirements-release.txt -
+        run: pip install --require-hashes -r .github/workflows/requirements-release.txt
 
       - name: Build wheel and sdist
         run: python -m build
 
       - name: Upload dist artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
           name: dist
           path: dist/
@@ -66,7 +69,7 @@ jobs:
           cosign sign-blob --yes sbom.json --output-signature sbom.json.sig --output-certificate sbom.json.pem
 
       - name: Generate release notes
-        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5  # v4
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff  # v4
         with:
           config: cliff.toml
           args: --latest --strip header
@@ -74,7 +77,7 @@ jobs:
           OUTPUT: RELEASE_NOTES.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           body_path: RELEASE_NOTES.md
           files: |
@@ -100,13 +103,13 @@ jobs:
 
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: dist
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # release/v1
 
   publish-to-mcp-registry:
     name: Publish to MCP Registry
@@ -118,7 +121,7 @@ jobs:
       id-token: write  # OIDC for `mcp-publisher login github-oidc`
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install mcp-publisher (pinned + checksum-verified)
         env:

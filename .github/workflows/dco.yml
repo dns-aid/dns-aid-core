@@ -14,11 +14,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Check DCO sign-off
-        uses: KineticCafe/actions-dco@1da04282bbf757dab7d92a5c8535dbfb8113da5c  # v3.1.0
+        uses: KineticCafe/actions-dco@5f160e3ee086af8fc0fb567b8add0937d074123e  # v3.2.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}

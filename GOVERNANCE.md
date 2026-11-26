@@ -62,6 +62,10 @@ Any Contributor can be nominated for Committer status by an existing Committer. 
 - Understanding of the DNS-AID architecture and IETF draft
 - Adherence to the Code of Conduct
 
+## Access Continuity
+
+At least two maintainers hold owner rights on the [dns-aid GitHub organization](https://github.com/dns-aid) at all times, so no single person's absence can block administration, releases, or security response. If the Project Lead becomes unavailable for an extended period, the remaining Committers elect an interim Lead by simple majority; the PyPI project and the bestpractices.dev badge entry likewise each have at least two people with owner/edit access as a standing goal.
+
 ## Maintainers
 
 See [MAINTAINERS.md](MAINTAINERS.md) for the current list of maintainers and open roles. The project is actively seeking additional maintainers to ensure long-term sustainability and diverse representation across DNS providers, security expertise, and standards bodies.
