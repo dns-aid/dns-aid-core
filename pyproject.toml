@@ -30,6 +30,8 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Internet :: Name Service (DNS)",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -139,7 +141,9 @@ cel = [
     # CEL (Common Expression Language) custom policy rules
     # Rust backend (~2µs/eval); falls back to cel-python (~200µs/eval) if unavailable
     "common-expression-language>=0.5.0",
-    "cel-python>=0.5.0",
+    # cel-python needs google-re2, which has no Python 3.15 wheels yet; on
+    # 3.15 CEL runs on the Rust backend only.
+    "cel-python>=0.5.0; python_version < '3.15'",
     "pygments>=2.20.0", # CVE-2026-4539 (low) — ReDoS in GUID regex, via rich/cel
 ]
 pqc = [
@@ -158,7 +162,9 @@ dev = [
     "cyclonedx-bom>=4.0.0",
     "pqcrypto>=0.4.0",
     "common-expression-language>=0.5.0",
-    "cel-python>=0.5.0",
+    # cel-python needs google-re2, which has no Python 3.15 wheels yet; on
+    # 3.15 CEL runs on the Rust backend only.
+    "cel-python>=0.5.0; python_version < '3.15'",
     # Direct floors on transitive deps to close Dependabot alerts:
     "lxml>=6.1.0",       # CVE-2026-41066 (high) — XXE in iterparse, via cyclonedx-bom
     "pygments>=2.20.0",  # CVE-2026-4539 (low) — ReDoS in GUID regex, via rich/pytest/cel

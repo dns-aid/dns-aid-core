@@ -28,11 +28,33 @@ def _generate_ed25519_keypair() -> tuple[str, bytes]:
     return pem.decode(), public_bytes
 
 
-def _generate_ml_dsa_keypair() -> tuple[str, bytes]:
-    """Generate an ML-DSA-65 keypair, return (base64 secret key, public key bytes)."""
+def _ml_dsa_keypair() -> tuple[bytes, bytes]:
+    """(public key, secret key) for ML-DSA-65 on either pqcrypto API.
+
+    pqcrypto 1.0 renamed generate_keypair() to keygen(); 1.0 is the first
+    release with Python 3.15 wheels.
+    """
     from pqcrypto.sign import ml_dsa_65  # guarded by requires_pqcrypto
 
-    pk, sk = ml_dsa_65.generate_keypair()
+    keygen = getattr(ml_dsa_65, "keygen", None) or ml_dsa_65.generate_keypair
+    pk, sk = keygen()
+    return bytes(pk), bytes(sk)
+
+
+def _ml_dsa_verifies(pk: bytes, message: bytes, signature: bytes) -> bool:
+    """pqcrypto < 1.0 returns a bool; 1.0 returns None and raises on a bad signature."""
+    from pqcrypto.sign import ml_dsa_65
+
+    try:
+        result = ml_dsa_65.verify(pk, message, signature)
+    except Exception:  # noqa: BLE001 — InvalidSignatureError on 1.0
+        return False
+    return result is None or bool(result)
+
+
+def _generate_ml_dsa_keypair() -> tuple[str, bytes]:
+    """Generate an ML-DSA-65 keypair, return (base64 secret key, public key bytes)."""
+    pk, sk = _ml_dsa_keypair()
     return base64.b64encode(sk).decode(), pk
 
 
@@ -175,9 +197,7 @@ class TestMlDsa65Signing:
     @pytest.mark.asyncio
     async def test_verify_ml_dsa_signature(self, sample_request: httpx.Request) -> None:
         """Round-trip: sign with ML-DSA-65, then verify with public key."""
-        from pqcrypto.sign import ml_dsa_65
-
-        pk, sk = ml_dsa_65.generate_keypair()
+        pk, sk = _ml_dsa_keypair()
         sk_b64 = base64.b64encode(sk).decode()
 
         handler = HttpMsgSigAuthHandler(
@@ -196,8 +216,9 @@ class TestMlDsa65Signing:
 
         sig_base = _build_signature_base(result, ("@method", "@target-uri", "content-digest"))
 
-        # Verify with pqcrypto
-        assert ml_dsa_65.verify(pk, sig_base.encode(), sig_bytes)
+        # Verify with pqcrypto, and check a tampered base does not verify
+        assert _ml_dsa_verifies(pk, sig_base.encode(), sig_bytes)
+        assert not _ml_dsa_verifies(pk, sig_base.encode() + b"x", sig_bytes)
 
 
 class TestMissingCoveredComponent:

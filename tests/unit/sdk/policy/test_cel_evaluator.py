@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 from unittest.mock import Mock, patch
 
 import pytest
@@ -18,6 +19,12 @@ from dns_aid.sdk.policy.schema import (
     PolicyDocument,
     PolicyEnforcementLayer,
     PolicyRules,
+)
+
+# cel-python (the fallback backend) is not installed on Python 3.15: its
+# google-re2 dependency has no 3.15 wheels yet (pyproject marker).
+requires_celpy = pytest.mark.skipif(
+    importlib.util.find_spec("celpy") is None, reason="cel-python not installed"
 )
 
 
@@ -693,6 +700,7 @@ class TestBackendSelection:
         # In the dev environment both backends are installed → Rust wins.
         assert isinstance(backend, _RustBackend)
 
+    @requires_celpy
     def test_python_fallback_when_rust_unavailable(self) -> None:
         mod = importlib.import_module("dns_aid.sdk.policy.cel_evaluator")
 
@@ -717,6 +725,7 @@ class TestBackendSelection:
         assert evaluator.backend_name in ("_RustBackend", "_PythonBackend")
 
 
+@requires_celpy
 class TestPythonBackend:
     """Exercise the cel-python (celpy) fallback backend directly."""
 
