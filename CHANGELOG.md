@@ -28,6 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (CVE-2026-119194..119197). It is pulled transitively via `google-auth` ->
   `pyasn1-modules`.
 
+
+### Fixed
+
+- **`well-known` (key65409) in the draft-mk-dnsop-svcb-well-known-01 format
+  is now understood** (#317). That format is a list of entries, each a
+  2-octet length followed by the suffix; dns-aid read the whole value as one
+  string, so a catalog pointer in it fell back to `ai-catalog.json` without a
+  word. Both formats are accepted: a value is read as wk-01 only when the
+  length prefixes walk it exactly, otherwise as the plain string DNS-AID
+  publishes. With several suffixes the first valid one is used. A catalog
+  pointer whose `well-known` is present but unusable is now skipped with a
+  `catalog_pointer.well_known_malformed` warning instead of fetching the
+  default filename. On agent records an invalid `well-known` no longer drops
+  the whole agent; the record is kept and only its descriptor fetch skipped.
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed

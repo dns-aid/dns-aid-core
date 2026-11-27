@@ -775,7 +775,7 @@ async def _query_single_agent(
 
             cap_uri = custom_params.get("cap")
             cap_sha256 = custom_params.get("cap-sha256")
-            well_known_path = custom_params.get("well-known")
+            well_known_path = _well_known_from_rdata(rdata, fqdn, custom_params.get("well-known"))
             # draft-02 §5.1 (Bulk Agent Protocol, experimental): `bap`
             # carries a single agent-protocol identifier per record in
             # either bare (``mcp``) or versioned (``mcp=1.0``) form.
@@ -1062,6 +1062,48 @@ async def _query_single_agent(
 from dns_aid.core.models import DNS_AID_KEY_MAP, DNS_AID_KEY_MAP_REVERSE  # noqa: E402
 
 _DNS_AID_KEY_NAMES: frozenset[str] = frozenset(DNS_AID_KEY_MAP.keys())
+
+
+def _well_known_from_rdata(rdata: Any, fqdn: str, text_value: str | None) -> str | None:
+    """The record's ``well-known`` suffix, decoded from the raw SvcParam bytes.
+
+    Handles both the plain string DNS-AID publishes and the
+    draft-mk-dnsop-svcb-well-known-01 length-prefixed list (#317); with
+    several suffixes the first one that validates is used. The text
+    rendering is only a fallback for rdata without raw params. An
+    undecodable or invalid value is logged and treated as absent: the
+    record is kept, its descriptor just isn't fetched.
+    """
+    from dns_aid.core.well_known import WellKnownDecodeError, read_well_known
+    from dns_aid.utils.validation import ValidationError, validate_well_known_path
+
+    try:
+        suffixes = read_well_known(rdata)
+    except WellKnownDecodeError as exc:
+        logger.warning(
+            "well-known SvcParamKey undecodable — skipping descriptor fetch",
+            fqdn=fqdn,
+            reason=str(exc),
+        )
+        return None
+    if suffixes is None:
+        suffixes = [text_value] if text_value else []
+    for suffix in suffixes:
+        try:
+            validate_well_known_path(suffix)
+        except ValidationError:
+            continue
+        return suffix
+    if suffixes:
+        # Keep the record, skip only the descriptor fetch. Passing the invalid
+        # value on made AgentRecord validation reject it, which dropped the
+        # whole agent with nothing above debug level.
+        logger.warning(
+            "well-known SvcParamKey rejected — skipping descriptor fetch",
+            fqdn=fqdn,
+            well_known=suffixes,
+        )
+    return None
 
 
 def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
