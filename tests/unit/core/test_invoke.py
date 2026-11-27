@@ -359,6 +359,15 @@ class TestExtractA2AResponseTextEdgeCases:
 
 
 class TestResolveMCPEndpoint:
+    @pytest.fixture(autouse=True)
+    def _allow_probe(self):
+        """These tests mock the HTTP layer, so skip real DNS in the SSRF guard."""
+        with patch(
+            "dns_aid.utils.url_safety.validate_fetch_url_async",
+            new=AsyncMock(side_effect=lambda url, **kw: url),
+        ):
+            yield
+
     @pytest.mark.asyncio
     async def test_endpoint_with_path_returned_as_is(self):
         with patch("dns_aid.core.invoke.httpx.AsyncClient") as MockClient:
@@ -432,6 +441,34 @@ class TestResolveMCPEndpoint:
             _mock_async_client(MockClient, get=httpx.ConnectError("refused"))
             result = await resolve_mcp_endpoint("https://x.example.com")
         assert result == "https://x.example.com/mcp"
+
+    @pytest.mark.asyncio
+    async def test_blocked_probe_url_skips_fetch_and_uses_convention(self):
+        """An SSRF-blocked host is never fetched; the /mcp convention applies."""
+        from dns_aid.utils.url_safety import UnsafeURLError
+
+        with (
+            patch(
+                "dns_aid.utils.url_safety.validate_fetch_url_async",
+                new=AsyncMock(side_effect=UnsafeURLError("blocked")),
+            ),
+            patch("dns_aid.core.invoke.httpx.AsyncClient") as MockClient,
+        ):
+            result = await resolve_mcp_endpoint("https://x.example.com")
+        assert result == "https://x.example.com/mcp"
+        MockClient.assert_not_called()
+
+
+class TestResolveMCPEndpointSSRFGuard:
+    """Unlike TestResolveMCPEndpoint, these run the real SSRF validator."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("host", ["127.0.0.1", "169.254.169.254", "10.0.0.5"])
+    async def test_private_and_metadata_addresses_are_not_probed(self, host):
+        with patch("dns_aid.core.invoke.httpx.AsyncClient") as MockClient:
+            result = await resolve_mcp_endpoint(f"https://{host}")
+        assert result == f"https://{host}/mcp"
+        MockClient.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

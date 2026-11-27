@@ -210,6 +210,17 @@ async def resolve_mcp_endpoint(endpoint: str, *, timeout: float = 5.0) -> str:
     # Try /.well-known/agent.json for the authoritative path
     agent_json_url = f"{base}/.well-known/agent.json"
     try:
+        # The host came from DNS, which the endpoint's publisher controls, so
+        # apply the same SSRF guard every other DNS- or metadata-derived fetch
+        # uses. A blocked URL skips the probe and falls back to the convention.
+        from dns_aid.utils.url_safety import UnsafeURLError, validate_fetch_url_async
+
+        await validate_fetch_url_async(agent_json_url)
+    except UnsafeURLError:
+        logger.debug("resolve_mcp.probe_blocked", url=agent_json_url)
+        return f"{base}{_MCP_CONVENTIONAL_PATH}"
+
+    try:
         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
             resp = await client.get(agent_json_url)
         if resp.status_code == 200:
