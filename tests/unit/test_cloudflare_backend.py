@@ -274,7 +274,12 @@ class TestCloudflareBackendCreateSvcb:
         mock_get_response = MagicMock()
         mock_get_response.json.return_value = {
             "success": True,
-            "result": [{"id": "existing123"}],
+            "result": [
+                {
+                    "id": "existing123",
+                    "data": {"priority": 1, "target": "chat.example.com.", "value": 'alpn="a2a"'},
+                }
+            ],
         }
         mock_get_response.raise_for_status = MagicMock()
 
@@ -383,7 +388,15 @@ class TestCloudflareBackendCreateSvcb:
 
         # Pre-check finds an existing record...
         mock_get_response = MagicMock()
-        mock_get_response.json.return_value = {"success": True, "result": [{"id": "gone123"}]}
+        mock_get_response.json.return_value = {
+            "success": True,
+            "result": [
+                {
+                    "id": "gone123",
+                    "data": {"priority": 1, "target": "chat.example.com.", "value": 'alpn="a2a"'},
+                }
+            ],
+        }
         mock_get_response.raise_for_status = MagicMock()
 
         # ...the PUT 404s (record was deleted out from under us)...
@@ -432,7 +445,15 @@ class TestCloudflareBackendCreateSvcb:
 
         # Pre-check finds an existing record, so we PUT.
         mock_get_response = MagicMock()
-        mock_get_response.json.return_value = {"success": True, "result": [{"id": "alpha1"}]}
+        mock_get_response.json.return_value = {
+            "success": True,
+            "result": [
+                {
+                    "id": "alpha1",
+                    "data": {"priority": 1, "target": "chat.example.com.", "value": 'alpn="a2a"'},
+                }
+            ],
+        }
         mock_get_response.raise_for_status = MagicMock()
 
         # The PUT collides with a different record at the same name -> 81058.
@@ -472,7 +493,15 @@ class TestCloudflareBackendCreateSvcb:
         backend = CloudflareBackend(api_token="token", zone_id="Z123")
 
         mock_get_response = MagicMock()
-        mock_get_response.json.return_value = {"success": True, "result": [{"id": "gone123"}]}
+        mock_get_response.json.return_value = {
+            "success": True,
+            "result": [
+                {
+                    "id": "gone123",
+                    "data": {"priority": 1, "target": "chat.example.com.", "value": 'alpn="a2a"'},
+                }
+            ],
+        }
         mock_get_response.raise_for_status = MagicMock()
 
         mock_put_response = MagicMock()
