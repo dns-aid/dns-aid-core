@@ -808,6 +808,15 @@ class AgentRecord(BaseModel):
         "not checked, not configured, or not DNSSEC-anchored.",
     )
 
+    # When this record came out of a live DNS resolution (time.time()). The SDK's
+    # verify_freshness_seconds uses it to re-resolve a stale record before
+    # invoking. None for records built outside discover() / discover_at_fqdn().
+    discovered_at: float | None = Field(
+        default=None,
+        description="POSIX timestamp at which discover() or discover_at_fqdn() returned "
+        "this record; None for records built any other way.",
+    )
+
     legacy_resolved: bool = Field(
         default=False,
         description="True when this agent record was resolved via the legacy "

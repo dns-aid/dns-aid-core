@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`SDKConfig.verify_freshness_seconds`** (env `DNS_AID_VERIFY_FRESHNESS_SECONDS`,
+  default 0 = off). `invoke()` re-resolves an agent discovered longer ago than
+  this and refuses the call (`error_type="stale_record"`) if its target, port
+  or `cap-sha256` changed, or if DNSSEC or DANE verification it originally
+  passed no longer holds. `SDKConfig.require_dnssec` (env
+  `DNS_AID_REQUIRE_DNSSEC`) also requires DNSSEC on that re-resolution.
+  `AgentRecord.discovered_at` is set by `discover()` and `discover_at_fqdn()`.
+  From #132 by @nicknacnic.
+
 ### Security
 
 - **Bumped dependency floors to clear the Dependency Audit gate** — `mcp` to
@@ -27,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Added a `pyasn1>=0.6.5` floor to the `cloud-dns` extra**
   (CVE-2026-119194..119197). It is pulled transitively via `google-auth` ->
   `pyasn1-modules`.
+
+
+### Fixed
+
+- **SVCB records with unsupported `mandatory` keys are now skipped**
+  (RFC 9460 §8), so a publisher can fail closed, e.g. by making `cap-sha256`
+  mandatory. Only that record is skipped; others in the RRset are still used.
+  A record making `ech` or `dohpath` mandatory is now skipped, since neither
+  is implemented. From #132 by @nicknacnic.
 
 ## [0.28.1] - 2026-08-09
 

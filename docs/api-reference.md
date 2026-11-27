@@ -1643,6 +1643,8 @@ config = SDKConfig(
     directory_api_url=None,          # Base URL for AgentClient.search() and fetch_rankings()
     telemetry_api_url=None,          # Deprecated alias for directory_api_url
     credential_provider_timeout=30.0,  # Max seconds to wait for credential_provider callback (v0.21.0+)
+    verify_freshness_seconds=0,      # Re-resolve records older than this before invoke; 0 = off
+    require_dnssec=False,            # Require DNSSEC on that re-resolution
 )
 
 # Or from environment variables:
@@ -1666,12 +1668,25 @@ config = SDKConfig.from_env()
 | `DNS_AID_SDK_HTTP_PUSH_URL` | None | POST signals to this URL |
 | `DNS_AID_SDK_DIRECTORY_API_URL` | None | Base URL for `AgentClient.search()` + `fetch_rankings()` (v0.19.0+) |
 | `DNS_AID_SDK_TELEMETRY_API_URL` | None | Deprecated alias for `DNS_AID_SDK_DIRECTORY_API_URL` |
+| `DNS_AID_VERIFY_FRESHNESS_SECONDS` | 0 | Re-resolve a record older than this before `invoke()`; 0 disables |
+| `DNS_AID_REQUIRE_DNSSEC` | false | Require a DNSSEC-validated answer on that re-resolution |
 
 Standard OpenTelemetry env vars are also honored: `OTEL_TRACES_SAMPLER`,
 `OTEL_TRACES_SAMPLER_ARG`, `OTEL_PROPAGATORS`, `OTEL_RESOURCE_ATTRIBUTES`,
 `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_ENDPOINT`. See
 [docs/integrations/opentelemetry.md](integrations/opentelemetry.md) for the
 full guide (sampling, propagation, managed-collector auth, failure modes).
+
+**Freshness re-verification.** With `verify_freshness_seconds > 0`, `invoke()`
+re-resolves an agent whose `discovered_at` is older than that many seconds,
+before resolving auth or policy. The call is refused (`status=REFUSED`,
+`error_type="stale_record"`) if the agent is gone, its `target_host`, `port`
+or `cap_sha256` changed, or it no longer passes a check the original record
+passed: a DNSSEC-validated record must re-resolve validated, and a
+DANE-verified one must verify again. Otherwise the call goes to the fresh
+record. `require_dnssec` additionally demands DNSSEC on every re-resolution.
+Records not returned by `discover()` / `discover_at_fqdn()` carry no
+`discovered_at` and are never re-resolved.
 
 The `resolved_directory_url` property returns `directory_api_url` when set, falling
 back to `telemetry_api_url` for backwards compatibility. Using the legacy alias
