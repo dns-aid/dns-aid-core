@@ -18,6 +18,7 @@ import json
 import os
 import shlex
 import time
+from collections.abc import Sequence
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -47,6 +48,7 @@ from dns_aid.core.models import (
     Protocol,
     TrustManifest,
 )
+from dns_aid.core.resolver import make_resolver, scoped_nameservers
 
 logger = structlog.get_logger(__name__)
 
@@ -365,6 +367,7 @@ def _drop_unverified_off_domain(agents: list[AgentRecord], domain: str) -> list[
     return kept
 
 
+@scoped_nameservers
 async def discover(
     domain: str,
     protocol: str | Protocol | None = None,
@@ -394,6 +397,7 @@ async def discover(
     require_signed_params: bool = False,
     require_signature_algorithm: list[str] | None = None,
     allow_legacy: bool | None = None,
+    nameservers: str | Sequence[str] | None = None,
 ) -> DiscoveryResult:
     """
     Discover AI agents at a domain using DNS-AID protocol.
@@ -447,13 +451,19 @@ async def discover(
             ``verify_signatures``.
         require_signature_algorithm: Restrict ``require_signed`` to records whose verified
             algorithm appears in this allow-list. Requires ``require_signed=True``.
+        nameservers: Recursive resolver(s) for every DNS lookup this call makes,
+            instead of the system resolver (``/etc/resolv.conf``). An IP address,
+            ``IP#port``, an ``https://`` DoH URL, or a list of them. The DNSSEC
+            verdicts reported are that resolver's AD bit, so point this at a
+            validating resolver you trust. See :mod:`dns_aid.core.resolver`.
 
     Returns:
         DiscoveryResult with the post-filter list of agents.
 
     Raises:
-        ValueError: ``text_match`` is the empty string, or
-            ``require_signature_algorithm`` is set without ``require_signed=True``.
+        ValueError: ``text_match`` is the empty string,
+            ``require_signature_algorithm`` is set without ``require_signed=True``,
+            or ``nameservers`` cannot be parsed.
         DNSSECError: ``require_dnssec=True`` and the response was not authenticated.
 
     Example:
@@ -667,7 +677,7 @@ async def _query_single_agent(
     resolved_via_legacy = False
 
     try:
-        resolver = dns.asyncresolver.Resolver()
+        resolver = make_resolver()
 
         # Query SVCB record. dnspython uses type 64 for SVCB.
         # draft-02: try the flat FQDN first. On NoAnswer / NXDOMAIN
@@ -1116,7 +1126,7 @@ async def _query_capabilities(fqdn: str) -> list[str]:
     capabilities = []
 
     try:
-        resolver = dns.asyncresolver.Resolver()
+        resolver = make_resolver()
         answers = await resolver.resolve(fqdn, "TXT")
 
         for rdata in answers:
@@ -2010,7 +2020,10 @@ async def _fetch_agent_json_auth(host: str, timeout: float = 5.0) -> dict | None
     return None
 
 
-async def discover_at_fqdn(fqdn: str) -> AgentRecord | None:
+@scoped_nameservers
+async def discover_at_fqdn(
+    fqdn: str, *, nameservers: str | Sequence[str] | None = None
+) -> AgentRecord | None:
     """
     Discover agent at a specific FQDN.
 
@@ -2024,6 +2037,7 @@ async def discover_at_fqdn(fqdn: str) -> AgentRecord | None:
             - ``"chat.example.com"`` (draft-02 flat)
             - ``"chat._agents.example.com"`` (draft-02 walkable)
             - ``"_chat._a2a._agents.example.com"`` (legacy -01)
+        nameservers: Resolver override, as for :func:`discover`.
 
     Returns:
         AgentRecord if found, None otherwise.

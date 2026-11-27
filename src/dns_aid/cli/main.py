@@ -375,6 +375,20 @@ def publish(
 # ============================================================================
 
 
+def _parse_resolver_option(values: list[str] | None) -> list[str] | None:
+    """Validate ``--resolver`` values; exit 64 (EX_USAGE) on bad input."""
+    if not values:
+        return None
+    from dns_aid.core.resolver import parse_nameservers
+
+    try:
+        parse_nameservers(values)
+    except ValueError as exc:
+        error_console.print(f"[red]Invalid --resolver:[/red] {exc}")
+        raise typer.Exit(code=64) from exc
+    return [v for item in values for v in item.split(",") if v.strip()]
+
+
 @app.command()
 def discover(
     domain: Annotated[str, typer.Argument(help="Domain to search for agents")],
@@ -497,6 +511,16 @@ def discover(
             "(defense-in-depth; requires DNSSEC to be meaningful — pair with --min-dnssec).",
         ),
     ] = False,
+    resolver: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--resolver",
+            "--nameserver",
+            help="Recursive resolver to query instead of the system one (repeatable): "
+            "an IP address, IP#port, or an https:// DoH URL. DNSSEC results are this "
+            "resolver's AD bit, so use a validating resolver you trust.",
+        ),
+    ] = None,
 ):
     """
     Discover agents at a domain using DNS-AID protocol.
@@ -511,6 +535,7 @@ def discover(
         dns-aid discover example.com --protocol mcp
         dns-aid discover example.com --name chat --require-signed
         dns-aid discover example.com --capabilities payment-processing --auth-type oauth2
+        dns-aid discover example.com --resolver 10.53.0.3
     """
     from dns_aid.core.discoverer import _dnssec_check_runs
     from dns_aid.core.discoverer import discover as do_discover
@@ -518,6 +543,8 @@ def discover(
 
     # Human-readable status header — suppressed in --json mode so stdout stays
     # a single machine-parseable JSON document.
+    nameservers = _parse_resolver_option(resolver)
+
     if not json_output:
         method = "HTTP index" if use_http_index else "DNS"
         console.print(f"\n[bold]Discovering agents at {domain} via {method}...[/bold]\n")
@@ -544,6 +571,7 @@ def discover(
                 require_signed_params=require_signed_params,
                 require_signature_algorithm=require_signature_algorithm,
                 verify_dane=verify_dane,
+                nameservers=nameservers,
             )
         )
     except ValueError as exc:
@@ -557,6 +585,8 @@ def discover(
             "domain": result.domain,
             "query": result.query,
             "discovery_method": "http_index" if use_http_index else "dns",
+            # Only present with --resolver, so default output is unchanged.
+            **({"resolver": nameservers} if nameservers else {}),
             "agents": [
                 {
                     "name": a.name,
@@ -1074,6 +1104,16 @@ def search(
 @app.command()
 def verify(
     fqdn: Annotated[str, typer.Argument(help="FQDN to verify (e.g., chat.example.com)")],
+    resolver: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--resolver",
+            "--nameserver",
+            help="Recursive resolver to query instead of the system one (repeatable): "
+            "an IP address, IP#port, or an https:// DoH URL. DNSSEC results are this "
+            "resolver's AD bit, so use a validating resolver you trust.",
+        ),
+    ] = None,
 ):
     """
     Verify DNS-AID records for an agent.
@@ -1082,12 +1122,17 @@ def verify(
 
     Example:
         dns-aid verify chat.example.com
+        dns-aid verify chat.example.com --resolver 10.53.0.3
     """
     from dns_aid.core.validator import verify as do_verify
 
-    console.print(f"\n[bold]Verifying {fqdn}...[/bold]\n")
+    nameservers = _parse_resolver_option(resolver)
 
-    result = run_async(do_verify(fqdn))
+    console.print(f"\n[bold]Verifying {fqdn}...[/bold]\n")
+    if nameservers:
+        console.print(f"  [dim]Resolver: {', '.join(nameservers)}[/dim]\n")
+
+    result = run_async(do_verify(fqdn, nameservers=nameservers) if nameservers else do_verify(fqdn))
 
     # Display results
     def status(ok: bool | None) -> str:

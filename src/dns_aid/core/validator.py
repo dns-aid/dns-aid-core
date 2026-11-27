@@ -34,6 +34,7 @@ import hashlib
 import os
 import ssl
 import time
+from collections.abc import Sequence
 from datetime import UTC
 
 import dns.asyncresolver
@@ -44,11 +45,18 @@ import httpx
 import structlog
 
 from dns_aid.core.models import DNSSECDetail, TLSDetail, VerifyResult
+from dns_aid.core.resolver import current_nameservers, make_resolver, scoped_nameservers
 
 logger = structlog.get_logger(__name__)
 
 
-async def verify(fqdn: str, *, verify_dane_cert: bool = False) -> VerifyResult:
+@scoped_nameservers
+async def verify(
+    fqdn: str,
+    *,
+    verify_dane_cert: bool = False,
+    nameservers: str | Sequence[str] | None = None,
+) -> VerifyResult:
     """
     Verify DNS-AID records for an agent.
 
@@ -65,6 +73,10 @@ async def verify(fqdn: str, *, verify_dane_cert: bool = False) -> VerifyResult:
         verify_dane_cert: If True, perform full DANE certificate matching
                          (connect to endpoint and compare TLS cert against
                          TLSA record). Default False (existence check only).
+        nameservers: Recursive resolver(s) to query instead of the system
+                     resolver: an IP address, ``IP#port``, an ``https://``
+                     DoH URL, or a list. ``dnssec_valid`` is that resolver's
+                     AD bit. See :mod:`dns_aid.core.resolver`.
 
     Returns:
         VerifyResult with security validation results
@@ -88,6 +100,9 @@ async def verify(fqdn: str, *, verify_dane_cert: bool = False) -> VerifyResult:
     dnssec_detail = await _check_dnssec_detail(fqdn)
     result.dnssec_detail = dnssec_detail
     result.dnssec_valid = dnssec_detail.validated
+    resolvers = current_nameservers()
+    if resolvers:
+        result.dnssec_note += f" (resolver: {', '.join(resolvers)})"
 
     # 3. Check DANE/TLSA (if target is available)
     # Per IETF draft Section 4.4.1, DANE TLSA SHOULD be used to bind
@@ -151,7 +166,7 @@ async def _check_svcb_record(fqdn: str) -> dict | None:
     Returns dict with target, port, and validity info, or None if not found.
     """
     try:
-        resolver = dns.asyncresolver.Resolver()
+        resolver = make_resolver()
 
         # Query SVCB record
         try:
@@ -259,7 +274,7 @@ async def _check_dnssec_with_evidence(fqdn: str) -> tuple[bool, bool]:
     """
     signed = False
     try:
-        resolver = dns.asyncresolver.Resolver()
+        resolver = make_resolver()
 
         # Enable DNSSEC validation
         resolver.use_edns(edns=0, ednsflags=dns.flags.DO)
@@ -344,7 +359,7 @@ async def _check_dnssec_detail(fqdn: str) -> DNSSECDetail:
     detail = DNSSECDetail()
 
     try:
-        resolver = dns.asyncresolver.Resolver()
+        resolver = make_resolver()
         resolver.use_edns(edns=0, ednsflags=dns.flags.DO)
 
         # Check AD flag on SVCB (or TXT fallback)
@@ -531,7 +546,7 @@ async def _check_dane(target: str, port: int, *, verify_cert: bool = False) -> b
     tlsa_fqdn = f"_{port}._tcp.{target}"
 
     try:
-        resolver = dns.asyncresolver.Resolver()
+        resolver = make_resolver()
         # Ask for the DNSSEC records so the AD flag on the reply is meaningful.
         resolver.use_edns(0, dns.flags.DO, 4096)
         answers = await resolver.resolve(tlsa_fqdn, "TLSA")

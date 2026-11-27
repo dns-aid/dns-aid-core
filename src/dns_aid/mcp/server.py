@@ -272,6 +272,34 @@ def _get_dns_backend(name: str | None = None):
         raise ValueError(f"Failed to initialize {display}: {exc}. Setup: {setup}") from exc
 
 
+def _validate_resolver_arg(resolver: list[str] | None) -> dict | None:
+    """Accept only plain IP addresses on port 53 for the MCP ``resolver`` arg.
+
+    A tool caller is less trusted than the operator running the CLI: a DoH
+    URL would make the server issue HTTPS requests to an arbitrary URL, and
+    a custom port would let it probe arbitrary UDP/TCP services. Returns an
+    error dict, or ``None`` when the argument is acceptable.
+    """
+    if not resolver:
+        return None
+    import dns.nameserver
+
+    from dns_aid.core.resolver import parse_nameserver
+
+    for value in resolver:
+        try:
+            ns = parse_nameserver(value)
+        except ValueError as exc:
+            return {"success": False, "error": "validation_error", "message": str(exc)}
+        if not isinstance(ns, dns.nameserver.Do53Nameserver) or ns.answer_port() != 53:
+            return {
+                "success": False,
+                "error": "validation_error",
+                "message": f"resolver {value!r}: only IP addresses on port 53 are accepted",
+            }
+    return None
+
+
 def _format_validation_error(e: ValidationError) -> dict:
     """Format validation error for API response."""
     return {
@@ -646,6 +674,7 @@ def discover_agents_via_dns(
     require_signed_params: bool = False,
     require_signature_algorithm: list[str] | None = None,
     verify_dane: bool = False,
+    resolver: list[str] | None = None,
 ) -> dict:
     """
     Discover AI agents at any public domain using the DNS-AID protocol (no credentials needed).
@@ -710,6 +739,10 @@ def discover_agents_via_dns(
             algorithms. Only a real signature carries an algorithm, so this
             never matches an agent authenticated by DNSSEC alone.
         verify_dane: Bind the endpoint certificate to its TLSA record.
+        resolver: Recursive resolver IP address(es) to query instead of the
+            server's system resolver (e.g. ["10.53.0.3"]). DNSSEC results are
+            that resolver's AD bit. Plain IP addresses on port 53 only here;
+            DoH URLs and custom ports are CLI/SDK-only.
 
     Returns:
         dict with:
@@ -818,6 +851,9 @@ def discover_agents_via_dns(
             name = validate_agent_name(name)
     except ValidationError as e:
         return _format_validation_error(e)
+    resolver_error = _validate_resolver_arg(resolver)
+    if resolver_error:
+        return resolver_error
 
     from dns_aid.core.discoverer import _dnssec_check_runs, discover
     from dns_aid.core.models import CATALOG_ENDPOINT_SOURCES
@@ -843,6 +879,7 @@ def discover_agents_via_dns(
             require_signed_params=require_signed_params,
             require_signature_algorithm=require_signature_algorithm,
             verify_dane=verify_dane,
+            nameservers=resolver or None,
         )
 
     try:
@@ -1297,7 +1334,7 @@ def list_agent_tools(endpoint: str) -> dict:
         openWorldHint=True,
     ),
 )
-def verify_agent_dns(fqdn: str) -> dict:
+def verify_agent_dns(fqdn: str, resolver: list[str] | None = None) -> dict:
     """
     Verify DNS-AID records for an agent.
 
@@ -1308,6 +1345,9 @@ def verify_agent_dns(fqdn: str) -> dict:
         fqdn: Fully qualified domain name of the agent record.
               Under draft-02 this is the flat owner {agent-name}.{domain}.
               Example: "chat.example.com"
+        resolver: Recursive resolver IP address(es) to query instead of the
+              server's system resolver (e.g. ["10.53.0.3"]). Plain IP
+              addresses on port 53 only.
 
     Returns:
         dict with:
@@ -1330,10 +1370,15 @@ def verify_agent_dns(fqdn: str) -> dict:
         fqdn = validate_fqdn(fqdn)
     except ValidationError as e:
         return _format_validation_error(e)
+    resolver_error = _validate_resolver_arg(resolver)
+    if resolver_error:
+        return resolver_error
 
     from dns_aid.core.validator import verify
 
     async def _verify():
+        if resolver:
+            return await verify(fqdn, nameservers=resolver)
         return await verify(fqdn)
 
     try:

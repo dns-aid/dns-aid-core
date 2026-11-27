@@ -25,6 +25,7 @@ import structlog
 
 from dns_aid.backends.base import DNSBackend
 from dns_aid.core.models import SVCB_SERVICE_MODE
+from dns_aid.core.resolver import make_resolver
 from dns_aid.utils.validation import validate_no_underscore_in_target
 
 logger = structlog.get_logger(__name__)
@@ -178,7 +179,7 @@ async def read_index_via_dns(domain: str) -> list[IndexEntry]:
     logger.debug("Reading index via DNS", fqdn=fqdn)
 
     try:
-        resolver = dns.asyncresolver.Resolver()
+        resolver = make_resolver()
         answers = await resolver.resolve(fqdn, "TXT")
 
         for rdata in answers:
