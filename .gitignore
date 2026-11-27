@@ -105,3 +105,7 @@ coverage.xml
 # Speckit local working state (planning artifacts, never pushed)
 specs/
 .specify/
+
+# TypeScript package (typescript/)
+node_modules/
+typescript/dist/

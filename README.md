@@ -40,6 +40,7 @@ Changes to protocol behavior should be discussed within the IETF.
 - [ARD ai-catalog discovery](docs/ard-catalog.md) — interop with [Agentic Resource Discovery](https://agenticresourcediscovery.org/spec/): catalog discovery, the host-anywhere DNS pointer, and card dereferencing
 - [Architecture](docs/architecture.md) — protocol layers, metadata resolution, integration points
 - [Integrations](docs/integrations.md) — backend-specific setup notes
+- [TypeScript library](typescript/README.md) — `@dns-aid/core`: native SVCB codec, discovery and `sig` verification for Node, Bun, Deno, browsers and edge runtimes ([design notes](typescript/DESIGN.md))
 - [Demo Guide](docs/demo-guide.md) — end-to-end walkthrough for talks and presentations
 - [Roadmap](docs/roadmap.md) — where the project is headed, near/medium/long term
 - [Privacy Policy](PRIVACY.md) | [Security Policy](SECURITY.md) | [Trademarks](TRADEMARKS.md)
