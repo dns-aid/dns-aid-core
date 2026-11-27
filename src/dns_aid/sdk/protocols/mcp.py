@@ -20,12 +20,15 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 import structlog
 
-from dns_aid.sdk.auth._httpx_adapter import to_httpx_auth
+from dns_aid.sdk.auth._httpx_adapter import to_httpx2_auth, to_httpx_auth
 from dns_aid.sdk.models import InvocationStatus
 from dns_aid.sdk.protocols._mcp_telemetry import _make_telemetry_factory, _TelemetryCapture
 from dns_aid.sdk.protocols.base import ProtocolHandler, RawResponse
@@ -43,11 +46,27 @@ _CALLER_DOMAIN_ENV_VAR = "DNS_AID_CALLER_DOMAIN"
 # Detect whether the official MCP SDK is importable at module load time.
 # Failure to import means the [mcp] extra is not installed; the handler
 # surfaces a clear remediation message instead of crashing at first use.
+#
+# Both mcp 1.x (>=1.30.0) and 2.x are supported. What 2.x changed on the
+# client path, and where it is absorbed:
+#
+#   - McpError became MCPError (imported under the 1.x name below).
+#   - streamablehttp_client(url, headers=, timeout=, auth=,
+#     httpx_client_factory=) became streamable_http_client(url,
+#     http_client=), yielding (read, write) instead of (read, write,
+#     get_session_id). _streamablehttp_client_v2 keeps the 1.x call shape.
+#   - The transport runs on httpx2, so the client has to be an
+#     httpx2.AsyncClient (its SSE reader wraps httpx2 responses) and auth an
+#     httpx2.Auth. _HTTP_LIB and _to_auth pick the matching library.
+#   - mcp.types fields went snake_case (isError -> is_error, ...). _field
+#     reads either spelling.
+#   - An HTTP error status on a POST no longer raises HTTPStatusError; it
+#     comes back as an MCPError. _classify_transport_failure looks at the
+#     status the telemetry hook recorded instead.
+_MCP_V2 = False
 try:
     from mcp import ClientSession
 
-    # mcp 2.0.0 renamed McpError -> MCPError. mcp.types is unaffected by the 2.x
-    # package split, so the names below resolve identically on both majors.
     try:  # mcp >= 1.30.0, < 2
         from mcp.shared.exceptions import McpError
     except ImportError:  # mcp >= 2
@@ -57,59 +76,109 @@ try:
             MCPError as McpError,
         )
 
+        _MCP_V2 = True
+
     from mcp.types import (
         CallToolResult,
         ListToolsResult,
         TextContent,
     )
 
-    # The client path does not carry over to mcp 2.x. Three separate changes:
-    #
-    #   1. streamablehttp_client -> streamable_http_client, and its
-    #      headers/timeout/auth/httpx_client_factory arguments collapsed into a
-    #      single `http_client`.
-    #   2. It yields TransportStreams rather than the
-    #      (read, write, get_session_id) tuple unpacked below.
-    #   3. mcp.types renamed its camelCase fields to snake_case. The classes
-    #      still import, which makes this easy to miss, but every field this
-    #      module reads is gone: CallToolResult.isError and .structuredContent,
-    #      ListToolsResult.nextCursor, Tool.inputSchema (used at lines ~182-209
-    #      and ~340). Those are plain AttributeError at runtime.
-    #
-    # Note the `http_client` parameter is annotated httpx2.AsyncClient, but that
-    # is advisory: httpx2 and httpx expose identical AsyncClient constructor
-    # parameters and an httpx client is accepted, so the HTTP library is NOT the
-    # obstacle and no port of this module's transport layer is required. The
-    # blocker is (3), the field renames, which need a compatibility shim in
-    # _extract_* and the call-result handling.
-    #
-    # pyproject caps mcp below 2.0.0 until that shim exists. This detection is
-    # here so a forced 2.x install reports the real reason rather than failing
-    # with an opaque AttributeError partway through an invocation.
-    try:  # mcp >= 1.30.0, < 2
+    if _MCP_V2:
+        import httpx2
+        from mcp.client.streamable_http import (  # type: ignore[attr-defined]
+            streamable_http_client,
+        )
+    else:
         from mcp.client.streamable_http import streamablehttp_client
 
-        _MCP_SDK_AVAILABLE = True
-        _MCP_IMPORT_ERROR: str | None = None
-    except ImportError:  # mcp >= 2
-        streamablehttp_client = None  # type: ignore[assignment]
-        _MCP_SDK_AVAILABLE = False
-        _MCP_IMPORT_ERROR = (
-            "mcp 2.x is installed, but this client requires the 1.x API: "
-            "mcp.types renamed its result fields to snake_case (isError, "
-            "structuredContent, nextCursor, inputSchema) and the "
-            "streamable-HTTP transport changed shape. dns-aid supports "
-            "mcp >=1.30.0,<2.0.0 on the client path"
-        )
+    _MCP_SDK_AVAILABLE = True
+    _MCP_IMPORT_ERROR: str | None = None
 except ImportError as exc:
     _MCP_SDK_AVAILABLE = False
     _MCP_IMPORT_ERROR = str(exc)
+
+# mcp 1.x's streamablehttp_client default for how long a response stream may
+# stay idle; the 2.x shim below keeps it.
+_SSE_READ_TIMEOUT = 300.0
+
+if _MCP_V2:
+    _HTTP_LIB: Any = httpx2
+    _to_auth = to_httpx2_auth
+
+    @asynccontextmanager
+    async def _streamablehttp_client_v2(
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+        httpx_client_factory: Any,
+        auth: Any = None,
+    ) -> AsyncIterator[tuple[Any, Any, Callable[[], str | None]]]:
+        """mcp 1.x ``streamablehttp_client`` call shape on top of the 2.x transport."""
+        client = httpx_client_factory(
+            headers=headers,
+            timeout=httpx2.Timeout(timeout, read=_SSE_READ_TIMEOUT),
+            auth=auth,
+        )
+        # mypy checks this against the installed major; on 1.x the name exists
+        # with a different signature, hence the ignore below.
+        async with client, streamable_http_client(url, http_client=client) as streams:
+            read_stream, write_stream = streams[0], streams[1]
+            yield read_stream, write_stream, lambda: None
+
+    streamablehttp_client = _streamablehttp_client_v2  # type: ignore[assignment,unused-ignore]
+else:
+    _HTTP_LIB = httpx
+    _to_auth = to_httpx_auth
+
+
+def _field(obj: Any, snake: str, camel: str) -> Any:
+    """Read an mcp.types field under its 2.x (snake_case) or 1.x (camelCase) name."""
+    return getattr(obj, snake) if hasattr(obj, snake) else getattr(obj, camel)
+
+
+# Errors that mean the request never got an answer. httpx2 has its own
+# hierarchy, so on mcp 2.x both are listed.
+_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (httpx.TimeoutException,)
+_CONNECT_ERRORS: tuple[type[BaseException], ...] = (httpx.ConnectError,)
+if _MCP_V2:
+    _TIMEOUT_ERRORS += (httpx2.TimeoutException,)
+    _CONNECT_ERRORS += (httpx2.ConnectError,)
+
+# Status codes that mean "this server does not speak Streamable HTTP".
+_MISMATCH_STATUS = (405, 406)
+
+_STATUS_ERRORS: tuple[type[BaseException], ...] = (httpx.HTTPStatusError,)
+if _MCP_V2:
+    _STATUS_ERRORS += (httpx2.HTTPStatusError,)
 
 
 _TransportClass = Literal["transport_mismatch", "real_failure"]
 
 
-def _classify_transport_failure(exc: BaseException) -> _TransportClass:
+@dataclass
+class _Handshake:
+    """How far the modern transport got before failing.
+
+    The legacy fallback is only safe while nothing has run on the server, i.e.
+    before ``initialize()`` completes. After that the server has proven it
+    speaks streamable HTTP, so an error is a real failure, and falling back
+    would re-send the request (a ``tools/call`` would run twice).
+
+    ``status`` is the HTTP status the transport had seen when ``initialize()``
+    failed. ``_TelemetryCapture.http_status_code`` keeps the *last* status, so
+    reading it later can pick up a 405 from the GET stream or the
+    session-closing DELETE instead of the response that actually failed.
+    """
+
+    completed: bool = False
+    status: int | None = None
+
+
+def _classify_transport_failure(
+    exc: BaseException, http_status: int | None = None
+) -> _TransportClass:
     """Decide whether *exc* indicates a transport-protocol mismatch (fallback eligible)
     or a real failure (auth/network/server) that should propagate as-is.
 
@@ -118,23 +187,29 @@ def _classify_transport_failure(exc: BaseException) -> _TransportClass:
 
     Real failure: target accepted the modern transport but the operation
     itself failed for an orthogonal reason. No fallback — surface to caller.
+
+    *http_status* is the status of the last HTTP response the transport saw.
+    mcp 2.x reports an error status on a POST as an MCPError rather than an
+    HTTPStatusError, so for an MCPError it is the only place a 405/406 shows.
     """
     # HTTP-level mismatch signals
-    if isinstance(exc, httpx.HTTPStatusError):
-        code = exc.response.status_code
-        if code in (405, 406):
+    if isinstance(exc, _STATUS_ERRORS):
+        code = exc.response.status_code  # type: ignore[attr-defined]
+        if code in _MISMATCH_STATUS:
             return "transport_mismatch"
         return "real_failure"
 
     # ExceptionGroup may wrap inner causes (anyio raises these)
     if isinstance(exc, BaseExceptionGroup):  # type: ignore[has-type]
         for inner in exc.exceptions:
-            if _classify_transport_failure(inner) == "transport_mismatch":
+            if _classify_transport_failure(inner, http_status) == "transport_mismatch":
                 return "transport_mismatch"
         return "real_failure"
 
     # MCP-level handshake refusal (server doesn't speak the protocol version we requested)
     if _MCP_SDK_AVAILABLE and isinstance(exc, McpError):
+        if http_status in _MISMATCH_STATUS:
+            return "transport_mismatch"
         # JSON-RPC -32601 = Method not found (e.g., server doesn't implement initialize)
         try:
             code = exc.error.code  # type: ignore[attr-defined]
@@ -150,14 +225,16 @@ def _classify_transport_failure(exc: BaseException) -> _TransportClass:
     return "real_failure"
 
 
-def _classify_failure_reason(exc: BaseException) -> str:
+def _classify_failure_reason(exc: BaseException, http_status: int | None = None) -> str:
     """Human-readable fallback reason for the structured warning log."""
-    if isinstance(exc, httpx.HTTPStatusError):
-        return f"http_{exc.response.status_code}"
+    if isinstance(exc, _STATUS_ERRORS):
+        return f"http_{exc.response.status_code}"  # type: ignore[attr-defined]
     if isinstance(exc, BaseExceptionGroup):  # type: ignore[has-type]
         for inner in exc.exceptions:
-            return _classify_failure_reason(inner)
+            return _classify_failure_reason(inner, http_status)
     if _MCP_SDK_AVAILABLE and isinstance(exc, McpError):
+        if http_status in _MISMATCH_STATUS:
+            return f"http_{http_status}"
         return "initialize_refused"
     return type(exc).__name__
 
@@ -191,8 +268,9 @@ def _extract_call_tool_content(result: CallToolResult) -> Any:
     content = result.content
     if not content:
         # Some tools may carry structured output instead of content blocks.
-        if result.structuredContent is not None:
-            return result.structuredContent
+        structured = _field(result, "structured_content", "structuredContent")
+        if structured is not None:
+            return structured
         return None
 
     first = content[0]
@@ -214,11 +292,11 @@ def _extract_list_tools_payload(result: ListToolsResult) -> dict[str, Any]:
             {
                 "name": tool.name,
                 "description": tool.description or "",
-                "inputSchema": tool.inputSchema,
+                "inputSchema": _field(tool, "input_schema", "inputSchema"),
             }
             for tool in result.tools
         ],
-        "nextCursor": result.nextCursor,
+        "nextCursor": _field(result, "next_cursor", "nextCursor"),
     }
 
 
@@ -261,7 +339,7 @@ class MCPProtocolHandler(ProtocolHandler):
                     "The MCP streamable-HTTP transport is unavailable. If the "
                     "'mcp' package is not installed, run "
                     "`pip install 'dns-aid[mcp]'`; if it is installed, its "
-                    "version is out of range (supported: mcp >=1.30.0,<2.0.0). "
+                    "version is out of range (supported: mcp >=1.30.0,<3.0.0). "
                     f"Reason: {_MCP_IMPORT_ERROR}"
                 ),
             )
@@ -271,10 +349,14 @@ class MCPProtocolHandler(ProtocolHandler):
         headers = _build_caller_headers()
 
         start = time.perf_counter()
+        capture = _TelemetryCapture()
+        handshake = _Handshake()
 
         # ── Modern Streamable HTTP path ──────────────────────────────────
         try:
             return await self._invoke_via_streamable_http(
+                capture=capture,
+                handshake=handshake,
                 endpoint=endpoint,
                 mcp_method=mcp_method,
                 mcp_arguments=mcp_arguments,
@@ -283,17 +365,22 @@ class MCPProtocolHandler(ProtocolHandler):
                 headers=headers,
                 start=start,
             )
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        except _TIMEOUT_ERRORS + _CONNECT_ERRORS as exc:
             elapsed = (time.perf_counter() - start) * 1000
             return _build_failure_response(exc, elapsed)
         except BaseException as exc:  # noqa: BLE001 - we classify and re-raise via fallback if not transport_mismatch
-            classification = _classify_transport_failure(exc)
+            # Only a failure before the handshake completed can be a transport
+            # mismatch; anything later must not be replayed via the legacy path.
+            status = handshake.status if handshake.status is not None else capture.http_status_code
+            classification = (
+                "real_failure" if handshake.completed else _classify_transport_failure(exc, status)
+            )
             if classification != "transport_mismatch":
                 elapsed = (time.perf_counter() - start) * 1000
                 return _build_failure_response(exc, elapsed)
 
             # ── Transparent fallback to legacy plain JSON-RPC POST ──────
-            reason = _classify_failure_reason(exc)
+            reason = _classify_failure_reason(exc, status)
             modern_attempt_ms = (time.perf_counter() - start) * 1000
             _logger.warning(
                 "transport.legacy_fallback",
@@ -316,6 +403,8 @@ class MCPProtocolHandler(ProtocolHandler):
     async def _invoke_via_streamable_http(
         self,
         *,
+        capture: _TelemetryCapture,
+        handshake: _Handshake,
         endpoint: str,
         mcp_method: str,
         mcp_arguments: dict[str, Any],
@@ -324,9 +413,8 @@ class MCPProtocolHandler(ProtocolHandler):
         headers: dict[str, str],
         start: float,
     ) -> RawResponse:
-        capture = _TelemetryCapture()
-        factory = _make_telemetry_factory(capture)
-        auth = to_httpx_auth(auth_handler)
+        factory = _make_telemetry_factory(capture, _HTTP_LIB)
+        auth = _to_auth(auth_handler)
 
         async with (  # noqa: SIM117 - keeping streams open across the inner session is required by the SDK contract
             streamablehttp_client(
@@ -338,7 +426,12 @@ class MCPProtocolHandler(ProtocolHandler):
             ) as (read_stream, write_stream, _get_session_id),
             ClientSession(read_stream, write_stream) as session,
         ):
-            await session.initialize()
+            try:
+                await session.initialize()
+            except BaseException:
+                handshake.status = capture.http_status_code
+                raise
+            handshake.completed = True
 
             if mcp_method == "tools/list":
                 list_result = await session.list_tools()
@@ -349,7 +442,7 @@ class MCPProtocolHandler(ProtocolHandler):
                 tool_args = mcp_arguments.get("arguments", {})
                 call_result = await session.call_tool(name, tool_args)
                 data = _extract_call_tool_content(call_result)
-                is_error = call_result.isError
+                is_error = bool(_field(call_result, "is_error", "isError"))
             else:
                 return RawResponse(
                     success=False,
@@ -528,7 +621,10 @@ class MCPProtocolHandler(ProtocolHandler):
 
 
 def _build_failure_response(exc: BaseException, elapsed_ms: float) -> RawResponse:
-    if isinstance(exc, httpx.TimeoutException):
+    # anyio task groups wrap a transport error raised inside the SDK
+    if isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:  # type: ignore[has-type]
+        return _build_failure_response(exc.exceptions[0], elapsed_ms)
+    if isinstance(exc, _TIMEOUT_ERRORS):
         return RawResponse(
             success=False,
             status=InvocationStatus.TIMEOUT,
@@ -536,7 +632,7 @@ def _build_failure_response(exc: BaseException, elapsed_ms: float) -> RawRespons
             error_message=str(exc) or "Request timed out",
             invocation_latency_ms=elapsed_ms,
         )
-    if isinstance(exc, httpx.ConnectError):
+    if isinstance(exc, _CONNECT_ERRORS):
         return RawResponse(
             success=False,
             status=InvocationStatus.REFUSED,

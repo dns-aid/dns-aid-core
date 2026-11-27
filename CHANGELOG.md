@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The SDK's MCP client now runs on mcp 2.x, and the `mcp` ceiling is raised
+  to `<3.0.0`** (#291). On 2.x the client uses `streamable_http_client` with an
+  `httpx2.AsyncClient` built by the same telemetry factory, so headers, auth,
+  timeouts, cost/TLS capture and trace propagation carry over. Auth handlers
+  are wrapped as `httpx2.Auth`, result fields are read under either spelling
+  (`is_error`/`isError` and so on), and httpx2 timeouts and connect errors map
+  to the same statuses as before. mcp 2.x reports a 405/406 on the handshake
+  as an `MCPError` instead of an `HTTPStatusError`, so the legacy fallback now
+  also keys off the recorded HTTP status. A new `mcp-2x-client` CI job runs the
+  SDK and server tests on 2.x, including round trips against a real 2.x server
+  over SSE and JSON. The lock file stays on 1.x.
+  Two behaviours differ on 2.x: a 404 on the first POST now falls back to the
+  legacy transport, which 1.x did not do, and `follow_redirects=True` is
+  ignored, so cross-origin redirects that 1.x followed are refused.
+
 ### Security
 
 - **Bumped dependency floors to clear the Dependency Audit gate** — `mcp` to
@@ -14,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pyjwt` to `>=2.15.0` (PYSEC-2026-4140..4152 and PYSEC-2026-4183),
   `urllib3` to `>=2.8.0` (PYSEC-2026-4175/4176/4177) and `certifi` to
   `>=2026.10.19` (PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2, compromised emSign
-  ECC Root CA - G3). `mcp` stays capped below 2.0.0 for the SDK client path.
+  ECC Root CA - G3).
 - **Bumped `dnspython` floor to `>=2.9.2`** (CVE-2026-128089, fixed in
   2.9.2; also covers CVE-2026-114605 / GHSA-45c3-73f7-pv4m, fixed in 2.9.0).
   A crafted DNS message could make `dns.name.from_wire_parser()` burn

@@ -169,10 +169,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Installed WITHOUT the [mcp] extra so the `mcp>=1.28.1,<2.0.0` ceiling
-      # does not apply, then mcp 2.x is added explicitly. This deliberately
-      # builds an unsupported combination: the point is to prove the server
-      # still works on it, so the ceiling can be lifted with evidence.
+      # Installed WITHOUT the [mcp] extra, then mcp 2.x is added explicitly,
+      # so the job keeps testing 2.x whatever the lock file resolves.
       - name: Install with mcp 2.x
         run: |
           python -m pip install --upgrade pip
@@ -206,3 +204,39 @@ jobs:
 
       - name: Cross-major compatibility tests
         run: pytest tests/unit/test_mcp_server.py -q
+
+  mcp-2x-client:
+    name: MCP SDK client on mcp 2.x
+    runs-on: ubuntu-latest
+    # The locked dependency set is on the mcp 1.x line, so the 2.x half of
+    # dns_aid.sdk.protocols.mcp would otherwise only ever run on users'
+    # machines. Same install as the main test job, then mcp is swapped for 2.x.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+
+      - name: Install with mcp 2.x
+        run: |
+          uv sync --frozen --extra dev --extra cli --extra mcp --extra route53 --extra otel --extra akamai-edgedns
+          uv pip install 'mcp>=2.0.0,<3'
+
+      - name: Confirm mcp 2.x actually resolved
+        run: |
+          set -euo pipefail
+          version=$(uv run --no-sync python -c 'from importlib.metadata import version; print(version("mcp"))')
+          echo "mcp==$version"
+          case "$version" in
+            2.*) ;;
+            *) echo "::error::expected mcp 2.x, got $version, so this job is not testing what it claims"; exit 1 ;;
+          esac
+
+      # --no-sync, or uv run would put the locked mcp 1.x back first.
+      - name: SDK and server tests
+        run: uv run --no-sync pytest tests/unit/sdk tests/unit/test_mcp_server.py -q

@@ -42,11 +42,12 @@ def reset_otel_singleton():
             if hasattr(metrics, "_METER_PROVIDER_SET_ONCE"):
                 metrics._METER_PROVIDER_SET_ONCE._done = False  # type: ignore[attr-defined]
 
-            # Replace the global with a fresh ProxyTracerProvider so
-            # ``_is_default_tracer_provider()`` returns True at test start.
-            from opentelemetry.trace import ProxyTracerProvider
-
-            trace._TRACER_PROVIDER = ProxyTracerProvider()  # type: ignore[attr-defined]
+            # Clear the global so get_tracer_provider() hands back OTEL's own
+            # proxy and ``_is_default_tracer_provider()`` returns True at test
+            # start. Storing a ProxyTracerProvider in the global instead makes
+            # its get_tracer() call itself, which any library that started a
+            # span (mcp 2.x does) hits as a RecursionError.
+            trace._TRACER_PROVIDER = None  # type: ignore[attr-defined]
         except (ImportError, AttributeError):
             # opentelemetry absent or its internal attrs moved — nothing to
             # reset in that case; the OTEL tests skip via pytestmark anyway.
