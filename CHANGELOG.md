@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`InvocationSignal.resolved_endpoint` and the `dns_aid.agent.resolved_endpoint`
+  span attribute** report the URL `invoke()` actually called when it differs
+  from the discovered endpoint, e.g. an MCP path from `/.well-known/agent.json`
+  or the `/mcp` convention guess. `agent_endpoint` and `dns_aid.agent.endpoint`
+  still carry the discovered endpoint. The field is `None` and the attribute
+  is left off when the endpoint was called as-is; the HTTP push payload only
+  includes it when set. Credentials in the URL are stripped the same way as for
+  `dns_aid.agent.endpoint` (#293).
+
 ### Security
 
+- **`resolve_mcp_endpoint()` now applies the SSRF guard before probing
+  `/.well-known/agent.json`.** The host comes from DNS, which the endpoint's
+  publisher controls, so the probe now goes through `validate_fetch_url` like
+  every other DNS- or metadata-derived fetch. A blocked URL (private, loopback,
+  link-local) is not fetched and the `/mcp` convention is used; the
+  `DNS_AID_FETCH_ALLOWLIST` override applies as elsewhere.
 - **Bumped dependency floors to clear the Dependency Audit gate** — `mcp` to
   `>=1.30.0` (CVE-2026-59951, unreclaimed stateful Streamable HTTP sessions),
   `pyjwt` to `>=2.15.0` (PYSEC-2026-4140..4152 and PYSEC-2026-4183),
@@ -27,6 +44,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Added a `pyasn1>=0.6.5` floor to the `cloud-dns` extra**
   (CVE-2026-119194..119197). It is pulled transitively via `google-auth` ->
   `pyasn1-modules`.
+
+### Fixed
+
+- **`AgentClient.invoke()` now resolves the MCP endpoint path for
+  DNS-discovered agents.** SVCB records carry a host and port but no path, so
+  an agent for which discovery found no path was called at the bare host and
+  failed (HTTP 405, then the legacy fallback). `invoke()` now applies the same
+  resolution as `call_mcp_tool` and `list_mcp_tools`: the `endpoints.mcp` path
+  from `/.well-known/agent.json`, else the `/mcp` convention. Endpoints that
+  already carry a path are unchanged, and signals and spans still report the
+  discovered endpoint (#248).
 
 ## [0.28.1] - 2026-08-09
 

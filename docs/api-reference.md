@@ -1869,7 +1869,8 @@ Per-call telemetry captured automatically.
 |-------|------|-------------|
 | `id` | UUID | Unique signal identifier |
 | `agent_fqdn` | str | Agent DNS-AID FQDN |
-| `agent_endpoint` | str | Endpoint URL used |
+| `agent_endpoint` | str | Discovered endpoint URL (the agent's identity) |
+| `resolved_endpoint` | str \| None | URL actually called, when it differs from `agent_endpoint` (e.g. a resolved MCP path); `None` otherwise |
 | `protocol` | str | Protocol (mcp, a2a, https) |
 | `method` | str | Method called |
 | `status` | InvocationStatus | success, error, timeout, refused |

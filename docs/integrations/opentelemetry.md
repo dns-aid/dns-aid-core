@@ -44,7 +44,9 @@ agent's span. Total elapsed: under 10 minutes from clone.
   are sanitized before they reach this attribute — H1 / FR-019).
 - Attributes (set at span close): `dns_aid.invocation.method`,
   `dns_aid.invocation.status`, `dns_aid.invocation.latency_ms`,
-  `dns_aid.invocation.cost_units` (when present), `dns_aid.security.dnssec`.
+  `dns_aid.invocation.cost_units` (when present), `dns_aid.security.dnssec`,
+  `dns_aid.agent.resolved_endpoint` (only when the URL called differs from
+  `dns_aid.agent.endpoint`, e.g. a resolved MCP path; sanitized the same way).
 - Status: `OK` on success; `ERROR` with the (sanitized) error message
   otherwise.
 
