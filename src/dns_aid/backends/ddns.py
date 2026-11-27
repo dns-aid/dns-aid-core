@@ -27,7 +27,7 @@ import dns.tsigkeyring
 import dns.update
 import structlog
 
-from dns_aid.backends._ownership import svcb_text_is_replaced
+from dns_aid.backends._ownership import svcb_text_is_replaced, txt_rr_is_replaced
 from dns_aid.backends.base import DNSBackend
 
 logger = structlog.get_logger(__name__)
@@ -307,8 +307,13 @@ class DDNSBackend(DNSBackend):
         # Create update message
         update = dns.update.Update(zone, keyring=self._keyring, keyalgorithm=self._algorithm)
 
-        # Delete any existing TXT records for this name
-        update.delete(name, dns.rdatatype.TXT)
+        # Delete only the TXT RRs DNS-AID owns (first string uses a DNS-AID
+        # key, or a key this write sets). TXT from other publishers at the
+        # same owner, such as "txtvers=1" "proto=a2a", is kept.
+        for existing in self._existing_rdatas(fqdn, dns.rdatatype.TXT):
+            strings = [s.decode("utf-8", errors="replace") for s in existing.strings]
+            if txt_rr_is_replaced(strings, values):
+                update.delete(name, existing)
 
         # Add each TXT value
         for value in values:

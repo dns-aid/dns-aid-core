@@ -14,7 +14,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from dns_aid.backends._ownership import svcb_rr_is_replaced
+from dns_aid.backends._ownership import svcb_rr_is_replaced, txt_rr_is_replaced
 from dns_aid.backends.base import DNSBackend
 from dns_aid.core.models import SVCB_ALIAS_MODE, SVCB_SERVICE_MODE
 
@@ -108,8 +108,10 @@ class MockBackend(DNSBackend):
             "ttl": ttl,
         }
 
-        # Replace existing or add new
-        self.records[zone][name]["TXT"] = [record]
+        # Replace the TXT records DNS-AID owns, keep other publishers' TXT.
+        existing = self.records[zone][name].get("TXT", [])
+        kept = [r for r in existing if not txt_rr_is_replaced(r.get("values", []), values)]
+        self.records[zone][name]["TXT"] = [record, *kept]
 
         return fqdn
 
