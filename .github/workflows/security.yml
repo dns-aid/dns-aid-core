@@ -80,7 +80,10 @@ jobs:
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev --extra cli --extra mcp --extra route53
+        # Audit every optional extra, not just the ones the test jobs use: a
+        # CVE in an extra (otel, cloud-dns, ...) still ships to users who
+        # install it. The narrower set missed opentelemetry-api and pyasn1.
+        run: uv sync --frozen --all-extras
 
       - name: Run pip-audit
         # --ignore-vuln: transitive dep CVEs — no user input, all static flags.
