@@ -28,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (CVE-2026-119194..119197). It is pulled transitively via `google-auth` ->
   `pyasn1-modules`.
 
+
+### Fixed
+
+- **A ServiceMode TargetName of `.` now resolves to the owner name** (RFC 9460
+  §2.5.2). Discovery stripped the dot, left an empty `target_host`, and the
+  record failed validation and was dropped without a warning. After an
+  AliasMode hop the owner is the alias target.
+- **`sync_index` derives an entry's protocol the way discovery does**: the
+  `bap` token, then each `alpn` id, first one that is a modeled protocol. A
+  marker token such as `bap=webmcp` produced `site:webmcp`, which discovery
+  cannot parse, so the agent vanished from index-based discovery. The indexer
+  also read `bap` only by name, ignoring it on backends that report
+  `key65402`.
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed
