@@ -72,12 +72,7 @@ def _verify_cap_digest(content: bytes, expected_sha256: str, cap_uri: str) -> No
     a digest failure (MUST refuse, per draft §6.1) from a network/parse
     failure (fall back to a lower-priority capability source).
     """
-    import base64
-    import hashlib
-
-    actual_digest = (
-        base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode("ascii")
-    )
+    actual_digest = cap_digest(content)
     if actual_digest != expected_sha256:
         logger.warning(
             "Cap document SHA-256 mismatch",
@@ -86,6 +81,73 @@ def _verify_cap_digest(content: bytes, expected_sha256: str, cap_uri: str) -> No
             actual=actual_digest,
         )
         raise CapDigestMismatchError(cap_uri, expected_sha256, actual_digest)
+
+
+def cap_digest(content: bytes) -> str:
+    """The ``cap-sha256`` form of a digest: unpadded base64url SHA-256."""
+    import base64
+    import hashlib
+
+    return base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode("ascii")
+
+
+def descriptor_url(cap_uri: str | None, well_known_path: str | None, target: str) -> str | None:
+    """The descriptor URL a ``cap-sha256`` pin applies to, or ``None``.
+
+    Same precedence as discovery: an ``https://`` ``cap`` first, else the
+    ``well-known`` value on the SVCB target (bare RFC 8615 suffix or an
+    absolute origin path). Non-https ``cap`` locators are not fetchable.
+    """
+    if cap_uri and cap_uri.lower().startswith("https://"):
+        return cap_uri
+    if not well_known_path:
+        return None
+    from dns_aid.utils.validation import ValidationError, validate_well_known_path
+
+    try:
+        path = validate_well_known_path(well_known_path)
+    except ValidationError:
+        return None
+    host = target.rstrip(".")
+    if path.startswith("/"):
+        return f"https://{host}{path}"
+    return f"https://{host}/.well-known/{path}"
+
+
+async def check_cap_digest(
+    url: str, expected_sha256: str, timeout: float = 10.0
+) -> tuple[str, str | None]:
+    """Fetch ``url`` and compare its SHA-256 with ``expected_sha256``.
+
+    Returns ``(status, actual_digest)`` with status ``"match"``,
+    ``"mismatch"`` or ``"unverified"`` (blocked by the SSRF guard, not
+    fetched, too large, or any transport error; ``actual_digest`` is
+    ``None`` then). Never raises for network errors: a pin that cannot be
+    checked is reported, not fatal.
+    """
+    from dns_aid.utils.url_safety import (
+        ResponseTooLargeError,
+        UnsafeURLError,
+        safe_fetch_bytes,
+        validate_fetch_url_async,
+    )
+
+    try:
+        await validate_fetch_url_async(url)
+        body = await safe_fetch_bytes(
+            url,
+            max_bytes=_MAX_CAP_RESPONSE_BYTES,
+            timeout=timeout,
+            follow_redirects=True,
+            max_redirects=3,
+        )
+    except (UnsafeURLError, ResponseTooLargeError, httpx.HTTPError, OSError) as e:
+        logger.debug("cap-sha256 check: descriptor not fetched", url=url, error=str(e))
+        return "unverified", None
+    if body is None:
+        return "unverified", None
+    actual = cap_digest(body)
+    return ("match" if actual == expected_sha256.strip() else "mismatch"), actual
 
 
 def _extract_string_list(data: dict[str, Any], key: str) -> list[str]:

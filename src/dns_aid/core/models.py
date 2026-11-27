@@ -1125,6 +1125,9 @@ class PublishResult(BaseModel):
     )
 
 
+CapSha256Status = Literal["match", "mismatch", "unverified", "absent"]
+
+
 class VerifyResult(BaseModel):
     """
     Result of verifying an agent's DNS records.
@@ -1149,6 +1152,15 @@ class VerifyResult(BaseModel):
     )
     endpoint_reachable: bool = Field(default=False, description="Endpoint responds")
     endpoint_latency_ms: float | None = Field(default=None, description="Endpoint response time")
+    cap_sha256_status: CapSha256Status | None = Field(
+        default=None,
+        description=(
+            "cap-sha256 pin vs. the descriptor actually served: match / mismatch, "
+            "unverified (pinned but not fetched), absent (no cap-sha256 published). "
+            "None when no SVCB record was found."
+        ),
+    )
+    cap_sha256_note: str = Field(default="", description="Detail for cap_sha256_status")
 
     # Granular detail for trust scoring rubric (Phase 6)
     dnssec_detail: DNSSECDetail = Field(default_factory=DNSSECDetail)
@@ -1161,15 +1173,20 @@ class VerifyResult(BaseModel):
 
         Scoring:
         - Record exists: 20 points
-        - SVCB valid: 20 points
+        - SVCB valid: 20 points (withheld when cap-sha256 mismatches)
         - DNSSEC valid: 30 points
         - DANE valid: 15 points
         - Endpoint reachable: 15 points
+
+        A ``cap-sha256`` that does not match the served descriptor means a
+        compliant consumer refuses the record (draft-02 §6.1; discovery
+        drops it), so the record is not valid as published and earns no
+        SVCB points. A missing or uncheckable pin does not change the score.
         """
         score = 0
         if self.record_exists:
             score += 20
-        if self.svcb_valid:
+        if self.svcb_valid and self.cap_sha256_status != "mismatch":
             score += 20
         if self.dnssec_valid:
             score += 30

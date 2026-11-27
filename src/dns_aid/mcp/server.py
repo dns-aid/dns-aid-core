@@ -1362,6 +1362,10 @@ def verify_agent_dns(fqdn: str, resolver: list[str] | None = None) -> dict:
         - dane_note: Explanation of the DANE result / demotion
         - endpoint_reachable: Whether the endpoint responds
         - endpoint_latency_ms: Response latency if reachable
+        - cap_sha256_status: "match" / "mismatch" / "unverified" / "absent"
+          (cap-sha256 vs. the descriptor actually served; a mismatch withholds
+          the SVCB points). None when no record was found.
+        - cap_sha256_note: Detail, including the published and served digests
         - security_score: Score from 0-100
         - security_rating: Human-readable rating (Excellent, Good, Fair, Poor)
     """
@@ -1397,6 +1401,8 @@ def verify_agent_dns(fqdn: str, resolver: list[str] | None = None) -> dict:
             "dane_note": result.dane_note,
             "endpoint_reachable": result.endpoint_reachable,
             "endpoint_latency_ms": result.endpoint_latency_ms,
+            "cap_sha256_status": result.cap_sha256_status,
+            "cap_sha256_note": result.cap_sha256_note,
             "security_score": result.security_score,
             "security_rating": result.security_rating,
         }

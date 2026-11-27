@@ -1158,6 +1158,11 @@ def verify(
 
     if result.endpoint_latency_ms:
         console.print(f"    [dim]Latency: {result.endpoint_latency_ms:.0f}ms[/dim]")
+    if result.cap_sha256_status is not None:
+        cap_ok = {"match": True, "mismatch": False}.get(result.cap_sha256_status)
+        console.print(f"  {status(cap_ok)} cap-sha256 matches served descriptor")
+        if result.cap_sha256_note:
+            console.print(f"    [dim]{result.cap_sha256_note}[/dim]")
 
     console.print(
         f"\n[bold]Security Score:[/bold] {result.security_score}/100 ({result.security_rating})"

@@ -44,7 +44,7 @@ import dns.resolver
 import httpx
 import structlog
 
-from dns_aid.core.models import DNSSECDetail, TLSDetail, VerifyResult
+from dns_aid.core.models import CapSha256Status, DNSSECDetail, TLSDetail, VerifyResult
 from dns_aid.core.resolver import current_nameservers, make_resolver, scoped_nameservers
 
 logger = structlog.get_logger(__name__)
@@ -149,6 +149,15 @@ async def verify(
     if target and port:
         result.tls_detail = await _check_tls(target, port)
 
+    # 6. Compare cap-sha256 with the descriptor actually served. A mismatch
+    # means a compliant consumer refuses the record (draft-02 §6.1), so it
+    # withholds the SVCB points in security_score. No pin, or a pin that
+    # could not be checked, is reported but does not change the score.
+    if svcb_data:
+        result.cap_sha256_status, result.cap_sha256_note = await _check_cap_pins(
+            svcb_data.get("cap_pins", [])
+        )
+
     logger.info(
         "Verification complete",
         fqdn=fqdn,
@@ -179,7 +188,11 @@ async def _check_svcb_record(fqdn: str) -> dict | None:
                 logger.debug("No SVCB/HTTPS record found", fqdn=fqdn)
                 return None
 
-        for rdata in answers:
+        # Lowest SvcPriority first (RFC 9460 §2.4.1) so the record reported
+        # does not depend on the order the resolver returned the RRset in.
+        ordered = sorted(answers, key=lambda r: r.priority)
+        pins = _cap_pins(ordered)
+        for rdata in ordered:
             target = str(rdata.target).rstrip(".")
 
             # Extract port from params
@@ -206,6 +219,7 @@ async def _check_svcb_record(fqdn: str) -> dict | None:
                 "port": port,
                 "valid": is_valid,
                 "priority": rdata.priority,
+                "cap_pins": pins,
             }
 
     except dns.resolver.NXDOMAIN:
@@ -214,6 +228,67 @@ async def _check_svcb_record(fqdn: str) -> dict | None:
         logger.debug("SVCB query failed", fqdn=fqdn, error=str(e))
 
     return None
+
+
+def _cap_pins(rdatas: list) -> list[dict]:
+    """``cap`` / ``cap-sha256`` / ``well-known`` of each ServiceMode rdata."""
+    from dns_aid.core.discoverer import _parse_svcb_custom_params
+
+    pins = []
+    for rdata in rdatas:
+        if rdata.priority == 0:
+            continue
+        params = _parse_svcb_custom_params(str(rdata))
+        pins.append(
+            {
+                "target": str(rdata.target).rstrip("."),
+                "cap": params.get("cap"),
+                "cap_sha256": params.get("cap-sha256"),
+                "well_known": params.get("well-known"),
+            }
+        )
+    return pins
+
+
+async def _check_cap_pins(pins: list[dict]) -> tuple[CapSha256Status, str]:
+    """Compare every published ``cap-sha256`` with the descriptor served.
+
+    Returns ``(status, note)``. Status is ``mismatch`` if any pin does not
+    match, else ``unverified`` if any pin could not be checked, else
+    ``match``; ``absent`` when no record carries ``cap-sha256``.
+    """
+    from dns_aid.core.cap_fetcher import check_cap_digest, descriptor_url
+
+    pinned = [p for p in pins if p.get("cap_sha256")]
+    if not pinned:
+        return "absent", "No cap-sha256 published; descriptor integrity not pinned"
+
+    outcomes: list[tuple[CapSha256Status, str]] = []
+    for pin in pinned:
+        url = descriptor_url(pin.get("cap"), pin.get("well_known"), pin["target"])
+        expected = pin["cap_sha256"]
+        if url is None:
+            outcomes.append(("unverified", "cap-sha256 published but no https descriptor URL"))
+            continue
+        status, actual = await check_cap_digest(url, expected)
+        if status == "match":
+            outcomes.append(("match", f"cap-sha256 matches {url}"))
+        elif status == "mismatch":
+            outcomes.append(
+                (
+                    "mismatch",
+                    f"cap-sha256 mismatch for {url}: published {expected}, served {actual}",
+                )
+            )
+        else:
+            outcomes.append(("unverified", f"cap-sha256 not checked: could not fetch {url}"))
+
+    wanted: CapSha256Status
+    for wanted in ("mismatch", "unverified", "match"):
+        notes = [n for st, n in outcomes if st == wanted]
+        if notes:
+            return wanted, "; ".join(notes)
+    return "absent", ""  # unreachable
 
 
 def _response_carries_rrsig(response) -> bool:
