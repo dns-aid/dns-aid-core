@@ -73,13 +73,27 @@ def _mock_agent_client(mock_client_cls, *, invoke_return=None, invoke_side_effec
     return mock_client
 
 
-def _card(url, name="Chat Agent", description="A chat agent", skill_names=("chatting",)):
-    """Duck-typed A2A agent card."""
-    return SimpleNamespace(
+def _card(
+    url,
+    name="Chat Agent",
+    description="A chat agent",
+    skill_names=("chatting",),
+    interfaces=(),
+):
+    """A real A2A agent card.
+
+    Was a SimpleNamespace duck type; resolution now goes through the card's
+    own ``endpoint_for``, so the double has to be the real object rather than
+    a bag of the attributes the resolver happened to read.
+    """
+    from dns_aid.core.a2a_card import A2AAgentCard, A2AInterface, A2ASkill
+
+    return A2AAgentCard(
         url=url,
         name=name,
         description=description,
-        skills=[SimpleNamespace(name=s) for s in skill_names],
+        skills=[A2ASkill(id=s, name=s) for s in skill_names],
+        interfaces=[A2AInterface(url=u, protocol_binding=b) for u, b in interfaces],
     )
 
 
@@ -797,6 +811,58 @@ class TestResolveA2AEndpoint:
             resolved = await resolve_a2a_endpoint("agent.example.com")
 
         assert resolved.endpoint == "https://agent.example.com"
+
+    @pytest.mark.asyncio
+    async def test_a2a_1_0_card_resolves_through_supported_interfaces(self):
+        """1.0 removed the top-level url; the interface list carries it."""
+        card = _card("", interfaces=[("https://agent.example.com/a2a", "JSONRPC")])
+
+        with patch("dns_aid.core.a2a_card.fetch_agent_card", AsyncMock(return_value=card)):
+            resolved = await resolve_a2a_endpoint("agent.example.com")
+
+        assert resolved.endpoint == "https://agent.example.com/a2a"
+        assert resolved.resolved_via == "agent_card"
+
+    @pytest.mark.asyncio
+    async def test_a2a_1_0_card_interface_off_host_is_not_followed(self):
+        card = _card("", interfaces=[("https://elsewhere.example.net/a2a", "JSONRPC")])
+
+        with patch("dns_aid.core.a2a_card.fetch_agent_card", AsyncMock(return_value=card)):
+            resolved = await resolve_a2a_endpoint("agent.example.com")
+
+        assert resolved.endpoint == "https://agent.example.com"
+
+    @pytest.mark.asyncio
+    async def test_card_without_a_jsonrpc_interface_keeps_the_given_endpoint(self):
+        """We speak JSON-RPC to whatever comes back, so a gRPC URL must not."""
+        card = _card(
+            "",
+            interfaces=[
+                ("https://agent.example.com/grpc", "GRPC"),
+                ("https://agent.example.com/rest", "HTTP+JSON"),
+            ],
+        )
+
+        with patch("dns_aid.core.a2a_card.fetch_agent_card", AsyncMock(return_value=card)):
+            resolved = await resolve_a2a_endpoint("agent.example.com")
+
+        assert resolved.endpoint == "https://agent.example.com"
+
+    @pytest.mark.asyncio
+    async def test_dns_mode_card_without_jsonrpc_keeps_the_dns_endpoint(self):
+        agent = _discovered_agent()
+        card = _card("", interfaces=[("https://a2a.example.com/grpc", "GRPC")])
+
+        with (
+            patch(
+                "dns_aid.core.discoverer.discover",
+                AsyncMock(return_value=SimpleNamespace(agents=[agent])),
+            ),
+            patch("dns_aid.core.a2a_card.fetch_agent_card", AsyncMock(return_value=card)),
+        ):
+            resolved = await resolve_a2a_endpoint(domain="example.com", name="chat")
+
+        assert resolved.endpoint == agent.endpoint_url
 
     @pytest.mark.asyncio
     async def test_agent_card_fetch_error_uses_direct(self):

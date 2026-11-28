@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (CVE-2026-119194..119197). It is pulled transitively via `google-auth` ->
   `pyasn1-modules`.
 
+### Fixed
+
+- **A2A 1.0 cards contribute their endpoint.** 1.0 removed the card's
+  top-level `url`, so discovery and `resolve_a2a_endpoint` ignored a
+  conformant card and kept the catalog or bare SVCB endpoint. The JSONRPC
+  entry in `supportedInterfaces` is now used (#258). Only JSONRPC counts, since
+  that is what the SDK speaks; for DNS-discovered agents only the path is
+  taken and the DNS host and port are kept, and only for A2A agents, so MCP or
+  HTTPS agents on the same host are untouched. 0.2/0.3 cards resolve as before,
+  except that a top-level `url` whose `preferredTransport` is not JSONRPC is
+  no longer used.
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed

@@ -123,6 +123,14 @@ are accepted in each case rather than assuming which a publisher used -- the
 Infoblox `ddi-agent` card declares `protocolVersion: "0.3"` and uses the 1.0
 interface name.
 
+The endpoint comes from the top-level `url` when the card has one (its
+transport is `preferredTransport`, JSONRPC by default) and otherwise from the
+interface list, which is the only place a 1.0 card carries it. DNS-AID speaks
+JSON-RPC, so only a JSONRPC endpoint is used; a card with only gRPC or
+HTTP+JSON interfaces leaves the endpoint DNS or the caller supplied. For an
+agent found through DNS, only the path is taken from the interface, and only
+when its host matches the SVCB target: host and port stay DNS's.
+
 Authentication is taken from the 0.3 `securitySchemes` map when present and the
 0.2 `authentication` object otherwise. `securitySchemes` itself appears in two
 shapes: OpenAPI style, where the entry carries a `type`, and the proto-derived
