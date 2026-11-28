@@ -18,6 +18,7 @@ import json
 import os
 import shlex
 import time
+from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -683,6 +684,16 @@ async def _query_single_agent(
         try:
             answers = await _try(fqdn)
         except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+            # Last-resort tier at the flat owner name: TXT-encoded fallback
+            # for DNS providers that can't serve SVCB. Returns a complete
+            # AgentRecord when a v=1 fallback record is present; None when
+            # only metadata TXT (or nothing) lives there. Deliberately tried
+            # BEFORE the legacy -01 shape: a publisher who placed a draft-02
+            # flat TXT record has migrated, and a leftover legacy SVCB
+            # record must not shadow it.
+            txt_agent = await _try_txt_fallback(resolver, fqdn, name, domain, protocol)
+            if txt_agent is not None:
+                return txt_agent
             if legacy_fqdn is None:
                 return None
             try:
@@ -697,7 +708,11 @@ async def _query_single_agent(
                 fqdn = legacy_fqdn
                 resolved_via_legacy = True
             except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
-                return None
+                # Same last-resort TXT tier at the legacy owner name, only
+                # reachable when legacy fallback is active for this call.
+                return await _try_txt_fallback(
+                    resolver, legacy_fqdn, name, domain, protocol, legacy_resolved=True
+                )
 
         for rdata in answers:
             # AliasMode (priority 0): follow alias to canonical name
@@ -812,214 +827,18 @@ async def _query_single_agent(
             # fails if a key is added to the map without being wired up.
             sig = custom_params.get("sig")
 
-            # Descriptor-fetch precedence (local dns-aid-core convention,
-            # NOT spec-mandated — draft §6.1 names only well-known as the
-            # source). When both `cap` and `well-known` are present we
-            # prefer the explicit locator if it's https-fetchable; if it
-            # isn't (URN, JSON-Ref, non-https scheme), we fall back to
-            # the reconstructed well-known URL rather than treating the
-            # non-fetchable `cap` as terminal.
-            capabilities: list[str] = []
-            capability_source: CapabilitySource = "none"
-            agent_card = None
-            cap_sha256_applied = False
-            # Operator-defined cap-document fields (issue #174): opaque,
-            # unverified passthrough of every key beyond the known schema.
-            # Populated whenever a capability document is fetched, even if
-            # it contributed no `capabilities` — the extension surface and
-            # the capabilities list are independent.
-            cap_metadata: dict[str, Any] = {}
-
-            effective_descriptor_url: str | None = None
-            descriptor_source_label: Literal["cap_uri", "well_known", "none"] = "none"
-
-            # Item 3: only treat `cap` as a descriptor when it's
-            # https-fetchable. The fetcher's SSRF guard would reject
-            # other schemes anyway, but routing the decision here lets
-            # well-known still get a chance.
-            cap_is_https = cap_uri is not None and cap_uri.lower().startswith("https://")
-            if cap_is_https:
-                effective_descriptor_url = cap_uri
-                descriptor_source_label = "cap_uri"
-
-            # Item 4 + path validation: well-known accepts a bare RFC
-            # 8615 suffix (e.g. ``agent-card.json``) or an absolute
-            # origin path (e.g. ``/.well-known/agent-card.json``,
-            # ``/not-well-known/other-card.json``, per draft Figure 3).
-            # The validator constrains the character class on both
-            # shapes so a forged SVCB can't steer the fetch off origin.
-            if effective_descriptor_url is None and well_known_path:
-                from dns_aid.utils.validation import (
-                    ValidationError,
-                    validate_well_known_path,
-                )
-
-                try:
-                    safe_wk = validate_well_known_path(well_known_path)
-                except ValidationError as exc:
-                    logger.warning(
-                        "well-known SvcParamKey rejected — skipping descriptor fetch",
-                        fqdn=fqdn,
-                        well_known_path=well_known_path,
-                        reason=str(exc),
-                    )
-                    safe_wk = None
-
-                if safe_wk:
-                    # SVCB target is the host serving the well-known
-                    # path. Strip any trailing dot for URL construction.
-                    wk_host = target.rstrip(".")
-                    if safe_wk.startswith("/"):
-                        # Absolute origin path — use as-is. Draft Figure
-                        # 3 includes values outside ``/.well-known/`` so
-                        # we don't force a prefix here.
-                        effective_descriptor_url = f"https://{wk_host}{safe_wk}"
-                    else:
-                        effective_descriptor_url = f"https://{wk_host}/.well-known/{safe_wk}"
-                    descriptor_source_label = "well_known"
-
-            # Non-https `cap` (URN, JSON-Ref, etc.) with no fetchable
-            # well-known is a metadata-only locator: keep it on the
-            # record but don't try to fetch it.
-            if effective_descriptor_url is None and cap_uri is not None and not cap_is_https:
-                logger.debug(
-                    "cap is non-https locator and no well-known fallback — "
-                    "keeping cap on record but skipping descriptor fetch",
-                    fqdn=fqdn,
-                    cap_uri=cap_uri,
-                )
-
-            if effective_descriptor_url:
-                # Per-agent total-time budget on descriptor fetch.
-                # fetch_cap_document already times out individual HTTP
-                # operations, but a chain of redirects + DNS + TLS can
-                # still pile up; cap the whole fetch so one slow agent
-                # can't stall a bulk-discovery loop.
-                from dns_aid.core.cap_fetcher import CapDigestMismatchError
-
-                cap_doc = None
-                descriptor_reachable = True
-                try:
-                    cap_doc = await asyncio.wait_for(
-                        fetch_cap_document(effective_descriptor_url, expected_sha256=cap_sha256),
-                        timeout=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
-                    )
-                except TimeoutError:
-                    descriptor_reachable = False
-                    logger.warning(
-                        "Descriptor fetch exceeded per-agent budget — "
-                        "recording capability_source=descriptor_unreachable",
-                        fqdn=fqdn,
-                        descriptor_url=effective_descriptor_url,
-                        budget_seconds=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
-                    )
-                except CapDigestMismatchError as exc:
-                    # Per draft §6.1: digest mismatch MUST cause us to
-                    # refuse the record. Don't fall back to TXT — the
-                    # operator pinned a specific document and the host
-                    # served something different. Drop the record so
-                    # callers don't see an integrity-pinned-looking
-                    # AgentRecord whose capabilities came from elsewhere.
-                    logger.warning(
-                        "cap-sha256 digest mismatch — refusing record",
-                        fqdn=fqdn,
-                        descriptor_url=effective_descriptor_url,
-                        expected=exc.expected,
-                        actual=exc.actual,
-                    )
-                    return None
-
-                # Reachability signal: the operator declared a descriptor
-                # locator (cap or well-known) but we couldn't pull bytes
-                # off the wire. Distinct from "no descriptor declared",
-                # so consumers can tell transient outages from
-                # mis-configurations.
-                if cap_doc is None and descriptor_reachable:
-                    descriptor_reachable = False
-                    logger.debug(
-                        "Descriptor fetch returned no document",
-                        fqdn=fqdn,
-                        descriptor_url=effective_descriptor_url,
-                    )
-
-                # Surface operator-defined cap-document fields regardless of
-                # whether the document also carried `capabilities` — trust is
-                # the caller's judgment via cap_sha256_verified (issue #174).
-                if cap_doc and cap_doc.metadata:
-                    cap_metadata = cap_doc.metadata
-
-                if cap_doc and cap_doc.capabilities:
-                    capabilities = cap_doc.capabilities
-                    capability_source = descriptor_source_label
-                    # If cap_sha256 was supplied AND the fetcher accepted
-                    # the bytes (it did not raise CapDigestMismatchError),
-                    # the integrity pin was actually applied to these
-                    # bytes. Record that as a separate boolean so
-                    # downstream consumers don't have to guess from the
-                    # mere presence of cap_sha256.
-                    if cap_sha256 is not None:
-                        cap_sha256_applied = True
-                    logger.debug(
-                        "Capabilities fetched from descriptor URL",
-                        fqdn=fqdn,
-                        descriptor_url=effective_descriptor_url,
-                        source=descriptor_source_label,
-                        capabilities=capabilities,
-                        cap_sha256_applied=cap_sha256_applied,
-                    )
-                elif not descriptor_reachable:
-                    capability_source = "descriptor_unreachable"
-
-                # Reuse raw data as A2AAgentCard (avoids redundant fetch later)
-                if cap_doc and cap_doc.raw_data:
-                    try:
-                        agent_card = A2AAgentCard.from_dict(cap_doc.raw_data)
-                        logger.debug(
-                            "Parsed A2A Agent Card from descriptor response",
-                            fqdn=fqdn,
-                            descriptor_source=descriptor_source_label,
-                            card_name=agent_card.name,
-                            skills_count=len(agent_card.skills),
-                        )
-                    except Exception:
-                        pass  # Not an agent card format — that's fine
-
-            # Tier 2: If cap_uri didn't yield capabilities but we parsed an
-            # A2A Agent Card from it, extract skills → capabilities now
-            if not capabilities and agent_card and agent_card.skills:
-                capabilities = agent_card.to_capabilities()
-                capability_source = "agent_card"
-                logger.debug(
-                    "Capabilities from A2A Agent Card (cap_uri response)",
-                    fqdn=fqdn,
-                    capabilities=capabilities,
-                )
-
-            # Tier 4: TXT record fallback (lowest priority)
-            if not capabilities:
-                capabilities = await _query_capabilities(fqdn)
-                if capabilities:
-                    capability_source = "txt_fallback"
-
-            # Dangling cap_sha256: a
-            # `cap_sha256` value on the SVCB combined with capabilities
-            # that came from TXT or nowhere is a footgun — the pin
-            # isn't covering the bytes the caller will see. We keep the
-            # SvcParamKey value on the record for transparency (it tells
-            # consumers the operator *intended* an integrity pin) but
-            # the `cap_sha256_verified` flag clearly marks whether the
-            # pin was applied. Surface the dangling case as a warning
-            # for log scrapers.
-            if cap_sha256 is not None and not cap_sha256_applied:
-                logger.warning(
-                    "cap_sha256 declared but not applied — record carries the "
-                    "SvcParamKey value but the integrity pin did not cover the "
-                    "capabilities returned",
-                    fqdn=fqdn,
-                    declared_cap_sha256=cap_sha256,
-                    capability_source=capability_source,
-                    warning_class="dns_aid.dangling_cap_sha256",
-                )
+            # Capability tiers (descriptor fetch, agent card, TXT); shared
+            # with the TXT fallback path. None means refuse (digest mismatch).
+            descriptor = await _resolve_descriptor(
+                fqdn, target, cap_uri, cap_sha256, well_known_path
+            )
+            if descriptor is None:
+                return None
+            capabilities = descriptor.capabilities
+            capability_source = descriptor.capability_source
+            agent_card = descriptor.agent_card
+            cap_sha256_applied = descriptor.cap_sha256_applied
+            cap_metadata = descriptor.cap_metadata
 
             return AgentRecord(
                 name=name,
@@ -1097,6 +916,410 @@ def _parse_svcb_custom_params(svcb_text: str) -> dict[str, str]:
             custom_params[key] = value
 
     return custom_params
+
+
+@dataclass
+class _Descriptor:
+    """What the capability-document tiers resolved for one record."""
+
+    capabilities: list[str]
+    capability_source: CapabilitySource
+    agent_card: A2AAgentCard | None
+    cap_sha256_applied: bool
+    cap_metadata: dict[str, Any]
+
+
+async def _resolve_descriptor(
+    fqdn: str,
+    target: str,
+    cap_uri: str | None,
+    cap_sha256: str | None,
+    well_known_path: str | None,
+) -> _Descriptor | None:
+    """Run the capability tiers (descriptor fetch, agent card, TXT) for a record.
+
+    Shared by the SVCB path and the TXT fallback so both apply the same
+    safeguards: the per-agent fetch budget, the ``cap-sha256`` pin (a
+    mismatch refuses the record), the well-known fallback, ``cap_metadata``
+    and the dangling-pin warning. Returns None when the record must be
+    refused (digest mismatch).
+    """
+    # Descriptor-fetch precedence (local dns-aid-core convention,
+    # NOT spec-mandated — draft §6.1 names only well-known as the
+    # source). When both `cap` and `well-known` are present we
+    # prefer the explicit locator if it's https-fetchable; if it
+    # isn't (URN, JSON-Ref, non-https scheme), we fall back to
+    # the reconstructed well-known URL rather than treating the
+    # non-fetchable `cap` as terminal.
+    capabilities: list[str] = []
+    capability_source: CapabilitySource = "none"
+    agent_card = None
+    cap_sha256_applied = False
+    # Operator-defined cap-document fields (issue #174): opaque,
+    # unverified passthrough of every key beyond the known schema.
+    # Populated whenever a capability document is fetched, even if
+    # it contributed no `capabilities` — the extension surface and
+    # the capabilities list are independent.
+    cap_metadata: dict[str, Any] = {}
+
+    effective_descriptor_url: str | None = None
+    descriptor_source_label: Literal["cap_uri", "well_known", "none"] = "none"
+
+    # Item 3: only treat `cap` as a descriptor when it's
+    # https-fetchable. The fetcher's SSRF guard would reject
+    # other schemes anyway, but routing the decision here lets
+    # well-known still get a chance.
+    cap_is_https = cap_uri is not None and cap_uri.lower().startswith("https://")
+    if cap_is_https:
+        effective_descriptor_url = cap_uri
+        descriptor_source_label = "cap_uri"
+
+    # Item 4 + path validation: well-known accepts a bare RFC
+    # 8615 suffix (e.g. ``agent-card.json``) or an absolute
+    # origin path (e.g. ``/.well-known/agent-card.json``,
+    # ``/not-well-known/other-card.json``, per draft Figure 3).
+    # The validator constrains the character class on both
+    # shapes so a forged SVCB can't steer the fetch off origin.
+    if effective_descriptor_url is None and well_known_path:
+        from dns_aid.utils.validation import (
+            ValidationError,
+            validate_well_known_path,
+        )
+
+        try:
+            safe_wk = validate_well_known_path(well_known_path)
+        except ValidationError as exc:
+            logger.warning(
+                "well-known SvcParamKey rejected — skipping descriptor fetch",
+                fqdn=fqdn,
+                well_known_path=well_known_path,
+                reason=str(exc),
+            )
+            safe_wk = None
+
+        if safe_wk:
+            # SVCB target is the host serving the well-known
+            # path. Strip any trailing dot for URL construction.
+            wk_host = target.rstrip(".")
+            if safe_wk.startswith("/"):
+                # Absolute origin path — use as-is. Draft Figure
+                # 3 includes values outside ``/.well-known/`` so
+                # we don't force a prefix here.
+                effective_descriptor_url = f"https://{wk_host}{safe_wk}"
+            else:
+                effective_descriptor_url = f"https://{wk_host}/.well-known/{safe_wk}"
+            descriptor_source_label = "well_known"
+
+    # Non-https `cap` (URN, JSON-Ref, etc.) with no fetchable
+    # well-known is a metadata-only locator: keep it on the
+    # record but don't try to fetch it.
+    if effective_descriptor_url is None and cap_uri is not None and not cap_is_https:
+        logger.debug(
+            "cap is non-https locator and no well-known fallback — "
+            "keeping cap on record but skipping descriptor fetch",
+            fqdn=fqdn,
+            cap_uri=cap_uri,
+        )
+
+    if effective_descriptor_url:
+        # Per-agent total-time budget on descriptor fetch.
+        # fetch_cap_document already times out individual HTTP
+        # operations, but a chain of redirects + DNS + TLS can
+        # still pile up; cap the whole fetch so one slow agent
+        # can't stall a bulk-discovery loop.
+        from dns_aid.core.cap_fetcher import CapDigestMismatchError
+
+        cap_doc = None
+        descriptor_reachable = True
+        try:
+            cap_doc = await asyncio.wait_for(
+                fetch_cap_document(effective_descriptor_url, expected_sha256=cap_sha256),
+                timeout=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
+            )
+        except TimeoutError:
+            descriptor_reachable = False
+            logger.warning(
+                "Descriptor fetch exceeded per-agent budget — "
+                "recording capability_source=descriptor_unreachable",
+                fqdn=fqdn,
+                descriptor_url=effective_descriptor_url,
+                budget_seconds=_DESCRIPTOR_FETCH_BUDGET_SECONDS,
+            )
+        except CapDigestMismatchError as exc:
+            # Per draft §6.1: digest mismatch MUST cause us to
+            # refuse the record. Don't fall back to TXT — the
+            # operator pinned a specific document and the host
+            # served something different. Drop the record so
+            # callers don't see an integrity-pinned-looking
+            # AgentRecord whose capabilities came from elsewhere.
+            logger.warning(
+                "cap-sha256 digest mismatch — refusing record",
+                fqdn=fqdn,
+                descriptor_url=effective_descriptor_url,
+                expected=exc.expected,
+                actual=exc.actual,
+            )
+            return None
+
+        # Reachability signal: the operator declared a descriptor
+        # locator (cap or well-known) but we couldn't pull bytes
+        # off the wire. Distinct from "no descriptor declared",
+        # so consumers can tell transient outages from
+        # mis-configurations.
+        if cap_doc is None and descriptor_reachable:
+            descriptor_reachable = False
+            logger.debug(
+                "Descriptor fetch returned no document",
+                fqdn=fqdn,
+                descriptor_url=effective_descriptor_url,
+            )
+
+        # Surface operator-defined cap-document fields regardless of
+        # whether the document also carried `capabilities` — trust is
+        # the caller's judgment via cap_sha256_verified (issue #174).
+        if cap_doc and cap_doc.metadata:
+            cap_metadata = cap_doc.metadata
+
+        if cap_doc and cap_doc.capabilities:
+            capabilities = cap_doc.capabilities
+            capability_source = descriptor_source_label
+            # If cap_sha256 was supplied AND the fetcher accepted
+            # the bytes (it did not raise CapDigestMismatchError),
+            # the integrity pin was actually applied to these
+            # bytes. Record that as a separate boolean so
+            # downstream consumers don't have to guess from the
+            # mere presence of cap_sha256.
+            if cap_sha256 is not None:
+                cap_sha256_applied = True
+            logger.debug(
+                "Capabilities fetched from descriptor URL",
+                fqdn=fqdn,
+                descriptor_url=effective_descriptor_url,
+                source=descriptor_source_label,
+                capabilities=capabilities,
+                cap_sha256_applied=cap_sha256_applied,
+            )
+        elif not descriptor_reachable:
+            capability_source = "descriptor_unreachable"
+
+        # Reuse raw data as A2AAgentCard (avoids redundant fetch later)
+        if cap_doc and cap_doc.raw_data:
+            try:
+                agent_card = A2AAgentCard.from_dict(cap_doc.raw_data)
+                logger.debug(
+                    "Parsed A2A Agent Card from descriptor response",
+                    fqdn=fqdn,
+                    descriptor_source=descriptor_source_label,
+                    card_name=agent_card.name,
+                    skills_count=len(agent_card.skills),
+                )
+            except Exception:
+                pass  # Not an agent card format — that's fine
+
+    # Tier 2: If cap_uri didn't yield capabilities but we parsed an
+    # A2A Agent Card from it, extract skills → capabilities now
+    if not capabilities and agent_card and agent_card.skills:
+        capabilities = agent_card.to_capabilities()
+        capability_source = "agent_card"
+        logger.debug(
+            "Capabilities from A2A Agent Card (cap_uri response)",
+            fqdn=fqdn,
+            capabilities=capabilities,
+        )
+
+    # Tier 4: TXT record fallback (lowest priority)
+    if not capabilities:
+        capabilities = await _query_capabilities(fqdn)
+        if capabilities:
+            capability_source = "txt_fallback"
+
+    # Dangling cap_sha256: a
+    # `cap_sha256` value on the SVCB combined with capabilities
+    # that came from TXT or nowhere is a footgun — the pin
+    # isn't covering the bytes the caller will see. We keep the
+    # SvcParamKey value on the record for transparency (it tells
+    # consumers the operator *intended* an integrity pin) but
+    # the `cap_sha256_verified` flag clearly marks whether the
+    # pin was applied. Surface the dangling case as a warning
+    # for log scrapers.
+    if cap_sha256 is not None and not cap_sha256_applied:
+        logger.warning(
+            "cap_sha256 declared but not applied — record carries the "
+            "SvcParamKey value but the integrity pin did not cover the "
+            "capabilities returned",
+            fqdn=fqdn,
+            declared_cap_sha256=cap_sha256,
+            capability_source=capability_source,
+            warning_class="dns_aid.dangling_cap_sha256",
+        )
+
+    return _Descriptor(
+        capabilities=capabilities,
+        capability_source=capability_source,
+        agent_card=agent_card,
+        cap_sha256_applied=cap_sha256_applied,
+        cap_metadata=cap_metadata,
+    )
+
+
+async def _try_txt_fallback(
+    resolver: dns.asyncresolver.Resolver,
+    fqdn: str,
+    name: str,
+    domain: str,
+    protocol: Protocol,
+    *,
+    legacy_resolved: bool = False,
+) -> AgentRecord | None:
+    """Last-resort TXT-encoded fallback when SVCB / HTTPS RR aren't available.
+
+    Used by ``_query_single_agent`` when the authoritative DNS server doesn't
+    expose SVCB (older DNS appliances, smaller hosted providers, self-hosted
+    DNS that hasn't adopted SVCB yet). Looks for a ``v=1`` agent record
+    encoded inside a TXT RR at the same FQDN the SVCB lookup targeted —
+    the draft-02 flat owner name, or the legacy -01 shape when the caller
+    reached this tier via the opt-in legacy fallback (``legacy_resolved=True``
+    is then stamped on the returned record, mirroring the SVCB path).
+
+    Returns a complete :class:`AgentRecord` when a v=1 fallback record is
+    present and parses cleanly. Returns ``None`` when:
+
+    - No TXT records exist at the FQDN
+    - TXT records exist but none carry a v=1 marker (the publisher only
+      writes metadata TXT, no endpoint fallback)
+    - Parsing fails (malformed body, missing required field)
+
+    Coexists with metadata TXT (``capabilities=`` and friends) on the same
+    FQDN: parser ignores RRs that lack ``v=`` so they fall through. When
+    multiple v=1 RRs are present (out-of-spec), the first parses-able one
+    wins and a warning is logged.
+
+    Mitigates the SVCB-less-DNS reach gap; mirrors the SVCB SvcParam set
+    in TXT key=value form so the consumer parser stays symmetric with
+    :func:`_parse_svcb_custom_params`.
+    """
+    from dns_aid.core._txt_fallback import parse_txt_fallback, txt_fallback_enabled
+
+    # Opt-in, like publishing: TXT is writable by more parties than SVCB in
+    # shared zones, so it is not read unless the operator turned it on.
+    if not txt_fallback_enabled():
+        return None
+
+    try:
+        answers = await resolver.resolve(fqdn, "TXT")
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return None
+    except Exception as exc:  # noqa: BLE001 — fallback is best-effort
+        logger.debug("txt_fallback.resolve_failed", fqdn=fqdn, error=str(exc))
+        return None
+
+    matches: list[Any] = []
+    for rdata in answers:
+        parsed = parse_txt_fallback(rdata.strings)
+        if parsed is not None:
+            matches.append(parsed)
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        logger.warning(
+            "txt_fallback.multiple_records",
+            fqdn=fqdn,
+            count=len(matches),
+            note="using first; spec does not permit multiple v=1 records at one FQDN",
+        )
+    fallback = matches[0]
+
+    # Cross-validate the parsed ``alpn=`` against the protocol probe the
+    # caller queried with. Under draft-02 the flat owner name carries no
+    # protocol, so the probe is only a placeholder — but a disagreement is
+    # still worth surfacing (hand-edited alpn, or a record reached via the
+    # legacy -01 shape whose ``_{protocol}`` label diverged from the body).
+    # Multi-value alpn (``a2a,h2``) is a list, as on the SVCB path; one
+    # concatenated token would never name a protocol and always fall back
+    # to the probe.
+    alpn_values = [a.strip().lower() for a in (fallback.alpn or "").split(",") if a.strip()]
+    if alpn_values and protocol.value not in alpn_values:
+        logger.warning(
+            "txt_fallback.alpn_mismatch",
+            fqdn=fqdn,
+            probe_protocol=protocol.value,
+            txt_alpn=fallback.alpn,
+            note="record signal wins after reconciliation (draft-02: protocol lives in the record)",
+        )
+
+    # Mirror the SVCB path exactly: normalize the raw bap value (scalar
+    # draft-02 form; legacy comma lists collapse with a warning) and stamp
+    # the record's true protocol (bap, then alpn) over the query probe so
+    # TXT-sourced records label identically to SVCB-sourced ones and the
+    # JWS binding check (payload.alpn == agent.protocol.value) holds.
+    from dns_aid.core.bap import normalize_bap
+
+    bap = normalize_bap(fallback.bap)
+    protocol = _reconcile_protocol(protocol, bap, alpn_values)
+
+    # Same capability tiers as the SVCB path (fetch budget, cap-sha256 pin,
+    # well-known fallback, cap_metadata, dangling-pin warning). The TXT tier
+    # inside reads ``capabilities=`` metadata strings and ignores the v=1
+    # record itself.
+    descriptor = await _resolve_descriptor(
+        fqdn, fallback.target, fallback.cap, fallback.cap_sha256, fallback.well_known
+    )
+    if descriptor is None:
+        return None  # cap-sha256 mismatch: refuse, exactly like SVCB
+
+    logger.info(
+        "Resolved agent via TXT fallback (SVCB unavailable)",
+        fqdn=fqdn,
+        target=fallback.target,
+        port=fallback.port,
+    )
+
+    # TXT bodies are attacker-shapable free text: a record can pass the
+    # wire-format parser yet still trip an AgentRecord field validator
+    # (underscore target, oversized connect-meta, ...). Catch that case
+    # HERE with a specific event so operators can tell "TXT present but
+    # model-invalid" apart from a plain DNS miss — the outer
+    # _query_single_agent handler would otherwise swallow it at debug as
+    # a generic query failure.
+    from pydantic import ValidationError as PydanticValidationError
+
+    try:
+        return AgentRecord(
+            name=name,
+            domain=domain,
+            protocol=protocol,
+            target_host=fallback.target,
+            port=fallback.port,
+            ipv4_hint=fallback.ipv4hint,
+            ipv6_hint=fallback.ipv6hint,
+            capabilities=descriptor.capabilities,
+            legacy_resolved=legacy_resolved,
+            cap_uri=fallback.cap,
+            cap_sha256=fallback.cap_sha256,
+            cap_sha256_verified=descriptor.cap_sha256_applied,
+            cap_metadata=descriptor.cap_metadata,
+            well_known_path=fallback.well_known,
+            bap=bap,
+            policy_uri=fallback.policy,
+            realm=fallback.realm,
+            sig=fallback.sig,
+            connect_class=fallback.connect_class,
+            connect_meta=fallback.connect_meta,
+            enroll_uri=fallback.enroll_uri,
+            capability_source=descriptor.capability_source,
+            endpoint_source="dns_txt_fallback",
+            agent_card=descriptor.agent_card,
+        )
+    except PydanticValidationError as exc:
+        logger.warning(
+            "txt_fallback.model_rejected",
+            fqdn=fqdn,
+            target=fallback.target,
+            error=str(exc),
+            note="TXT v=1 record parsed but failed AgentRecord validation; skipping",
+        )
+        return None
 
 
 async def _query_capabilities(fqdn: str) -> list[str]:
