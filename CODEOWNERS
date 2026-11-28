@@ -6,26 +6,31 @@
 # See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Default owners for everything (project lead reviews catchall)
-* @iracic82
+* @nicknacnic
 
 # Core protocol engine — both maintainers
-src/dns_aid/core/ @iracic82 @ivanglabbeek
+src/dns_aid/core/ @nicknacnic @IngmarVG-IB
 
 # Policy + standards layer — Ingmar leads
-src/dns_aid/sdk/policy/ @ivanglabbeek @iracic82
+src/dns_aid/sdk/policy/ @IngmarVG-IB @nicknacnic
 
 # DNS backends
-src/dns_aid/backends/ @iracic82
+src/dns_aid/backends/ @nicknacnic
 
 # MCP server
-src/dns_aid/mcp/ @iracic82
+src/dns_aid/mcp/ @nicknacnic
 
 # CLI
-src/dns_aid/cli/ @iracic82
+src/dns_aid/cli/ @nicknacnic
 
-# CI/CD and governance — both maintainers approve
-.github/ @iracic82 @ivanglabbeek
-GOVERNANCE.md @iracic82 @ivanglabbeek
-MAINTAINERS.md @iracic82 @ivanglabbeek
-SECURITY.md @iracic82 @ivanglabbeek
-TRADEMARKS.md @iracic82 @ivanglabbeek
+# CI/CD and governance — all three committers
+.github/ @nicknacnic @IngmarVG-IB @iracic82
+GOVERNANCE.md @nicknacnic @IngmarVG-IB @iracic82
+MAINTAINERS.md @nicknacnic @IngmarVG-IB @iracic82
+SECURITY.md @nicknacnic @IngmarVG-IB @iracic82
+TRADEMARKS.md @nicknacnic @IngmarVG-IB @iracic82
+
+# Python dependency manifests — both maintainers approve so Dependabot pip
+# bumps surface to the same reviewer pair as github-actions bumps in .github/
+pyproject.toml @nicknacnic @IngmarVG-IB
+uv.lock @nicknacnic @IngmarVG-IB
