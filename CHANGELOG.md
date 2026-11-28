@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (CVE-2026-119194..119197). It is pulled transitively via `google-auth` ->
   `pyasn1-modules`.
 
+### Fixed
+
+- **`dns-aid index sync` no longer writes `protocol=unknown` on real DNS
+  backends.** The sync read each agent's protocol from
+  `record["data"]["params"]`, which only `MockBackend` supplies; Route 53,
+  Cloudflare, NS1, Cloud DNS, ddns, Akamai, BloxOne and NIOS return SVCB rdata
+  as text in `record["values"]`. A sync therefore replaced a correct
+  `_index._agents` entry such as `chat:mcp` with `chat:unknown`. The protocol is
+  now read from the SVCB rdata (`bap`/`key65402`, then `alpn`), keeping
+  `data.params` as the mock fallback (#227).
+
 ## [0.28.1] - 2026-08-09
 
 ### Changed

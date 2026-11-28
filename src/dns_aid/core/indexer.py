@@ -363,6 +363,40 @@ async def delete_index(
         return False
 
 
+def _svcb_protocol_token(record: dict) -> str | None:
+    """Pull the raw ``bap`` (preferred) or ``alpn`` token off a primary SVCB record.
+
+    Real backends return SVCB rdata as presentation-format strings in
+    ``record["values"]`` (``"1 target. alpn=mcp key65402=mcp=1.0 ..."``);
+    only ``MockBackend`` additionally supplies a ``data.params`` dict, kept
+    here as a fallback. ``bap`` may appear as ``bap`` or ``key65402`` and is
+    parsed with the discoverer's SVCB parser; ``alpn`` is not a DNS-AID key
+    so it is read separately.
+    """
+    import shlex
+
+    from dns_aid.core.discoverer import _parse_svcb_custom_params
+
+    values = record.get("values") or []
+    if values and isinstance(values[0], str):
+        text = values[0]
+        bap = _parse_svcb_custom_params(text).get("bap")
+        if bap:
+            return bap
+        try:
+            parts = shlex.split(text)
+        except ValueError:
+            parts = []
+        for part in parts:
+            key, sep, value = part.partition("=")
+            if sep and key.strip().lower() == "alpn" and value:
+                return value
+
+    params = (record.get("data") or {}).get("params") or {}
+    raw = params.get("bap") or params.get("alpn")
+    return raw if isinstance(raw, str) and raw else None
+
+
 async def sync_index(
     domain: str,
     backend: DNSBackend,
@@ -420,9 +454,7 @@ async def sync_index(
         primary = primary_records.get(name)
         if not primary:
             return UNKNOWN_PROTOCOL
-        params = primary.get("data", {}).get("params", {}) or {}
-        # SVCB params from list_records may carry stray quoting.
-        raw = params.get("bap") or params.get("alpn")
+        raw = _svcb_protocol_token(primary)
         if not raw:
             return UNKNOWN_PROTOCOL
         cleaned = raw.strip('"') if isinstance(raw, str) else raw
