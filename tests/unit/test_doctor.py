@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import types
 
@@ -20,6 +21,13 @@ from dns_aid.doctor import (
     _get_module_version,
     _suppress_logs,
     run_checks,
+)
+
+# The doctor reports a missing install hint, not credential status, when the
+# akamai-edgedns extra is absent, so the credential-state tests need the SDK.
+requires_akamai = pytest.mark.skipif(
+    importlib.util.find_spec("akamai") is None,
+    reason="akamai-edgedns extra not installed",
 )
 
 AKAMAI_ENV = [
@@ -246,6 +254,7 @@ class TestCheckBackends:
         assert checks["AWS Route 53"].status == "warn"
         assert "no AWS credentials" in checks["AWS Route 53"].detail
 
+    @requires_akamai
     def test_akamai_partial_env_fails(self, monkeypatch):
         monkeypatch.setenv("AKAMAI_HOST", "akab-x.luna.akamaiapis.net")
         monkeypatch.setenv("AKAMAI_EDGERC", "definitely-missing-edgerc")
@@ -255,6 +264,7 @@ class TestCheckBackends:
         assert "partial credentials" in result.detail
         assert "AKAMAI_CLIENT_TOKEN" in result.detail
 
+    @requires_akamai
     def test_akamai_all_env_passes(self, monkeypatch):
         for var in AKAMAI_ENV:
             monkeypatch.setenv(var, "value")
@@ -263,6 +273,7 @@ class TestCheckBackends:
         assert result.status == "pass"
         assert "env vars" in result.detail
 
+    @requires_akamai
     def test_akamai_edgerc_file_passes(self, monkeypatch, tmp_path):
         edgerc = tmp_path / "edgerc"
         edgerc.write_text("[default]\n")
@@ -272,6 +283,7 @@ class TestCheckBackends:
         assert result.status == "pass"
         assert ".edgerc" in result.detail
 
+    @requires_akamai
     def test_akamai_no_credentials_warns(self, monkeypatch, tmp_path):
         monkeypatch.setenv("AKAMAI_EDGERC", str(tmp_path / "missing-edgerc"))
         checks = _by_label(_check_backends())

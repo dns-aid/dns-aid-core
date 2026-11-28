@@ -5,12 +5,18 @@
 
 from __future__ import annotations
 
+import importlib.util
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from dns_aid.backends.akamai_edgedns import AkamaiEdgeDNSBackend
+
+requires_akamai = pytest.mark.skipif(
+    importlib.util.find_spec("akamai") is None,
+    reason="akamai-edgedns extra not installed",
+)
 
 # ---------------------------------------------------------------------------
 # Initialization
@@ -115,6 +121,7 @@ class TestAkamaiEdgeDNSBackendProperties:
 class TestAkamaiEdgeDNSBackendAuth:
     """Tests for EdgeGrid authentication initialization."""
 
+    @requires_akamai
     def test_ensure_auth_with_env_credentials(self):
         """Real _ensure_auth() initialises EdgeGridAuth from explicit credentials."""
         backend = AkamaiEdgeDNSBackend(
@@ -147,6 +154,7 @@ class TestAkamaiEdgeDNSBackendAuth:
         backend._ensure_auth()
         assert backend._auth is existing_auth
 
+    @requires_akamai
     def test_ensure_auth_falls_back_to_edgerc(self, monkeypatch):
         """When env creds are absent, _ensure_auth() reads credentials from .edgerc."""
         for var in (
